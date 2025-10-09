@@ -2371,4 +2371,146 @@ mod tests {
 		final_tx.set("ordering_test_complete", "true".to_string()).unwrap();
 		final_tx.commit().expect("Final transaction should succeed");
 	}
+
+	#[test]
+	fn test_scan_all_versions() {
+		use std::sync::atomic::Ordering;
+
+		// Create database
+		let db: Database<&str, &str> = Database::new();
+
+		// 1. Opens transaction. Adds some keys and values. Commits transaction.
+		let mut tx1 = db.transaction(true);
+		tx1.set("alpha", "alpha_v1").unwrap();
+		tx1.set("beta", "beta_v1").unwrap();
+		tx1.set("gamma", "gamma_v1").unwrap();
+		tx1.commit().unwrap();
+
+		// Verify those modifications are in the datastore
+		let mut verify_tx1 = db.transaction(false);
+		assert_eq!(verify_tx1.get("alpha").unwrap(), Some("alpha_v1"));
+		assert_eq!(verify_tx1.get("beta").unwrap(), Some("beta_v1"));
+		assert_eq!(verify_tx1.get("gamma").unwrap(), Some("gamma_v1"));
+
+		// 2. Opens transaction. Adds some keys+values, modifies some previous keys, and also deletes some keys. Commits transaction.
+		let mut tx2 = db.transaction(true);
+		tx2.set("alpha", "alpha_v2").unwrap(); // Modify existing
+		tx2.set("delta", "delta_v1").unwrap(); // Add new
+		tx2.del("beta").unwrap(); // Delete existing
+		tx2.commit().unwrap();
+
+		// Verify those modifications are in the datastore
+		let mut verify_tx2 = db.transaction(false);
+		assert_eq!(verify_tx2.get("alpha").unwrap(), Some("alpha_v2"));
+		assert_eq!(verify_tx2.get("delta").unwrap(), Some("delta_v1"));
+		assert_eq!(verify_tx2.get("beta").unwrap(), None); // Deleted
+		assert_eq!(verify_tx2.get("gamma").unwrap(), Some("gamma_v1")); // Unchanged
+
+		// 3. Disable merge queue worker
+		db.background_threads_enabled.store(false, Ordering::Relaxed);
+
+		// 4. Opens transaction. Adds some keys+values, modifies some previous keys, and also deletes some keys. Commits transaction.
+		let mut tx3 = db.transaction(true);
+		tx3.set("alpha", "alpha_v3").unwrap(); // Modify again
+		tx3.set("beta", "beta_v2").unwrap(); // Recreate deleted key
+		tx3.set("epsilon", "epsilon_v1").unwrap(); // Add new
+		tx3.del("gamma").unwrap(); // Delete existing
+		tx3.commit().unwrap();
+
+		// 5. Opens transaction. Adds some keys+values, modifies some previous keys, and also deletes some keys. Commits transaction.
+		let mut tx4 = db.transaction(true);
+		tx4.set("delta", "delta_v2").unwrap(); // Modify existing
+		tx4.set("zeta", "zeta_v1").unwrap(); // Add new
+		tx4.del("epsilon").unwrap(); // Delete recently added key
+		tx4.commit().unwrap();
+
+		// 6. Opens transaction. Adds some keys+values, modifies some previous keys, and also deletes some keys. Calls scan_all_versions.
+		let mut tx5 = db.transaction(true);
+		tx5.set("alpha", "alpha_v4").unwrap(); // Modify in current tx
+		tx5.set("eta", "eta_v1").unwrap(); // Add new in current tx
+		tx5.del("zeta").unwrap(); // Delete in current tx
+
+		// Scan all versions - should see everything from all sources
+		let all_versions = tx5.scan_all_versions("".."zz", None, None).unwrap();
+
+		// Verify comprehensive version history
+		let alpha_versions: Vec<_> =
+			all_versions.iter().filter(|(k, _, _)| *k == "alpha").collect();
+		let beta_versions: Vec<_> = all_versions.iter().filter(|(k, _, _)| *k == "beta").collect();
+		let gamma_versions: Vec<_> =
+			all_versions.iter().filter(|(k, _, _)| *k == "gamma").collect();
+		let _delta_versions: Vec<_> =
+			all_versions.iter().filter(|(k, _, _)| *k == "delta").collect();
+		let epsilon_versions: Vec<_> =
+			all_versions.iter().filter(|(k, _, _)| *k == "epsilon").collect();
+		let zeta_versions: Vec<_> = all_versions.iter().filter(|(k, _, _)| *k == "zeta").collect();
+		let _eta_versions: Vec<_> = all_versions.iter().filter(|(k, _, _)| *k == "eta").collect();
+
+		// alpha: v1 (datastore) -> v2 (datastore) -> v3 (merge queue) -> v4 (current tx) = 4 versions
+		assert!(alpha_versions.len() >= 4, "alpha should have at least 4 versions");
+		assert!(alpha_versions.iter().any(|(_, _, v)| *v == Some("alpha_v1")));
+		assert!(alpha_versions.iter().any(|(_, _, v)| *v == Some("alpha_v2")));
+		assert!(alpha_versions.iter().any(|(_, _, v)| *v == Some("alpha_v3")));
+		assert!(alpha_versions.iter().any(|(_, _, v)| *v == Some("alpha_v4")));
+
+		// beta: v1 (datastore) -> deleted (datastore) -> v2 (merge queue) = 3 versions
+		assert!(
+			beta_versions.len() >= 3,
+			"beta should have at least 3 versions including deletion"
+		);
+		assert!(beta_versions.iter().any(|(_, _, v)| *v == Some("beta_v1")));
+		assert!(beta_versions.iter().any(|(_, _, v)| v.is_none())); // Deletion
+		assert!(beta_versions.iter().any(|(_, _, v)| *v == Some("beta_v2")));
+
+		// gamma: v1 (datastore) -> deleted (merge queue) = 2 versions
+		assert!(
+			gamma_versions.len() >= 2,
+			"gamma should have at least 2 versions including deletion"
+		);
+		assert!(gamma_versions.iter().any(|(_, _, v)| *v == Some("gamma_v1")));
+		assert!(gamma_versions.iter().any(|(_, _, v)| v.is_none())); // Deletion
+
+		// epsilon: v1 (merge queue) -> deleted (merge queue) = 2 versions
+		assert!(
+			epsilon_versions.len() >= 2,
+			"epsilon should have at least 2 versions including deletion"
+		);
+		assert!(epsilon_versions.iter().any(|(_, _, v)| *v == Some("epsilon_v1")));
+		assert!(epsilon_versions.iter().any(|(_, _, v)| v.is_none())); // Deletion
+
+		// zeta: v1 (merge queue) -> deleted (current tx) = should have at least creation, may have deletion
+		assert!(zeta_versions.len() >= 1, "zeta should have at least 1 version");
+		assert!(zeta_versions.iter().any(|(_, _, v)| *v == Some("zeta_v1")));
+		// Note: Current transaction deletion may or may not be visible depending on implementation
+
+		// Verify all versions are chronologically ordered
+		for i in 1..all_versions.len() {
+			let (key_prev, ver_prev, _) = &all_versions[i - 1];
+			let (key_curr, ver_curr, _) = &all_versions[i];
+
+			match key_prev.cmp(key_curr) {
+				std::cmp::Ordering::Equal => {
+					assert!(ver_prev <= ver_curr, "Versions for same key should be chronological");
+				}
+				std::cmp::Ordering::Less => (), // Different keys, correct order
+				std::cmp::Ordering::Greater => {
+					panic!("Keys should be in sorted order");
+				}
+			}
+		}
+
+		// Test skip/limit functionality
+		let limited = tx5.scan_all_versions("".."zz", None, Some(2)).unwrap();
+		let unique_limited_keys: std::collections::BTreeSet<_> =
+			limited.iter().map(|(k, _, _)| k).collect();
+		assert_eq!(unique_limited_keys.len(), 2, "Limit should restrict number of unique keys");
+
+		let skipped = tx5.scan_all_versions("".."zz", Some(1), Some(2)).unwrap();
+		let unique_skipped_keys: std::collections::BTreeSet<_> =
+			skipped.iter().map(|(k, _, _)| k).collect();
+		assert_eq!(unique_skipped_keys.len(), 2, "Skip+limit should work on unique keys");
+
+		// Commit the final transaction successfully
+		tx5.commit().unwrap();
+	}
 }
