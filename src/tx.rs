@@ -111,6 +111,19 @@ where
 		self.mode = IsolationLevel::SerializableSnapshotIsolation;
 		self
 	}
+
+	/// Retrieve all versions of keys and values from the database within a range
+	pub fn scan_all_versions<Q>(
+		&mut self,
+		rng: Range<Q>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<(K, u64, Option<V>)>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.inner.as_mut().unwrap().scan_all_versions(rng, skip, limit)
+	}
 }
 
 // --------------------------------------------------
@@ -741,6 +754,122 @@ where
 		Q: Borrow<K>,
 	{
 		self.scan_any(rng, skip, limit, Direction::Reverse, version)
+	}
+
+	/// Retrieve all versions of keys and values from the database within a range
+	pub fn scan_all_versions<Q>(
+		&mut self,
+		rng: Range<Q>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<(K, u64, Option<V>)>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Compute the range
+		let beg = rng.start.borrow();
+		let end = rng.end.borrow();
+		// Calculate how many items to skip
+		let skip = skip.unwrap_or_default();
+
+		// Track scans if this is a write transaction and we're scanning the latest version
+		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			// Add this range scan entry to the saved scans
+			match self.scanset.range_mut(..=beg).next_back() {
+				// There is no entry for this range scan
+				None => {
+					self.scanset.insert(beg.clone(), end.clone());
+				}
+				// The saved scan stops before this range
+				Some(range) if &*range.1 < beg => {
+					self.scanset.insert(beg.clone(), end.clone());
+				}
+				// The saved scan does not extend far enough
+				Some(range) if &*range.1 < end => {
+					*range.1 = end.clone();
+				}
+				// This range scan is already covered
+				_ => (),
+			};
+		}
+
+		// Simplified approach: collect all unique keys first, then process in order
+		let mut all_keys: std::collections::BTreeSet<K> = std::collections::BTreeSet::new();
+
+		// Collect keys from datastore
+		for entry in self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))) {
+			all_keys.insert(entry.key().clone());
+		}
+
+		// Collect keys from merge queue (all entries for complete history)
+		for entry in self.database.transaction_merge_queue.iter() {
+			for key in entry.value().writeset.range(beg..end).map(|(k, _)| k) {
+				all_keys.insert(key.clone());
+			}
+		}
+
+		// Collect keys from current transaction writeset
+		for key in self.writeset.range(beg.clone()..end.clone()).map(|(k, _)| k) {
+			all_keys.insert(key.clone());
+		}
+
+		let mut res = Vec::new();
+		let mut keys_processed = 0;
+
+		// Process each key in sorted order
+		for key in all_keys.into_iter().skip(skip) {
+			// Apply limit
+			if let Some(l) = limit {
+				if keys_processed >= l {
+					break;
+				}
+			}
+
+			keys_processed += 1;
+
+			// Collect ALL versions first (don't deduplicate yet to preserve history)
+			let mut key_versions: Vec<(u64, Option<V>)> = Vec::new();
+
+			// Get versions from datastore
+			if let Some(entry) = self.database.datastore.get(&key) {
+				let versions = entry.value().read();
+				for (version, value) in versions.all_versions() {
+					let converted_value = value.as_ref().map(|arc| arc.as_ref().clone());
+					key_versions.push((version, converted_value));
+				}
+			}
+
+			// Get versions from merge queue (include ALL entries for complete history)
+			for entry in self.database.transaction_merge_queue.iter() {
+				if let Some(value) = entry.value().writeset.get(&key) {
+					let converted_value = value.as_ref().map(|arc| arc.as_ref().clone());
+					key_versions.push((*entry.key(), converted_value));
+				}
+			}
+
+			// Get version from current transaction
+			if let Some(value) = self.writeset.get(&key) {
+				let converted_value = value.as_ref().map(|arc| arc.as_ref().clone());
+				key_versions.push((self.version, converted_value));
+			}
+
+			// Sort by version and preserve ALL versions (including duplicates for different values at same version)
+			key_versions.sort_by_key(|(version, _)| *version);
+
+			// Only deduplicate exact duplicates (same version AND same value)
+			key_versions.dedup_by(|(v1, val1), (v2, val2)| v1 == v2 && val1 == val2);
+
+			// Add all versions for this key
+			for (version, value) in key_versions {
+				res.push((key.clone(), version, value));
+			}
+		}
+
+		Ok(res)
 	}
 
 	/// Retrieve a count of keys from the database
