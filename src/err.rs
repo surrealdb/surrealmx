@@ -51,6 +51,10 @@ pub enum Error {
 	#[error("Can not fetch value at a future version")]
 	VersionInFuture,
 
+	/// No savepoint has been set.
+	#[error("No savepoint has been set")]
+	NoSavepoint,
+
 	/// A transaction is not persistent.
 	#[error("Transaction is not persistent")]
 	TxCommitNotPersisted(PersistenceError),

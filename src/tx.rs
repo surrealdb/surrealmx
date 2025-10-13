@@ -111,6 +111,40 @@ where
 		self.mode = IsolationLevel::SerializableSnapshotIsolation;
 		self
 	}
+
+	/// Set a savepoint in the transaction for partial rollback
+	/// This method is stackable and can be called multiple times with
+	/// corresponding calls to `rollback_to_savepoint`
+	pub fn set_savepoint(&mut self) -> Result<(), Error> {
+		self.inner.as_mut().unwrap().set_savepoint()
+	}
+
+	/// Rollback the transaction to the most recently set savepoint
+	/// After calling this method, subsequent modifications within this
+	/// transaction can be rolled back by calling `rollback_to_savepoint`
+	/// again if there are more savepoints in the stack
+	pub fn rollback_to_savepoint(&mut self) -> Result<(), Error> {
+		self.inner.as_mut().unwrap().rollback_to_savepoint()
+	}
+}
+
+// --------------------------------------------------
+// SavepointState
+// --------------------------------------------------
+
+/// A savepoint state capturing transaction state at a specific point
+#[derive(Clone)]
+struct SavepointState<K, V>
+where
+	K: Ord + Clone + Debug + Sync + Send + 'static,
+	V: Eq + Clone + Debug + Sync + Send + 'static,
+{
+	/// The readset at the time of the savepoint
+	readset: BTreeSet<K>,
+	/// The scanset at the time of the savepoint
+	scanset: BTreeMap<K, K>,
+	/// The writeset at the time of the savepoint
+	writeset: BTreeMap<K, Option<Arc<V>>>,
 }
 
 // --------------------------------------------------
@@ -147,6 +181,8 @@ where
 	pub(crate) counter_version: Arc<AtomicU64>,
 	/// Threshold after which transaction state is reset
 	reset_threshold: usize,
+	/// Stack of savepoint states for nested partial rollbacks
+	savepoint_stack: Vec<SavepointState<K, V>>,
 }
 
 impl<K, V> TransactionInner<K, V>
@@ -200,6 +236,7 @@ where
 			counter_commit,
 			counter_version,
 			reset_threshold: threshold,
+			savepoint_stack: Vec::new(),
 		}
 	}
 
@@ -265,6 +302,7 @@ where
 		self.readset.clear();
 		self.scanset.clear();
 		self.writeset.clear();
+		self.savepoint_stack.clear();
 		self.counter_commit = counter_commit;
 		self.counter_version = counter_version;
 	}
@@ -289,6 +327,50 @@ where
 		self.done = true;
 		// Clear the transaction entries
 		self.writeset.clear();
+		// Clear savepoint stack
+		self.savepoint_stack.clear();
+		// Continue
+		Ok(())
+	}
+
+	/// Set a savepoint in the transaction for partial rollback
+	/// This method is stackable and can be called multiple times
+	pub fn set_savepoint(&mut self) -> Result<(), Error> {
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Check to see if transaction is writable
+		if self.write == false {
+			return Err(Error::TxNotWritable);
+		}
+		// Push current transaction state onto savepoint stack
+		self.savepoint_stack.push(SavepointState {
+			readset: self.readset.clone(),
+			scanset: self.scanset.clone(),
+			writeset: self.writeset.clone(),
+		});
+		// Continue
+		Ok(())
+	}
+
+	/// Rollback the transaction to the most recently set savepoint
+	/// Pops the latest savepoint from the stack and restores transaction state
+	pub fn rollback_to_savepoint(&mut self) -> Result<(), Error> {
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Check to see if transaction is writable
+		if self.write == false {
+			return Err(Error::TxNotWritable);
+		}
+		// Pop the most recent savepoint from the stack
+		let savepoint = self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
+		// Restore the transaction state to the savepoint
+		self.readset = savepoint.readset;
+		self.scanset = savepoint.scanset;
+		self.writeset = savepoint.writeset;
 		// Continue
 		Ok(())
 	}
@@ -1153,6 +1235,7 @@ where
 #[cfg(test)]
 mod tests {
 
+	use crate::err::Error;
 	use crate::{Database, DatabaseOptions};
 
 	#[test]
@@ -2370,5 +2453,142 @@ mod tests {
 		let mut final_tx = db.transaction(true);
 		final_tx.set("ordering_test_complete", "true".to_string()).unwrap();
 		final_tx.commit().expect("Final transaction should succeed");
+	}
+
+	#[test]
+	fn test_savepoints() {
+		let db: Database<&str, &str> = Database::new();
+
+		// === BASIC SAVEPOINT FUNCTIONALITY ===
+		let mut tx = db.transaction(true);
+		tx.set("initial_key", "initial_value").unwrap();
+
+		// Set a savepoint
+		tx.set_savepoint().unwrap();
+
+		// Make some changes after the savepoint
+		tx.set("savepoint_key", "savepoint_value").unwrap();
+		tx.set("another_key", "another_value").unwrap();
+
+		// Verify the changes exist
+		assert_eq!(tx.get("initial_key").unwrap(), Some("initial_value"));
+		assert_eq!(tx.get("savepoint_key").unwrap(), Some("savepoint_value"));
+		assert_eq!(tx.get("another_key").unwrap(), Some("another_value"));
+
+		// Rollback to savepoint
+		tx.rollback_to_savepoint().unwrap();
+
+		// Verify the rollback worked - changes after savepoint should be gone
+		assert_eq!(tx.get("initial_key").unwrap(), Some("initial_value"));
+		assert_eq!(tx.get("savepoint_key").unwrap(), None);
+		assert_eq!(tx.get("another_key").unwrap(), None);
+
+		// Make new changes after rollback
+		tx.set("new_key", "new_value").unwrap();
+		assert_eq!(tx.get("new_key").unwrap(), Some("new_value"));
+
+		// === NESTED STACKABLE SAVEPOINTS ===
+		// Initial state: {initial_key, new_key}
+		tx.set("base", "value").unwrap();
+
+		// First nested savepoint
+		tx.set_savepoint().unwrap();
+		tx.set("level1_key1", "level1_value1").unwrap();
+		tx.set("level1_key2", "level1_value2").unwrap();
+
+		// Second nested savepoint
+		tx.set_savepoint().unwrap();
+		tx.set("level2_key1", "level2_value1").unwrap();
+		tx.set("level1_key1", "modified_at_level2").unwrap(); // Modify existing key
+
+		// Third nested savepoint
+		tx.set_savepoint().unwrap();
+		tx.set("level3_key1", "level3_value1").unwrap();
+
+		// Verify all data is present
+		assert_eq!(tx.get("base").unwrap(), Some("value"));
+		assert_eq!(tx.get("level1_key1").unwrap(), Some("modified_at_level2"));
+		assert_eq!(tx.get("level1_key2").unwrap(), Some("level1_value2"));
+		assert_eq!(tx.get("level2_key1").unwrap(), Some("level2_value1"));
+		assert_eq!(tx.get("level3_key1").unwrap(), Some("level3_value1"));
+
+		// Rollback from level 3 to level 2
+		tx.rollback_to_savepoint().unwrap();
+		assert_eq!(tx.get("base").unwrap(), Some("value"));
+		assert_eq!(tx.get("level1_key1").unwrap(), Some("modified_at_level2"));
+		assert_eq!(tx.get("level1_key2").unwrap(), Some("level1_value2"));
+		assert_eq!(tx.get("level2_key1").unwrap(), Some("level2_value1"));
+		assert_eq!(tx.get("level3_key1").unwrap(), None); // Gone after rollback
+
+		// Add new data at level 2
+		tx.set("level2_new", "after_rollback").unwrap();
+
+		// Rollback from level 2 to level 1
+		tx.rollback_to_savepoint().unwrap();
+		assert_eq!(tx.get("base").unwrap(), Some("value"));
+		assert_eq!(tx.get("level1_key1").unwrap(), Some("level1_value1")); // Restored original
+		assert_eq!(tx.get("level1_key2").unwrap(), Some("level1_value2"));
+		assert_eq!(tx.get("level2_key1").unwrap(), None); // Gone
+		assert_eq!(tx.get("level2_new").unwrap(), None); // Gone
+		assert_eq!(tx.get("level3_key1").unwrap(), None); // Still gone
+
+		// Add final data and commit
+		tx.set("final", "committed_data").unwrap();
+		tx.commit().unwrap();
+
+		// === VERIFY FINAL STATE ===
+		let mut tx_verify = db.transaction(false);
+		// From basic test
+		assert_eq!(tx_verify.get("initial_key").unwrap(), Some("initial_value"));
+		assert_eq!(tx_verify.get("new_key").unwrap(), Some("new_value"));
+		assert_eq!(tx_verify.get("savepoint_key").unwrap(), None);
+		assert_eq!(tx_verify.get("another_key").unwrap(), None);
+		// From nested test
+		assert_eq!(tx_verify.get("base").unwrap(), Some("value"));
+		assert_eq!(tx_verify.get("level1_key1").unwrap(), Some("level1_value1"));
+		assert_eq!(tx_verify.get("level1_key2").unwrap(), Some("level1_value2"));
+		assert_eq!(tx_verify.get("final").unwrap(), Some("committed_data"));
+		assert_eq!(tx_verify.get("level2_key1").unwrap(), None);
+		assert_eq!(tx_verify.get("level2_new").unwrap(), None);
+		assert_eq!(tx_verify.get("level3_key1").unwrap(), None);
+	}
+
+	#[test]
+	fn test_savepoint_errors() {
+		let db: Database<&str, &str> = Database::new();
+
+		// Test error when no savepoint is set
+		let mut tx = db.transaction(true);
+		assert!(matches!(tx.rollback_to_savepoint(), Err(Error::NoSavepoint)));
+
+		// Test error on read-only transaction
+		let mut tx_readonly = db.transaction(false);
+		assert!(matches!(tx_readonly.set_savepoint(), Err(Error::TxNotWritable)));
+		assert!(matches!(tx_readonly.rollback_to_savepoint(), Err(Error::TxNotWritable)));
+
+		// Test error on closed transaction
+		let mut tx_closed = db.transaction(true);
+		tx_closed.cancel().unwrap();
+		assert!(matches!(tx_closed.set_savepoint(), Err(Error::TxClosed)));
+		assert!(matches!(tx_closed.rollback_to_savepoint(), Err(Error::TxClosed)));
+
+		// Test stack exhaustion - error when rolling back more savepoints than were set
+		let db_stack: Database<String, &str> = Database::new();
+		let mut tx_stack = db_stack.transaction(true);
+
+		// Set multiple nested savepoints
+		for i in 0..3 {
+			let key = format!("key{}", i);
+			tx_stack.set(key, "value").unwrap();
+			tx_stack.set_savepoint().unwrap();
+		}
+
+		// Rollback all savepoints one by one
+		for _rollback_count in 0..3 {
+			tx_stack.rollback_to_savepoint().unwrap();
+		}
+
+		// Should error when no more savepoints available
+		assert!(matches!(tx_stack.rollback_to_savepoint(), Err(Error::NoSavepoint)));
 	}
 }
