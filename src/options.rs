@@ -42,7 +42,7 @@ impl Default for DatabaseOptions {
 			gc_interval: DEFAULT_GC_INTERVAL,
 			enable_cleanup: true,
 			cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
-			enable_merge_worker: true,
+			enable_merge_worker: false,
 			reset_threshold: DEFAULT_RESET_THRESHOLD,
 			resync_interval: DEFAULT_RESYNC_INTERVAL,
 		}
