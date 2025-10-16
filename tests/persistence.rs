@@ -9,7 +9,7 @@ fn test_aol_synchronous_basic() {
 	let temp_path = temp_dir.path();
 
 	// Create database options
-	let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+	let db_opts = DatabaseOptions::default();
 
 	// Configure synchronous AOL persistence (no snapshots)
 	let persistence_opts = PersistenceOptions::new(temp_path)
@@ -67,7 +67,7 @@ fn test_aol_asynchronous_basic() {
 	let temp_path = temp_dir.path();
 
 	// Create database options
-	let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+	let db_opts = DatabaseOptions::default();
 
 	// Configure asynchronous AOL persistence (no snapshots)
 	let persistence_opts = PersistenceOptions::new(temp_path)
@@ -125,7 +125,7 @@ fn test_aol_recovery() {
 	let temp_path = temp_dir.path();
 
 	// Create database options
-	let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+	let db_opts = DatabaseOptions::default();
 
 	// Configure AOL persistence
 	let persistence_opts = PersistenceOptions::new(temp_path)
@@ -176,7 +176,7 @@ fn test_aol_fsync_modes() {
 		let temp_dir = TempDir::new().unwrap();
 		let temp_path = temp_dir.path();
 
-		let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+		let db_opts = DatabaseOptions::default();
 		let persistence_opts = PersistenceOptions::new(temp_path)
 			.with_aol_mode(AolMode::SynchronousOnCommit)
 			.with_fsync_mode(FsyncMode::EveryAppend);
@@ -194,7 +194,7 @@ fn test_aol_fsync_modes() {
 		let temp_dir = TempDir::new().unwrap();
 		let temp_path = temp_dir.path();
 
-		let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+		let db_opts = DatabaseOptions::default();
 		let persistence_opts = PersistenceOptions::new(temp_path)
 			.with_aol_mode(AolMode::SynchronousOnCommit)
 			.with_fsync_mode(FsyncMode::Interval(Duration::from_millis(100)));
@@ -215,7 +215,7 @@ fn test_aol_fsync_modes() {
 		let temp_dir = TempDir::new().unwrap();
 		let temp_path = temp_dir.path();
 
-		let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+		let db_opts = DatabaseOptions::default();
 		let persistence_opts = PersistenceOptions::new(temp_path)
 			.with_aol_mode(AolMode::SynchronousOnCommit)
 			.with_fsync_mode(FsyncMode::Never);
@@ -236,7 +236,7 @@ fn test_snapshot_manual_creation() {
 	let temp_path = temp_dir.path();
 
 	// Create database options
-	let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+	let db_opts = DatabaseOptions::default();
 
 	// Configure manual snapshot persistence (no AOL, no automatic snapshots)
 	let persistence_opts = PersistenceOptions::new(temp_path)
@@ -279,7 +279,7 @@ fn test_snapshot_only_persistence_basic() {
 	let temp_path = temp_dir.path();
 
 	// Create database options
-	let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+	let db_opts = DatabaseOptions::default();
 
 	// Configure snapshot-only persistence (no AOL)
 	let persistence_opts = PersistenceOptions::new(temp_path)
@@ -331,7 +331,7 @@ fn test_snapshot_basic() {
 	let temp_dir = TempDir::new().unwrap();
 	let temp_path = temp_dir.path();
 
-	let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+	let db_opts = DatabaseOptions::default();
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::Never)
 		.with_snapshot_mode(SnapshotMode::Never);
@@ -369,7 +369,7 @@ fn test_snapshot_recovery() {
 	let temp_dir = TempDir::new().unwrap();
 	let temp_path = temp_dir.path();
 
-	let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+	let db_opts = DatabaseOptions::default();
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::Never)
 		.with_snapshot_mode(SnapshotMode::Never);
@@ -434,7 +434,7 @@ fn test_snapshot_interval() {
 	let temp_dir = TempDir::new().unwrap();
 	let temp_path = temp_dir.path();
 
-	let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+	let db_opts = DatabaseOptions::default();
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::Never)
 		.with_snapshot_mode(SnapshotMode::Interval(Duration::from_millis(100)));
@@ -473,7 +473,7 @@ fn test_combined_aol_and_snapshot() {
 	let temp_dir = TempDir::new().unwrap();
 	let temp_path = temp_dir.path();
 
-	let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+	let db_opts = DatabaseOptions::default();
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::SynchronousOnCommit)
 		.with_snapshot_mode(SnapshotMode::Never) // Manual snapshots
@@ -542,7 +542,7 @@ fn test_aol_snapshot_with_truncation() {
 	let temp_dir = TempDir::new().unwrap();
 	let temp_path = temp_dir.path();
 
-	let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+	let db_opts = DatabaseOptions::default();
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::SynchronousOnCommit)
 		.with_snapshot_mode(SnapshotMode::Never)
@@ -605,7 +605,7 @@ fn test_combined_recovery_complex() {
 	let temp_dir = TempDir::new().unwrap();
 	let temp_path = temp_dir.path();
 
-	let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+	let db_opts = DatabaseOptions::default();
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::SynchronousOnCommit)
 		.with_snapshot_mode(SnapshotMode::Never)
@@ -676,7 +676,7 @@ fn test_custom_file_paths() {
 	std::fs::create_dir_all(&aol_dir).unwrap();
 	std::fs::create_dir_all(&snapshot_dir).unwrap();
 
-	let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+	let db_opts = DatabaseOptions::default();
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::SynchronousOnCommit)
 		.with_snapshot_mode(SnapshotMode::Never)
@@ -723,7 +723,7 @@ fn test_persistence_options_builder() {
 	assert_eq!(persistence_opts.fsync_mode, FsyncMode::Interval(Duration::from_millis(500)));
 
 	// Test that database can be created with these options
-	let db_opts = DatabaseOptions::default().with_enable_merge_worker(false);
+	let db_opts = DatabaseOptions::default();
 	let _db: Database<String, String> =
 		Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 }

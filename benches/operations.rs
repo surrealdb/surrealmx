@@ -28,18 +28,7 @@ where
 	K: Ord + Clone + std::fmt::Debug + Sync + Send + 'static,
 	V: Eq + Clone + std::fmt::Debug + Sync + Send + 'static,
 {
-	// Check environment variable to determine merge worker configuration
-	let enable_merge = std::env::var("MEMODB_MERGE_WORKER")
-		.unwrap_or_else(|_| "false".to_string())
-		.parse::<bool>()
-		.unwrap_or(false);
-
-	let opts = DatabaseOptions {
-		enable_merge_worker: enable_merge,
-		..Default::default()
-	};
-
-	Database::new_with_options(opts)
+	Database::new()
 }
 
 // Helper functions for generating test data
@@ -694,14 +683,7 @@ fn bench_database_options(c: &mut Criterion) {
 		),
 	];
 
-	for (config_name, mut options) in configurations {
-		// Apply merge worker setting from environment
-		let enable_merge = std::env::var("MEMODB_MERGE_WORKER")
-			.unwrap_or_else(|_| "true".to_string())
-			.parse::<bool>()
-			.unwrap_or(true);
-		options.enable_merge_worker = enable_merge;
-
+	for (config_name, options) in configurations {
 		let mut rng = StdRng::seed_from_u64(SEED);
 
 		// Pre-generate data for consistent benchmarking
