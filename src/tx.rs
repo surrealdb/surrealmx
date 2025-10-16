@@ -473,10 +473,28 @@ where
 			let value = value.clone();
 			// Check if this key already exists
 			if let Some(entry) = self.database.datastore.get(key) {
-				entry.value().write().push(Version {
-					version,
-					value,
-				});
+				// Check if historic version storage is enabled
+				if self.database.garbage_collection_epoch.read().is_none() {
+					// Get the earliest transaction version
+					let earliest = self.database.transaction_commit_queue.front().map(|e| *e.key());
+					// Get a mutable reference to the versions list
+					let mut versions = entry.value().write();
+					// Clean up unnecessaryolder versions
+					if let Some(version) = earliest {
+						versions.gc_older_versions(version);
+					}
+					// Add the version entry to the versions list
+					versions.push(Version {
+						version,
+						value,
+					});
+				} else {
+					// Add the version entry to the versions list
+					entry.value().write().push(Version {
+						version,
+						value,
+					});
+				}
 			} else {
 				self.database.datastore.insert(
 					key.clone(),
