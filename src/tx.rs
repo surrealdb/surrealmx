@@ -816,6 +816,21 @@ where
 		self.scan_any(rng, skip, limit, Direction::Reverse, version)
 	}
 
+	/// Retrieve all versions of keys within a range from the database
+	/// Returns tuples of (key, version, value) for all historical versions
+	/// The skip and limit parameters apply to the number of keys, not the number of versions
+	pub fn scan_all_versions<Q>(
+		&mut self,
+		rng: Range<Q>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<(K, u64, Option<V>)>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		self.scan_all_versions_any(rng, skip, limit, self.version)
+	}
+
 	/// Retrieve a count of keys from the database
 	fn total_any<Q>(
 		&mut self,
@@ -1024,6 +1039,98 @@ where
 					if res.len() >= l {
 						break;
 					}
+				}
+			}
+		}
+		// Return result
+		Ok(res)
+	}
+
+	/// Retrieve all versions of keys within a range from the database
+	fn scan_all_versions_any<Q>(
+		&mut self,
+		rng: Range<Q>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<Vec<(K, u64, Option<V>)>, Error>
+	where
+		Q: Borrow<K>,
+	{
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Prepare result vector
+		let mut res = Vec::new();
+		// Compute the range
+		let beg = rng.start.borrow();
+		let end = rng.end.borrow();
+		// Calculate how many items to skip
+		let skip = skip.unwrap_or_default();
+		// Check wether we should track range scan reads
+		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			// Track scans if scanning the latest version
+			if version == self.version {
+				// Add this range scan entry to the saved scans
+				match self.scanset.range_mut(..=beg).next_back() {
+					// There is no entry for this range scan
+					None => {
+						self.scanset.insert(beg.clone(), end.clone());
+					}
+					// The saved scan stops before this range
+					Some(range) if &*range.1 < beg => {
+						self.scanset.insert(beg.clone(), end.clone());
+					}
+					// The saved scan does not extend far enough
+					Some(range) if &*range.1 < end => {
+						*range.1 = end.clone();
+					}
+					// This range scan is already covered
+					_ => (),
+				};
+			}
+		}
+		// Create the 2-way merge iterator to iterate over keys
+		let iter = MergeIterator::new(
+			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			self.writeset.range(beg.clone()..end.clone()),
+			Direction::Forward,
+			version,
+			skip,
+		);
+		// Track how many keys we've processed
+		let mut count = 0;
+		// Process entries with skip and limit
+		for (key, _) in iter {
+			// Use a BTreeMap to collect and merge versions by version number
+			let mut all_versions: BTreeMap<u64, Option<Arc<V>>> = BTreeMap::new();
+			// Collect all versions from the datastore
+			if let Some(entry) = self.database.datastore.get(&key) {
+				let versions = entry.value().read();
+				for (ver, val) in versions.all_versions() {
+					if ver <= version {
+						all_versions.insert(ver, val);
+					}
+				}
+			}
+			// Collect version from the current writeset
+			if self.write {
+				if let Some(val) = self.writeset.get(&key) {
+					// Set a temporary version for the new version entry
+					all_versions.insert(self.version + 1, val.clone());
+				}
+			}
+			// Add all versions for this key to the result
+			for (ver, val) in all_versions {
+				res.push((key.clone(), ver, val.as_ref().map(|arc| arc.as_ref().clone())));
+			}
+			// Increment key counter
+			count += 1;
+			// Check limit on keys
+			if let Some(l) = limit {
+				if count >= l {
+					break;
 				}
 			}
 		}
@@ -2468,6 +2575,151 @@ mod tests {
 		assert_eq!(tx_verify.get("level2_key1").unwrap(), None);
 		assert_eq!(tx_verify.get("level2_new").unwrap(), None);
 		assert_eq!(tx_verify.get("level3_key1").unwrap(), None);
+	}
+
+	#[test]
+	fn test_scan_all_versions() {
+		let db: Database<&str, &str> = Database::new();
+
+		// Transaction 1: Add initial data
+		let mut tx1 = db.transaction(true);
+		tx1.set("key1", "v1").unwrap();
+		tx1.set("key2", "v1").unwrap();
+		tx1.set("key3", "v1").unwrap();
+		tx1.commit().unwrap();
+
+		// Transaction 2: Update key1 and key2
+		let mut tx2 = db.transaction(true);
+		tx2.set("key1", "v2").unwrap();
+		tx2.set("key2", "v2").unwrap();
+		tx2.commit().unwrap();
+
+		// Transaction 3: Update key1 again and delete key3
+		let mut tx3 = db.transaction(true);
+		tx3.set("key1", "v3").unwrap();
+		tx3.del("key3").unwrap();
+		tx3.commit().unwrap();
+
+		// Transaction 4: Read all versions
+		let mut tx4 = db.transaction(false);
+		let results = tx4.scan_all_versions("key0".."key9", None, None).unwrap();
+
+		// Verify we have all versions:
+		// key1: should have 3 versions (v1, v2, v3)
+		// key2: should have 2 versions (v1, v2)
+		// key3: should have 2 versions (v1, None/deleted)
+		let key1_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key1").collect();
+		let key2_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key2").collect();
+		let key3_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key3").collect();
+
+		assert_eq!(key1_versions.len(), 3, "key1 should have 3 versions");
+		assert_eq!(key2_versions.len(), 2, "key2 should have 2 versions");
+		assert_eq!(key3_versions.len(), 2, "key3 should have 2 versions (including delete)");
+
+		// Verify key1 versions are correct
+		assert_eq!(key1_versions[0].2, Some("v1"));
+		assert_eq!(key1_versions[1].2, Some("v2"));
+		assert_eq!(key1_versions[2].2, Some("v3"));
+
+		// Verify key2 versions are correct
+		assert_eq!(key2_versions[0].2, Some("v1"));
+		assert_eq!(key2_versions[1].2, Some("v2"));
+
+		// Verify key3 versions are correct (last one is deleted)
+		assert_eq!(key3_versions[0].2, Some("v1"));
+		assert_eq!(key3_versions[1].2, None); // Deleted
+
+		// Test with skip: skip first key (key1)
+		let mut tx5 = db.transaction(false);
+		let results = tx5.scan_all_versions("key0".."key9", Some(1), None).unwrap();
+
+		// Should have key2 and key3 only
+		let keys: Vec<_> = results.iter().map(|(k, _, _)| *k).collect();
+		assert!(!keys.contains(&"key1"), "key1 should be skipped");
+		assert!(keys.contains(&"key2"), "key2 should be included");
+		assert!(keys.contains(&"key3"), "key3 should be included");
+
+		// Verify we still have all versions of the remaining keys
+		let key2_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key2").collect();
+		assert_eq!(key2_versions.len(), 2, "key2 should still have all 2 versions");
+
+		// Test with limit: limit to first 2 keys (key1 and key2)
+		let mut tx6 = db.transaction(false);
+		let results = tx6.scan_all_versions("key0".."key9", None, Some(2)).unwrap();
+
+		// Should have key1 and key2 only (all their versions)
+		let keys: Vec<_> = results.iter().map(|(k, _, _)| *k).collect();
+		assert!(keys.contains(&"key1"), "key1 should be included");
+		assert!(keys.contains(&"key2"), "key2 should be included");
+		assert!(!keys.contains(&"key3"), "key3 should not be included (limit)");
+
+		// Verify we have all versions of the limited keys
+		let key1_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key1").collect();
+		assert_eq!(key1_versions.len(), 3, "key1 should still have all 3 versions");
+
+		// Test with skip and limit: skip 1, limit 1 (should get only key2)
+		let mut tx7 = db.transaction(false);
+		let results = tx7.scan_all_versions("key0".."key9", Some(1), Some(1)).unwrap();
+
+		let keys: Vec<_> = results.iter().map(|(k, _, _)| *k).collect();
+		assert!(!keys.contains(&"key1"), "key1 should be skipped");
+		assert!(keys.contains(&"key2"), "key2 should be included");
+		assert!(!keys.contains(&"key3"), "key3 should not be included (limit)");
+
+		let key2_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key2").collect();
+		assert_eq!(key2_versions.len(), 2, "key2 should have all 2 versions");
+	}
+
+	#[test]
+	fn test_scan_all_versions_with_writeset() {
+		let db: Database<&str, &str> = Database::new();
+
+		// Transaction 1: Add initial data
+		let mut tx1 = db.transaction(true);
+		tx1.set("key1", "v1").unwrap();
+		tx1.set("key2", "v1").unwrap();
+		tx1.commit().unwrap();
+
+		// Transaction 2: Update key1
+		let mut tx2 = db.transaction(true);
+		tx2.set("key1", "v2").unwrap();
+		tx2.commit().unwrap();
+
+		// Transaction 3: Start a write transaction and scan all versions
+		// The writeset changes should be included in the scan
+		let mut tx3 = db.transaction(true);
+		tx3.set("key1", "v3").unwrap(); // Update key1 in writeset
+		tx3.set("key3", "new").unwrap(); // Add new key in writeset
+
+		let results = tx3.scan_all_versions("key0".."key9", None, None).unwrap();
+
+		// key1 should have 3 versions: v1 (datastore), v2 (datastore), v3 (writeset)
+		let key1_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key1").collect();
+		assert_eq!(key1_versions.len(), 3, "key1 should have 3 versions including writeset");
+		assert_eq!(key1_versions[2].2, Some("v3"), "Latest version should be from writeset");
+
+		// key2 should have 1 version: v1 (datastore)
+		let key2_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key2").collect();
+		assert_eq!(key2_versions.len(), 1, "key2 should have 1 version");
+		assert_eq!(key2_versions[0].2, Some("v1"));
+
+		// key3 should have 1 version: new (writeset only)
+		let key3_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key3").collect();
+		assert_eq!(key3_versions.len(), 1, "key3 should have 1 version from writeset");
+		assert_eq!(key3_versions[0].2, Some("new"));
+
+		// Cancel the transaction so it doesn't commit
+		tx3.cancel().unwrap();
+
+		// Transaction 4: Read-only transaction should not see tx3's writeset
+		let mut tx4 = db.transaction(false);
+		let results = tx4.scan_all_versions("key0".."key9", None, None).unwrap();
+
+		let key1_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key1").collect();
+		assert_eq!(key1_versions.len(), 2, "key1 should only have 2 versions (tx3 was cancelled)");
+
+		let key3_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key3").collect();
+		assert_eq!(key3_versions.len(), 0, "key3 should not exist (tx3 was cancelled)");
 	}
 
 	#[test]
