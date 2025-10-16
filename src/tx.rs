@@ -439,43 +439,34 @@ where
 			writeset,
 			id: self.database.transaction_merge_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
-		// Check if background merge worker is active
-		if let Some(handle) = self.database.transaction_merge_handle.read().as_ref() {
-			// Push the version to the merge worker queue
-			self.database.transaction_merge_injector.push(version);
-			// Wake up the merge worker to process the new entry
-			handle.thread().unpark();
-			// Transaction is complete
-		} else {
-			// Loop over the updates in the writeset
-			for (key, value) in entry.writeset.iter() {
-				// Clone the value for insertion
-				let value = value.clone();
-				// Check if this key already exists
-				if let Some(entry) = self.database.datastore.get(key) {
-					entry.value().write().push(Version {
+		// Loop over the updates in the writeset
+		for (key, value) in entry.writeset.iter() {
+			// Clone the value for insertion
+			let value = value.clone();
+			// Check if this key already exists
+			if let Some(entry) = self.database.datastore.get(key) {
+				entry.value().write().push(Version {
+					version,
+					value,
+				});
+			} else {
+				self.database.datastore.insert(
+					key.clone(),
+					RwLock::new(Versions::from(Version {
 						version,
 						value,
-					});
-				} else {
-					self.database.datastore.insert(
-						key.clone(),
-						RwLock::new(Versions::from(Version {
-							version,
-							value,
-						})),
-					);
-				}
+					})),
+				);
 			}
-			// Append the transaction to the persistence layer
-			if let Some(p) = self.database.persistence.read().clone() {
-				if let Err(e) = p.append(version, entry.writeset.as_ref()) {
-					return Err(Error::TxCommitNotPersisted(e));
-				}
-			}
-			// Remove this transaction from the merge queue
-			self.database.transaction_merge_queue.remove(&version);
 		}
+		// Append the transaction to the persistence layer
+		if let Some(p) = self.database.persistence.read().clone() {
+			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
+				return Err(Error::TxCommitNotPersisted(e));
+			}
+		}
+		// Remove this transaction from the merge queue
+		self.database.transaction_merge_queue.remove(&version);
 		// Continue
 		Ok(())
 	}
@@ -871,19 +862,9 @@ where
 				};
 			}
 		}
-		// Build combined writeset from merge queue entries only
-		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
-		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
-			if !entry.is_removed() {
-				for (k, v) in entry.value().writeset.range(beg..end) {
-					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
-				}
-			}
-		}
-		// Create the 3-way merge iterator
+		// Create the 2-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
-			combined_writeset,
 			self.writeset.range(beg.clone()..end.clone()),
 			direction,
 			version,
@@ -953,19 +934,9 @@ where
 				};
 			}
 		}
-		// Build combined writeset from merge queue entries only
-		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
-		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
-			if !entry.is_removed() {
-				for (k, v) in entry.value().writeset.range(beg..end) {
-					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
-				}
-			}
-		}
-		// Create the 3-way merge iterator
+		// Create the 2-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
-			combined_writeset,
 			self.writeset.range(beg.clone()..end.clone()),
 			direction,
 			version,
@@ -1035,19 +1006,9 @@ where
 				};
 			}
 		}
-		// Build combined writeset from merge queue entries only
-		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
-		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
-			if !entry.is_removed() {
-				for (k, v) in entry.value().writeset.range(beg..end) {
-					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
-				}
-			}
-		}
-		// Create the 3-way merge iterator
+		// Create the 2-way merge iterator
 		let iter = MergeIterator::new(
 			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
-			combined_writeset,
 			self.writeset.range(beg.clone()..end.clone()),
 			direction,
 			version,
@@ -1236,7 +1197,7 @@ where
 mod tests {
 
 	use crate::err::Error;
-	use crate::{Database, DatabaseOptions};
+	use crate::Database;
 
 	#[test]
 	fn mvcc_non_conflicting_keys_should_succeed() {
@@ -2068,15 +2029,11 @@ mod tests {
 	}
 
 	#[test]
-	fn test_range_scan_with_sync_merge_queue() {
+	fn test_range_scan_with_merge_queue() {
 		use std::sync::atomic::Ordering;
 
 		// Create database
-		let opts = DatabaseOptions {
-			enable_merge_worker: false,
-			..Default::default()
-		};
-		let db: Database<&str, &str> = Database::new_with_options(opts);
+		let db: Database<&str, &str> = Database::new();
 
 		// Ensure elements reside in the merge queue
 		db.background_threads_enabled.store(false, Ordering::Relaxed);
@@ -2091,46 +2048,6 @@ mod tests {
 		// Verify data is in datastore and NOT in merge queue
 		assert!(db.transaction_merge_queue.is_empty(), "Data should be in merge queue");
 		assert!(!db.datastore.is_empty(), "Data should NOT be in datastore yet");
-
-		// Transaction 2: Add uncommitted data and scan
-		let mut txn2 = db.transaction(true);
-		txn2.set("b", "2").unwrap();
-		txn2.set("d", "4").unwrap();
-
-		// Scan should see both committed (from merge queue) and uncommitted data
-		let res = txn2.scan("a".."f", None, None).unwrap();
-		assert_eq!(res.len(), 5);
-		assert_eq!(res[0], ("a", "1")); // From merge queue
-		assert_eq!(res[1], ("b", "2")); // From current txn
-		assert_eq!(res[2], ("c", "3")); // From merge queue
-		assert_eq!(res[3], ("d", "4")); // From current txn
-		assert_eq!(res[4], ("e", "5")); // From merge queue
-	}
-
-	#[test]
-	fn test_range_scan_with_async_merge_queue() {
-		use std::sync::atomic::Ordering;
-
-		// Create database
-		let opts = DatabaseOptions {
-			enable_merge_worker: true,
-			..Default::default()
-		};
-		let db: Database<&str, &str> = Database::new_with_options(opts);
-
-		// Ensure elements reside in the merge queue
-		db.background_threads_enabled.store(false, Ordering::Relaxed);
-
-		// Transaction 1: Add initial data and commit
-		let mut txn1 = db.transaction(true);
-		txn1.set("a", "1").unwrap();
-		txn1.set("c", "3").unwrap();
-		txn1.set("e", "5").unwrap();
-		txn1.commit().unwrap();
-
-		// Verify data is in merge queue and NOT in datastore
-		assert!(!db.transaction_merge_queue.is_empty(), "Data should be in merge queue");
-		assert!(db.datastore.is_empty(), "Data should NOT be in datastore yet");
 
 		// Transaction 2: Add uncommitted data and scan
 		let mut txn2 = db.transaction(true);

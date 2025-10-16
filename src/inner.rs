@@ -20,7 +20,6 @@ use crate::persistence::Persistence;
 use crate::queue::{Commit, Merge};
 use crate::versions::Versions;
 use crate::DatabaseOptions;
-use crossbeam_deque::Injector;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
 use std::fmt::Debug;
@@ -53,8 +52,6 @@ where
 	pub(crate) transaction_commit_queue: SkipMap<u64, Arc<Commit<K, V>>>,
 	/// Transaction updates which are committed but not yet applied
 	pub(crate) transaction_merge_queue: SkipMap<u64, Arc<Merge<K, V>>>,
-	/// Queue for merge worker to process transaction versions
-	pub(crate) transaction_merge_injector: Injector<u64>,
 	/// The epoch duration to determine how long to store versioned data
 	pub(crate) garbage_collection_epoch: RwLock<Option<Duration>>,
 	/// Optional persistence handler
@@ -65,8 +62,6 @@ where
 	pub(crate) transaction_cleanup_handle: RwLock<Option<JoinHandle<()>>>,
 	/// Stores a handle to the current garbage collection background thread
 	pub(crate) garbage_collection_handle: RwLock<Option<JoinHandle<()>>>,
-	/// Stores a handle to the current merge worker background thread
-	pub(crate) transaction_merge_handle: RwLock<Option<JoinHandle<()>>>,
 	/// Threshold after which transaction state is reset
 	pub(crate) reset_threshold: usize,
 }
@@ -88,13 +83,11 @@ where
 			transaction_merge_id: AtomicU64::new(0),
 			transaction_commit_queue: SkipMap::new(),
 			transaction_merge_queue: SkipMap::new(),
-			transaction_merge_injector: Injector::new(),
 			garbage_collection_epoch: RwLock::new(None),
 			persistence: RwLock::new(None),
 			background_threads_enabled: AtomicBool::new(true),
 			transaction_cleanup_handle: RwLock::new(None),
 			garbage_collection_handle: RwLock::new(None),
-			transaction_merge_handle: RwLock::new(None),
 			reset_threshold: DEFAULT_RESET_THRESHOLD,
 		}
 	}

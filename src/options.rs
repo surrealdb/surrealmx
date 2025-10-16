@@ -26,8 +26,6 @@ pub struct DatabaseOptions {
 	pub enable_cleanup: bool,
 	/// Interval at which the cleanup worker wakes up.
 	pub cleanup_interval: Duration,
-	/// Whether the merge worker thread is started automatically.
-	pub enable_merge_worker: bool,
 	/// Threshold after which transaction state maps are reset.
 	pub reset_threshold: usize,
 	/// Interval at which the timestamp oracle resyncs with the system clock.
@@ -42,7 +40,6 @@ impl Default for DatabaseOptions {
 			gc_interval: DEFAULT_GC_INTERVAL,
 			enable_cleanup: true,
 			cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
-			enable_merge_worker: false,
 			reset_threshold: DEFAULT_RESET_THRESHOLD,
 			resync_interval: DEFAULT_RESYNC_INTERVAL,
 		}
@@ -85,12 +82,6 @@ impl DatabaseOptions {
 		self
 	}
 
-	/// Set whether the merge worker thread is started automatically.
-	pub fn with_enable_merge_worker(mut self, enable: bool) -> Self {
-		self.enable_merge_worker = enable;
-		self
-	}
-
 	/// Set the threshold after which transaction state maps are reset.
 	pub fn with_reset_threshold(mut self, threshold: usize) -> Self {
 		self.reset_threshold = threshold;
@@ -103,11 +94,10 @@ impl DatabaseOptions {
 		self
 	}
 
-	/// Disable all background worker threads (gc, cleanup, and merge worker).
+	/// Disable all background worker threads (gc and cleanup).
 	pub fn with_all_workers_disabled(mut self) -> Self {
 		self.enable_gc = false;
 		self.enable_cleanup = false;
-		self.enable_merge_worker = false;
 		self
 	}
 

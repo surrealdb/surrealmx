@@ -20,10 +20,6 @@ use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
 use crate::tx::Transaction;
-use crate::version::Version;
-use crate::versions::Versions;
-use crossbeam_deque::Steal;
-use parking_lot::RwLock;
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::Debug;
 use std::ops::Deref;
@@ -123,9 +119,6 @@ where
 		if opts.enable_gc {
 			db.initialise_garbage_worker();
 		}
-		if opts.enable_merge_worker {
-			db.initialise_merge_worker();
-		}
 		// Return the database
 		db
 	}
@@ -162,9 +155,6 @@ where
 		}
 		if opts.enable_gc {
 			db.initialise_garbage_worker();
-		}
-		if opts.enable_merge_worker {
-			db.initialise_persistence_worker();
 		}
 		// Return the database
 		Ok(db)
@@ -299,11 +289,6 @@ where
 			handle.thread().unpark();
 			let _ = handle.join();
 		}
-		// Wait for the merge worker thread to exit
-		if let Some(handle) = self.transaction_merge_handle.write().take() {
-			handle.thread().unpark();
-			let _ = handle.join();
-		}
 	}
 
 	/// Start the transaction commit queue cleanup thread after creating the database
@@ -412,136 +397,6 @@ where
 			});
 			// Store and track the thread handle
 			*self.inner.garbage_collection_handle.write() = Some(handle);
-		}
-	}
-
-	/// Start the merge worker thread after creating the database
-	fn initialise_merge_worker(&self) {
-		// Clone the underlying datastore inner
-		let db = self.inner.clone();
-		// Check if a background thread is already running
-		if db.transaction_merge_handle.read().is_none() {
-			// Spawn a new thread to handle continuous merging
-			let handle = std::thread::spawn(move || {
-				// Check whether the merge worker process is enabled
-				while db.background_threads_enabled.load(Ordering::Relaxed) {
-					// Try to steal a version from the injector
-					match db.transaction_merge_injector.steal() {
-						// A version was stolen so process it
-						Steal::Success(version) => {
-							// Get the merge entry from the queue
-							if let Some(entry) = db.transaction_merge_queue.get(&version) {
-								// Fetch the merge entry
-								let entry = entry.value();
-								// Loop over the updates in the writeset
-								for (key, value) in entry.writeset.iter() {
-									// Clone the value for insertion
-									let value = value.clone();
-									// Check if this key already exists
-									if let Some(entry) = db.datastore.get(key) {
-										entry.value().write().push(Version {
-											version,
-											value,
-										});
-									} else {
-										db.datastore.insert(
-											key.clone(),
-											RwLock::new(Versions::from(Version {
-												version,
-												value,
-											})),
-										);
-									}
-								}
-								// Remove this transaction from the merge queue
-								db.transaction_merge_queue.remove(&version);
-							}
-							// Process more immediately if available
-							std::thread::yield_now();
-						}
-						// No work available, park until unparked
-						Steal::Empty => {
-							std::thread::park();
-						}
-						// Another thread is stealing so yield
-						Steal::Retry => {
-							std::thread::yield_now();
-						}
-					}
-				}
-			});
-			// Store and track the thread handle
-			*self.inner.transaction_merge_handle.write() = Some(handle);
-		}
-	}
-
-	/// Start the persistence worker thread after creating the database
-	fn initialise_persistence_worker(&self)
-	where
-		K: Serialize,
-		V: Serialize,
-	{
-		// Clone the underlying datastore inner
-		let db = self.inner.clone();
-		// Check if a background thread is already running
-		if db.transaction_merge_handle.read().is_none() {
-			// Spawn a new thread to handle continuous merging
-			let handle = std::thread::spawn(move || {
-				// Check whether the merge worker process is enabled
-				while db.background_threads_enabled.load(Ordering::Relaxed) {
-					// Try to steal a version from the injector
-					match db.transaction_merge_injector.steal() {
-						// A version was stolen so process it
-						Steal::Success(version) => {
-							// Get the merge entry from the queue
-							if let Some(entry) = db.transaction_merge_queue.get(&version) {
-								// Fetch the merge entry
-								let entry = entry.value();
-								// Loop over the updates in the writeset
-								for (key, value) in entry.writeset.iter() {
-									// Clone the value for insertion
-									let value = value.clone();
-									// Check if this key already exists
-									if let Some(entry) = db.datastore.get(key) {
-										entry.value().write().push(Version {
-											version,
-											value,
-										});
-									} else {
-										db.datastore.insert(
-											key.clone(),
-											RwLock::new(Versions::from(Version {
-												version,
-												value,
-											})),
-										);
-									}
-								}
-								// Append the transaction to the persistence layer
-								if let Some(p) = db.persistence.read().clone() {
-									if let Err(e) = p.append(version, entry.writeset.as_ref()) {
-										tracing::error!("Failed to write to AOL file: {e}");
-									}
-								}
-								// Remove this transaction from the merge queue
-								db.transaction_merge_queue.remove(&version);
-							}
-							// Process more immediately if available
-							std::thread::yield_now();
-						}
-						// No work available, park until unparked
-						Steal::Empty => {
-							std::thread::park();
-						}
-						// Another thread is stealing so yield
-						Steal::Retry => {
-							std::thread::yield_now();
-						}
-					}
-				}
-			});
-			// Store and track the thread handle
-			*self.inner.transaction_merge_handle.write() = Some(handle);
 		}
 	}
 }
