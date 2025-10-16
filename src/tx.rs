@@ -67,6 +67,13 @@ where
 			inner.counter_commit.fetch_sub(1, Ordering::Relaxed);
 			// Reduce the transaction version counter
 			inner.counter_version.fetch_sub(1, Ordering::Relaxed);
+			// Defensive cleanup: remove from queues if transaction failed mid-commit
+			if let Some(version) = &inner.commit_queue_version {
+				inner.database.transaction_commit_queue.remove(version);
+			}
+			if let Some(version) = &inner.merge_queue_version {
+				inner.database.transaction_merge_queue.remove(version);
+			}
 			// Put the transaction in to the pool
 			self.pool.put(inner);
 		}
@@ -183,6 +190,10 @@ where
 	reset_threshold: usize,
 	/// Stack of savepoint states for nested partial rollbacks
 	savepoint_stack: Vec<SavepointState<K, V>>,
+	/// The version assigned when added to commit queue (if any)
+	commit_queue_version: Option<u64>,
+	/// The version assigned when added to merge queue (if any)
+	merge_queue_version: Option<u64>,
 }
 
 impl<K, V> TransactionInner<K, V>
@@ -237,6 +248,8 @@ where
 			counter_version,
 			reset_threshold: threshold,
 			savepoint_stack: Vec::new(),
+			commit_queue_version: None,
+			merge_queue_version: None,
 		}
 	}
 
@@ -305,6 +318,8 @@ where
 		self.savepoint_stack.clear();
 		self.counter_commit = counter_commit;
 		self.counter_version = counter_version;
+		self.commit_queue_version = None;
+		self.merge_queue_version = None;
 	}
 
 	/// Get the starting sequence number of this transaction
@@ -329,6 +344,9 @@ where
 		self.writeset.clear();
 		// Clear savepoint stack
 		self.savepoint_stack.clear();
+		// Clear queue versions
+		self.commit_queue_version = None;
+		self.merge_queue_version = None;
 		// Continue
 		Ok(())
 	}
@@ -398,6 +416,8 @@ where
 			writeset: writeset.clone(),
 			id: self.database.transaction_queue_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
+		// Store the commit queue version for defensive cleanup
+		self.commit_queue_version = Some(version);
 		// Check wether we should check reads conflicts on commit
 		if self.mode >= IsolationLevel::SnapshotIsolation {
 			// Retrieve all transactions committed since we began
@@ -406,6 +426,8 @@ where
 				if !tx.value().is_disjoint_writeset(&entry) {
 					// Remove the transaction from the commit queue
 					self.database.transaction_commit_queue.remove(&version);
+					// Clear the queue version as we've cleaned up
+					self.commit_queue_version = None;
 					// Return the error for this transaction
 					return Err(Error::KeyWriteConflict);
 				}
@@ -415,6 +437,8 @@ where
 					if !tx.value().is_disjoint_readset(&self.readset) {
 						// Remove the transaction from the commit queue
 						self.database.transaction_commit_queue.remove(&version);
+						// Clear the queue version as we've cleaned up
+						self.commit_queue_version = None;
 						// Return the error for this transaction
 						return Err(Error::KeyReadConflict);
 					}
@@ -426,6 +450,8 @@ where
 							if range.1 > k {
 								// Remove the transaction from the commit queue
 								self.database.transaction_commit_queue.remove(&version);
+								// Clear the queue version as we've cleaned up
+								self.commit_queue_version = None;
 								// Return the error for this transaction
 								return Err(Error::KeyReadConflict);
 							}
@@ -439,16 +465,36 @@ where
 			writeset,
 			id: self.database.transaction_merge_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
+		// Store the merge queue version for defensive cleanup
+		self.merge_queue_version = Some(version);
 		// Loop over the updates in the writeset
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
 			// Check if this key already exists
 			if let Some(entry) = self.database.datastore.get(key) {
-				entry.value().write().push(Version {
-					version,
-					value,
-				});
+				// Check if historic version storage is enabled
+				if self.database.garbage_collection_epoch.read().is_none() {
+					// Get the earliest transaction version
+					let earliest = self.database.transaction_commit_queue.front().map(|e| *e.key());
+					// Get a mutable reference to the versions list
+					let mut versions = entry.value().write();
+					// Clean up unnecessaryolder versions
+					if let Some(version) = earliest {
+						versions.gc_older_versions(version);
+					}
+					// Add the version entry to the versions list
+					versions.push(Version {
+						version,
+						value,
+					});
+				} else {
+					// Add the version entry to the versions list
+					entry.value().write().push(Version {
+						version,
+						value,
+					});
+				}
 			} else {
 				self.database.datastore.insert(
 					key.clone(),
@@ -462,11 +508,19 @@ where
 		// Append the transaction to the persistence layer
 		if let Some(p) = self.database.persistence.read().clone() {
 			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
+				// Remove this transaction from the merge queue
+				self.database.transaction_merge_queue.remove(&version);
+				// Clear the queue version as we've cleaned up
+				self.commit_queue_version = None;
+				// Return a persistence error
 				return Err(Error::TxCommitNotPersisted(e));
 			}
 		}
 		// Remove this transaction from the merge queue
 		self.database.transaction_merge_queue.remove(&version);
+		// Clear the queue versions as we've successfully completed
+		self.commit_queue_version = None;
+		self.merge_queue_version = None;
 		// Continue
 		Ok(())
 	}

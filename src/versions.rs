@@ -117,4 +117,15 @@ where
 	pub(crate) fn all_versions(&self) -> Vec<(u64, Option<Arc<V>>)> {
 		self.inner.iter().map(|v| (v.version, v.value.clone())).collect()
 	}
+
+	/// Remove all versions older than the specified version.
+	#[inline]
+	pub(crate) fn gc_older_versions(&mut self, version: u64) {
+		// Use partition_point to find the first element where v.version > version
+		let idx = self.inner.partition_point(|v| v.version <= version);
+		// Remove all versions before the cutoff
+		if idx > 0 {
+			self.drain(0..idx);
+		}
+	}
 }
