@@ -64,9 +64,15 @@ where
 	fn drop(&mut self) {
 		if let Some(inner) = self.inner.take() {
 			// Reduce the transaction commit counter
-			inner.counter_commit.fetch_sub(1, Ordering::Relaxed);
+			if inner.counter_commit.fetch_sub(1, Ordering::Relaxed) == 0 {
+				// If this was the last reference, remove the counter entry
+				inner.database.counter_by_commit.remove(&inner.commit);
+			}
 			// Reduce the transaction version counter
-			inner.counter_version.fetch_sub(1, Ordering::Relaxed);
+			if inner.counter_version.fetch_sub(1, Ordering::Relaxed) == 0 {
+				// If this was the last reference, remove the counter entry
+				inner.database.counter_by_oracle.remove(&inner.version);
+			}
 			// Defensive cleanup: remove from queues if transaction failed mid-commit
 			if let Some(version) = &inner.commit_queue_version {
 				inner.database.transaction_commit_queue.remove(version);
