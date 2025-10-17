@@ -32,6 +32,7 @@ use std::ops::Range;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The isolation level of a database transaction
 #[derive(PartialEq, PartialOrd)]
@@ -1204,12 +1205,16 @@ where
 				self.database.transaction_commit_id.fetch_add(1, Ordering::Release);
 				return (version, entry.value().clone());
 			}
-			// Increase the number loop spins we have attempted
-			spins += 1;
 			// Ensure the thread backs off when under contention
 			if spins > 10 {
+				std::hint::spin_loop();
+			} else if spins < 100 {
 				std::thread::yield_now();
+			} else {
+				std::thread::park_timeout(Duration::from_micros(10));
 			}
+			// Increase the number loop spins we have attempted
+			spins += 1;
 		}
 	}
 
@@ -1243,12 +1248,16 @@ where
 				oracle.inner.timestamp.store(version, Ordering::Release);
 				return (version, entry.value().clone());
 			}
-			// Increase the number loop spins we have attempted
-			spins += 1;
 			// Ensure the thread backs off when under contention
 			if spins > 10 {
+				std::hint::spin_loop();
+			} else if spins < 100 {
 				std::thread::yield_now();
+			} else {
+				std::thread::park_timeout(Duration::from_micros(10));
 			}
+			// Increase the number loop spins we have attempted
+			spins += 1;
 		}
 	}
 }
