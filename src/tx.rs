@@ -521,7 +521,9 @@ where
 					let res = self.exists_in_datastore(key.borrow(), self.version);
 					// Check whether we should track key reads
 					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-						self.readset.insert(key.into());
+						if !self.readset.contains(key.borrow()) {
+							self.readset.insert(key.into());
+						}
 					}
 					// Return the result
 					res
@@ -574,7 +576,9 @@ where
 					let res = self.fetch_in_datastore(key.borrow(), self.version);
 					// Check whether we should track key reads
 					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-						self.readset.insert(key.into());
+						if !self.readset.contains(key.borrow()) {
+							self.readset.insert(key.into());
+						}
 					}
 					// Return the result
 					res
@@ -860,6 +864,28 @@ where
 		self.scan_all_versions_any(rng, skip, limit, self.version)
 	}
 
+	/// Helper to track a scan range in the scanset (optimized to minimize clones)
+	#[inline(always)]
+	fn track_scan_range(&mut self, beg: &K, end: &K) {
+		// Add this range scan entry to the saved scans
+		match self.scanset.range_mut(..=beg).next_back() {
+			// There is no entry for this range scan
+			None => {
+				self.scanset.insert(beg.clone(), end.clone());
+			}
+			// The saved scan stops before this range
+			Some(range) if &*range.1 < beg => {
+				self.scanset.insert(beg.clone(), end.clone());
+			}
+			// The saved scan does not extend far enough
+			Some(range) if &*range.1 < end => {
+				*range.1 = end.clone();
+			}
+			// This range scan is already covered
+			_ => (),
+		}
+	}
+
 	/// Retrieve a count of keys from the database
 	fn total_any<Q>(
 		&mut self,
@@ -887,23 +913,7 @@ where
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
 			if version == self.version {
-				// Add this range scan entry to the saved scans
-				match self.scanset.range_mut(..=beg).next_back() {
-					// There is no entry for this range scan
-					None => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan stops before this range
-					Some(range) if &*range.1 < beg => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan does not extend far enough
-					Some(range) if &*range.1 < end => {
-						*range.1 = end.clone();
-					}
-					// This range scan is already covered
-					_ => (),
-				};
+				self.track_scan_range(beg, end);
 			}
 		}
 		// Create the 2-way merge iterator
@@ -959,23 +969,7 @@ where
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
 			if version == self.version {
-				// Add this range scan entry to the saved scans
-				match self.scanset.range_mut(..=beg).next_back() {
-					// There is no entry for this range scan
-					None => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan stops before this range
-					Some(range) if &*range.1 < beg => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan does not extend far enough
-					Some(range) if &*range.1 < end => {
-						*range.1 = end.clone();
-					}
-					// This range scan is already covered
-					_ => (),
-				};
+				self.track_scan_range(beg, end);
 			}
 		}
 		// Create the 2-way merge iterator
@@ -1031,23 +1025,7 @@ where
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
 			if version == self.version {
-				// Add this range scan entry to the saved scans
-				match self.scanset.range_mut(..=beg).next_back() {
-					// There is no entry for this range scan
-					None => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan stops before this range
-					Some(range) if &*range.1 < beg => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan does not extend far enough
-					Some(range) if &*range.1 < end => {
-						*range.1 = end.clone();
-					}
-					// This range scan is already covered
-					_ => (),
-				};
+				self.track_scan_range(beg, end);
 			}
 		}
 		// Create the 2-way merge iterator
@@ -1101,23 +1079,7 @@ where
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
 			if version == self.version {
-				// Add this range scan entry to the saved scans
-				match self.scanset.range_mut(..=beg).next_back() {
-					// There is no entry for this range scan
-					None => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan stops before this range
-					Some(range) if &*range.1 < beg => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan does not extend far enough
-					Some(range) if &*range.1 < end => {
-						*range.1 = end.clone();
-					}
-					// This range scan is already covered
-					_ => (),
-				};
+				self.track_scan_range(beg, end);
 			}
 		}
 		// Create the 2-way merge iterator to iterate over keys
