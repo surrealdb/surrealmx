@@ -73,13 +73,6 @@ where
 				// If this was the last reference, remove the counter entry
 				inner.database.counter_by_oracle.remove(&inner.version);
 			}
-			// Defensive cleanup: remove from queues if transaction failed mid-commit
-			if let Some(version) = &inner.commit_queue_version {
-				inner.database.transaction_commit_queue.remove(version);
-			}
-			if let Some(version) = &inner.merge_queue_version {
-				inner.database.transaction_merge_queue.remove(version);
-			}
 			// Put the transaction in to the pool
 			self.pool.put(inner);
 		}
@@ -196,10 +189,6 @@ where
 	reset_threshold: usize,
 	/// Stack of savepoint states for nested partial rollbacks
 	savepoint_stack: Vec<SavepointState<K, V>>,
-	/// The version assigned when added to commit queue (if any)
-	commit_queue_version: Option<u64>,
-	/// The version assigned when added to merge queue (if any)
-	merge_queue_version: Option<u64>,
 }
 
 impl<K, V> TransactionInner<K, V>
@@ -254,8 +243,6 @@ where
 			counter_version,
 			reset_threshold: threshold,
 			savepoint_stack: Vec::new(),
-			commit_queue_version: None,
-			merge_queue_version: None,
 		}
 	}
 
@@ -324,8 +311,6 @@ where
 		self.savepoint_stack.clear();
 		self.counter_commit = counter_commit;
 		self.counter_version = counter_version;
-		self.commit_queue_version = None;
-		self.merge_queue_version = None;
 	}
 
 	/// Get the starting sequence number of this transaction
@@ -350,9 +335,6 @@ where
 		self.writeset.clear();
 		// Clear savepoint stack
 		self.savepoint_stack.clear();
-		// Clear queue versions
-		self.commit_queue_version = None;
-		self.merge_queue_version = None;
 		// Continue
 		Ok(())
 	}
@@ -422,8 +404,6 @@ where
 			writeset: writeset.clone(),
 			id: self.database.transaction_queue_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
-		// Store the commit queue version for defensive cleanup
-		self.commit_queue_version = Some(version);
 		// Check wether we should check reads conflicts on commit
 		if self.mode >= IsolationLevel::SnapshotIsolation {
 			// Retrieve all transactions committed since we began
@@ -432,8 +412,6 @@ where
 				if !tx.value().is_disjoint_writeset(&entry) {
 					// Remove the transaction from the commit queue
 					self.database.transaction_commit_queue.remove(&version);
-					// Clear the queue version as we've cleaned up
-					self.commit_queue_version = None;
 					// Return the error for this transaction
 					return Err(Error::KeyWriteConflict);
 				}
@@ -443,8 +421,6 @@ where
 					if !tx.value().is_disjoint_readset(&self.readset) {
 						// Remove the transaction from the commit queue
 						self.database.transaction_commit_queue.remove(&version);
-						// Clear the queue version as we've cleaned up
-						self.commit_queue_version = None;
 						// Return the error for this transaction
 						return Err(Error::KeyReadConflict);
 					}
@@ -456,8 +432,6 @@ where
 							if range.1 > k {
 								// Remove the transaction from the commit queue
 								self.database.transaction_commit_queue.remove(&version);
-								// Clear the queue version as we've cleaned up
-								self.commit_queue_version = None;
 								// Return the error for this transaction
 								return Err(Error::KeyReadConflict);
 							}
@@ -471,8 +445,6 @@ where
 			writeset,
 			id: self.database.transaction_merge_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
-		// Store the merge queue version for defensive cleanup
-		self.merge_queue_version = Some(version);
 		// Get the earliest active transaction version
 		let earliest = self.database.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(version);
 		// Get the garbage collection epoch as nanoseconds
@@ -521,17 +493,12 @@ where
 			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
 				// Remove this transaction from the merge queue
 				self.database.transaction_merge_queue.remove(&version);
-				// Clear the queue version as we've cleaned up
-				self.commit_queue_version = None;
 				// Return a persistence error
 				return Err(Error::TxCommitNotPersisted(e));
 			}
 		}
 		// Remove this transaction from the merge queue
 		self.database.transaction_merge_queue.remove(&version);
-		// Clear the queue versions as we've successfully completed
-		self.commit_queue_version = None;
-		self.merge_queue_version = None;
 		// Continue
 		Ok(())
 	}
