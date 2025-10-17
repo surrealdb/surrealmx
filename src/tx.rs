@@ -475,19 +475,32 @@ where
 			if let Some(entry) = self.database.datastore.get(key) {
 				// Check if historic version storage is enabled
 				if self.database.garbage_collection_epoch.read().is_none() {
-					// Get the earliest transaction version
-					let earliest = self.database.transaction_commit_queue.front().map(|e| *e.key());
+					// Get the earliest active read transaction version
+					let earliest = self
+						.database
+						.counter_by_oracle
+						.front()
+						.map(|e| *e.key())
+						.unwrap_or_else(|| self.version);
 					// Get a mutable reference to the versions list
 					let mut versions = entry.value().write();
 					// Clean up unnecessary older versions
-					if let Some(version) = earliest {
-						versions.gc_older_versions(version);
+					let len = versions.gc_older_versions(earliest);
+					// If no versions remain and the value is none, remove the entry fully
+					if len == 0 && value.is_none() {
+						// Drop the version reference
+						drop(versions);
+						// Remove the entry from the datastore
+						self.database.datastore.remove(key);
 					}
-					// Add the version entry to the versions list
-					versions.push(Version {
-						version,
-						value,
-					});
+					// If a value is set, add the new version entry
+					else {
+						// Add the version entry to the versions list
+						versions.push(Version {
+							version,
+							value,
+						});
+					}
 				} else {
 					// Add the version entry to the versions list
 					entry.value().write().push(Version {
