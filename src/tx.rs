@@ -305,9 +305,6 @@ where
 		self.write = write;
 		self.commit = commit;
 		self.version = version;
-		self.readset.clear();
-		self.scanset.clear();
-		self.writeset.clear();
 		self.savepoint_stack.clear();
 		self.counter_commit = counter_commit;
 		self.counter_version = counter_version;
