@@ -64,15 +64,14 @@ where
 	fn drop(&mut self) {
 		if let Some(inner) = self.inner.take() {
 			// Reduce the transaction commit counter
-			inner.counter_commit.fetch_sub(1, Ordering::Relaxed);
-			// Reduce the transaction version counter
-			inner.counter_version.fetch_sub(1, Ordering::Relaxed);
-			// Defensive cleanup: remove from queues if transaction failed mid-commit
-			if let Some(version) = &inner.commit_queue_version {
-				inner.database.transaction_commit_queue.remove(version);
+			if inner.counter_commit.fetch_sub(1, Ordering::Relaxed) == 0 {
+				// If this was the last reference, remove the counter entry
+				inner.database.counter_by_commit.remove(&inner.commit);
 			}
-			if let Some(version) = &inner.merge_queue_version {
-				inner.database.transaction_merge_queue.remove(version);
+			// Reduce the transaction version counter
+			if inner.counter_version.fetch_sub(1, Ordering::Relaxed) == 0 {
+				// If this was the last reference, remove the counter entry
+				inner.database.counter_by_oracle.remove(&inner.version);
 			}
 			// Put the transaction in to the pool
 			self.pool.put(inner);
@@ -190,10 +189,6 @@ where
 	reset_threshold: usize,
 	/// Stack of savepoint states for nested partial rollbacks
 	savepoint_stack: Vec<SavepointState<K, V>>,
-	/// The version assigned when added to commit queue (if any)
-	commit_queue_version: Option<u64>,
-	/// The version assigned when added to merge queue (if any)
-	merge_queue_version: Option<u64>,
 }
 
 impl<K, V> TransactionInner<K, V>
@@ -248,8 +243,6 @@ where
 			counter_version,
 			reset_threshold: threshold,
 			savepoint_stack: Vec::new(),
-			commit_queue_version: None,
-			merge_queue_version: None,
 		}
 	}
 
@@ -318,8 +311,6 @@ where
 		self.savepoint_stack.clear();
 		self.counter_commit = counter_commit;
 		self.counter_version = counter_version;
-		self.commit_queue_version = None;
-		self.merge_queue_version = None;
 	}
 
 	/// Get the starting sequence number of this transaction
@@ -344,9 +335,6 @@ where
 		self.writeset.clear();
 		// Clear savepoint stack
 		self.savepoint_stack.clear();
-		// Clear queue versions
-		self.commit_queue_version = None;
-		self.merge_queue_version = None;
 		// Continue
 		Ok(())
 	}
@@ -416,8 +404,6 @@ where
 			writeset: writeset.clone(),
 			id: self.database.transaction_queue_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
-		// Store the commit queue version for defensive cleanup
-		self.commit_queue_version = Some(version);
 		// Check wether we should check reads conflicts on commit
 		if self.mode >= IsolationLevel::SnapshotIsolation {
 			// Retrieve all transactions committed since we began
@@ -426,8 +412,6 @@ where
 				if !tx.value().is_disjoint_writeset(&entry) {
 					// Remove the transaction from the commit queue
 					self.database.transaction_commit_queue.remove(&version);
-					// Clear the queue version as we've cleaned up
-					self.commit_queue_version = None;
 					// Return the error for this transaction
 					return Err(Error::KeyWriteConflict);
 				}
@@ -437,8 +421,6 @@ where
 					if !tx.value().is_disjoint_readset(&self.readset) {
 						// Remove the transaction from the commit queue
 						self.database.transaction_commit_queue.remove(&version);
-						// Clear the queue version as we've cleaned up
-						self.commit_queue_version = None;
 						// Return the error for this transaction
 						return Err(Error::KeyReadConflict);
 					}
@@ -450,8 +432,6 @@ where
 							if range.1 > k {
 								// Remove the transaction from the commit queue
 								self.database.transaction_commit_queue.remove(&version);
-								// Clear the queue version as we've cleaned up
-								self.commit_queue_version = None;
 								// Return the error for this transaction
 								return Err(Error::KeyReadConflict);
 							}
@@ -465,32 +445,35 @@ where
 			writeset,
 			id: self.database.transaction_merge_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
-		// Store the merge queue version for defensive cleanup
-		self.merge_queue_version = Some(version);
+		// Get the earliest active transaction version
+		let earliest = self.database.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(version);
+		// Get the garbage collection epoch as nanoseconds
+		let history = self.database.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
+		// Calculate the history cutoff (current time - history duration)
+		let history = version.saturating_sub(history as u64);
+		// Use the earlier of history or earliest transaction
+		let cleanup_ts = history.min(earliest);
 		// Loop over the updates in the writeset
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
 			// Check if this key already exists
 			if let Some(entry) = self.database.datastore.get(key) {
-				// Check if historic version storage is enabled
-				if self.database.garbage_collection_epoch.read().is_none() {
-					// Get the earliest transaction version
-					let earliest = self.database.transaction_commit_queue.front().map(|e| *e.key());
-					// Get a mutable reference to the versions list
-					let mut versions = entry.value().write();
-					// Clean up unnecessaryolder versions
-					if let Some(version) = earliest {
-						versions.gc_older_versions(version);
-					}
+				// Get a mutable reference to the versions list
+				let mut versions = entry.value().write();
+				// Clean up unnecessary older versions
+				let len = versions.gc_older_versions(cleanup_ts);
+				// If no versions remain and the value is none, remove the entry fully
+				if len == 0 && value.is_none() {
+					// Drop the version reference
+					drop(versions);
+					// Remove the entry from the datastore
+					self.database.datastore.remove(key);
+				}
+				// If a value is set, add the new version entry
+				else {
 					// Add the version entry to the versions list
 					versions.push(Version {
-						version,
-						value,
-					});
-				} else {
-					// Add the version entry to the versions list
-					entry.value().write().push(Version {
 						version,
 						value,
 					});
@@ -510,17 +493,12 @@ where
 			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
 				// Remove this transaction from the merge queue
 				self.database.transaction_merge_queue.remove(&version);
-				// Clear the queue version as we've cleaned up
-				self.commit_queue_version = None;
 				// Return a persistence error
 				return Err(Error::TxCommitNotPersisted(e));
 			}
 		}
 		// Remove this transaction from the merge queue
 		self.database.transaction_merge_queue.remove(&version);
-		// Clear the queue versions as we've successfully completed
-		self.commit_queue_version = None;
-		self.merge_queue_version = None;
 		// Continue
 		Ok(())
 	}
@@ -2813,5 +2791,101 @@ mod tests {
 
 		// Should error when no more savepoints available
 		assert!(matches!(tx_stack.rollback_to_savepoint(), Err(Error::NoSavepoint)));
+	}
+
+	#[test]
+	fn test_gc_does_not_remove_active_versions() {
+		// Test for garbage collection regression issue where versions
+		// were being removed too aggressively
+		// Create a database with GC disabled (automatic version cleanup enabled)
+		let db: Database<Vec<u8>, Vec<u8>> = Database::new();
+
+		// Insert 10,000 keys one-by-one
+		for i in 0..10_000 {
+			let key = format!("key_{:08}", i).into_bytes();
+			let value = format!("value_{:08}", i).into_bytes();
+
+			let mut tx = db.transaction(true);
+			tx.put(key, value).unwrap();
+			tx.commit().unwrap();
+		}
+
+		// Read each key one-by-one
+		for i in 0..10_000 {
+			let key = format!("key_{:08}", i).into_bytes();
+			let expected_value = format!("value_{:08}", i).into_bytes();
+
+			let mut tx = db.transaction(false);
+			let result = tx.get(key.clone());
+			assert!(result.is_ok(), "Failed to get key at index {i}: {result:?}");
+			let value = result.unwrap();
+			assert!(
+				value.is_some(),
+				"Key at index {} was not found (version was garbage collected too early)",
+				i
+			);
+			assert_eq!(*value.unwrap(), expected_value, "Value mismatch at index {i}");
+			tx.cancel().unwrap();
+		}
+	}
+
+	#[test]
+	fn test_gc_concurrent_readers() {
+		use std::sync::Arc;
+		use std::thread;
+
+		// Create a database
+		let db: Database<Vec<u8>, Vec<u8>> = Database::new();
+
+		// Insert initial data
+		{
+			let mut tx = db.transaction(true);
+			for i in 0..1000 {
+				let key = format!("key_{:08}", i).into_bytes();
+				let value = format!("value_{:08}", i).into_bytes();
+				tx.put(key, value).unwrap();
+			}
+			tx.commit().unwrap();
+		}
+
+		// Wrap database in Arc for sharing across threads
+		let db = Arc::new(db);
+
+		// Spawn multiple reader threads
+		let mut handles = vec![];
+		for thread_id in 0..4 {
+			let db = Arc::clone(&db);
+			let handle = thread::spawn(move || {
+				// Each thread reads all keys
+				for i in 0..1000 {
+					let key = format!("key_{:08}", i).into_bytes();
+					let mut tx = db.transaction(false);
+					let result = tx.get(key.clone());
+					assert!(
+						result.is_ok(),
+						"Thread {thread_id} failed to get key at index {i}: {result:?}",
+					);
+					let value = result.unwrap();
+					assert!(value.is_some(), "Thread {thread_id} could not find key at index {i} (version was garbage collected)");
+					tx.cancel().unwrap();
+
+					// Interleave with some writes to trigger GC
+					// Each thread writes to its own keys to avoid conflicts
+					if i % 100 == 0 {
+						let mut write_tx = db.transaction(true);
+						let update_key = format!("thread_{thread_id}_key_{i:08}").into_bytes();
+						let update_value = format!("updated_by_thread_{thread_id}").into_bytes();
+						write_tx.put(update_key, update_value).unwrap();
+						write_tx.commit().unwrap();
+					}
+				}
+			});
+			handles.push(handle);
+		}
+
+		// Wait for all threads to complete
+		for handle in handles {
+			handle.join().unwrap();
+		}
 	}
 }

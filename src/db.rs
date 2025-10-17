@@ -160,15 +160,15 @@ where
 		Ok(db)
 	}
 
-	/// Configure the database to use inactive garbage collection.
+	/// Configure the database to use immediate garbage collection.
 	///
-	/// This function will create a background thread which
-	/// will periodically remove any MVCC transaction entries
-	/// which are older than the current database timestamp,
-	/// and which are no longer being used by any long-running
-	/// transactions. Effectively previous versions are cleaned
-	/// up and removed as soon as possible, whilst ensuring
-	/// that transaction snapshots still operate correctly.
+	/// In this mode, old MVCC transaction entries are cleaned up
+	/// during transaction commits as soon as they are no longer
+	/// needed by any active read transactions. This ensures minimal
+	/// memory usage while maintaining correctness for concurrent
+	/// transactions. Additionally, if [`DatabaseOptions::enable_gc`]
+	/// is set, a background thread will periodically clean up any
+	/// stale versions.
 	pub fn with_gc(self) -> Self {
 		// Store the garbage collection epoch
 		*self.garbage_collection_epoch.write() = None;
@@ -176,17 +176,15 @@ where
 		self
 	}
 
-	/// Configure the database to use historic garbage collection.
+	/// Configure the database to preserve versions for a specified duration.
 	///
-	/// This function will create a background thread which
-	/// will periodically remove any MVCC transaction entries
-	/// which are older than the historic duration subtracted
-	/// from the current database timestamp, and which are no
-	/// longer being used by any long-running transactions.
-	/// Effectively previous versions are cleaned up and
-	/// removed if the transaction entries are older than the
-	/// specified duration, whilst ensuring that transaction
-	/// snapshots still operate correctly.
+	/// In this mode, MVCC transaction entries are retained for at least
+	/// the specified duration, allowing point-in-time reads within that
+	/// window. Old versions are cleaned up during transaction commits
+	/// once they exceed the history duration and are no longer needed
+	/// by active transactions. Additionally, if [`DatabaseOptions::enable_gc`]
+	/// is set, a background thread will periodically clean up stale
+	/// versions across the entire datastore.
 	pub fn with_gc_history(self, history: Duration) -> Self {
 		// Store the garbage collection epoch
 		*self.garbage_collection_epoch.write() = Some(history);
@@ -242,35 +240,35 @@ where
 
 	/// Manually perform garbage collection of stale record versions.
 	///
-	/// This should be called when automatic garbage collection is disabled via
+	/// This function performs a full datastore scan to clean up old versions
+	/// across all keys. Note that inline garbage collection happens automatically
+	/// during transaction commits, but only for keys being modified. This function
+	/// is useful for cleaning up stale versions on keys that haven't been recently
+	/// modified, or when automatic background GC is disabled via
 	/// [`DatabaseOptions::enable_gc`].
 	pub fn run_gc(&self) {
-		// Get the current timestamp version
-		let now = self.oracle.current_timestamp();
-		// Get the earliest used timestamp version
-		let inuse = self.counter_by_oracle.front().map(|e| *e.key());
+		// Get the current time in nanoseconds
+		let now = self.oracle.current_time_ns();
 		// Get the garbage collection epoch as nanoseconds
 		let history = self.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
-		// Fetch the earliest of the inuse or current time
-		let cleanup_ts = inuse.unwrap_or(now);
-		// Get the time before which entries should be removed
-		let cleanup_ts = cleanup_ts.saturating_sub(history as u64);
+		// Calculate the history cutoff (current time - history duration)
+		let history_cutoff = now.saturating_sub(history as u64);
+		// Get the earliest active transaction version
+		let earliest_tx = self.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(now);
+		// Use the earlier of history cutoff or earliest transaction to protect active transactions
+		let cleanup_ts = history_cutoff.min(earliest_tx);
 		// Iterate over the entire tree
 		for entry in self.datastore.iter() {
 			// Fetch the entry value
 			let versions = entry.value();
 			// Modify the version entries
 			let mut versions = versions.write();
-			// Find the last version with `version < cleanup_ts`
-			if let Some(idx) = versions.find_index(cleanup_ts) {
-				// Check if the found version is a 'delete'
-				if versions.is_delete(idx) {
-					// Remove all versions up to and including this version
-					versions.drain(..=idx);
-				} else if idx > 0 {
-					// Remove all versions up to this version
-					versions.drain(..idx);
-				};
+			// Clean up unnecessary older versions
+			if versions.gc_older_versions(cleanup_ts) == 0 {
+				// Drop the version reference
+				drop(versions);
+				// Remove the entry from the datastore
+				self.datastore.remove(entry.key());
 			}
 		}
 	}
@@ -365,32 +363,28 @@ where
 					if !db.background_threads_enabled.load(Ordering::Relaxed) {
 						break;
 					}
-					// Get the current timestamp version
-					let now = db.oracle.current_timestamp();
-					// Get the earliest used timestamp version
-					let inuse = db.counter_by_oracle.front().map(|e| *e.key());
+					// Get the current time in nanoseconds
+					let now = db.oracle.current_time_ns();
 					// Get the garbage collection epoch as nanoseconds
 					let history = db.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
-					// Fetch the earliest of the inuse or current time
-					let cleanup_ts = inuse.unwrap_or(now);
-					// Get the time before which entries should be removed
-					let cleanup_ts = cleanup_ts.saturating_sub(history as u64);
+					// Calculate the history cutoff (current time - history duration)
+					let history_cutoff = now.saturating_sub(history as u64);
+					// Get the earliest active transaction version
+					let earliest_tx = db.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(now);
+					// Use the earlier of history cutoff or earliest transaction to protect active transactions
+					let cleanup_ts = history_cutoff.min(earliest_tx);
 					// Iterate over the entire tree
 					for entry in db.datastore.iter() {
 						// Fetch the entry value
 						let versions = entry.value();
 						// Modify the version entries
 						let mut versions = versions.write();
-						// Find the last version with `version < cleanup_ts`
-						if let Some(idx) = versions.find_index(cleanup_ts) {
-							// Check if the found version is a 'delete'
-							if versions.is_delete(idx) {
-								// Remove all versions up to and including this version
-								versions.drain(..=idx);
-							} else if idx > 0 {
-								// Remove all versions up to this version
-								versions.drain(..idx);
-							};
+						// Clean up unnecessary older versions
+						if versions.gc_older_versions(cleanup_ts) == 0 {
+							// Drop the version reference
+							drop(versions);
+							// Remove the entry from the datastore
+							db.datastore.remove(entry.key());
 						}
 					}
 				}
