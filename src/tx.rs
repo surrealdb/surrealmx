@@ -467,43 +467,35 @@ where
 		});
 		// Store the merge queue version for defensive cleanup
 		self.merge_queue_version = Some(version);
+		// Get the earliest active transaction version
+		let earliest = self.database.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(version);
+		// Get the garbage collection epoch as nanoseconds
+		let history = self.database.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
+		// Calculate the history cutoff (current time - history duration)
+		let history = version.saturating_sub(history as u64);
+		// Use the earlier of history or earliest transaction
+		let cleanup_ts = history.min(earliest);
 		// Loop over the updates in the writeset
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
 			// Check if this key already exists
 			if let Some(entry) = self.database.datastore.get(key) {
-				// Check if historic version storage is enabled
-				if self.database.garbage_collection_epoch.read().is_none() {
-					// Get the earliest active read transaction version
-					let earliest = self
-						.database
-						.counter_by_oracle
-						.front()
-						.map(|e| *e.key())
-						.unwrap_or_else(|| self.version);
-					// Get a mutable reference to the versions list
-					let mut versions = entry.value().write();
-					// Clean up unnecessary older versions
-					let len = versions.gc_older_versions(earliest);
-					// If no versions remain and the value is none, remove the entry fully
-					if len == 0 && value.is_none() {
-						// Drop the version reference
-						drop(versions);
-						// Remove the entry from the datastore
-						self.database.datastore.remove(key);
-					}
-					// If a value is set, add the new version entry
-					else {
-						// Add the version entry to the versions list
-						versions.push(Version {
-							version,
-							value,
-						});
-					}
-				} else {
+				// Get a mutable reference to the versions list
+				let mut versions = entry.value().write();
+				// Clean up unnecessary older versions
+				let len = versions.gc_older_versions(cleanup_ts);
+				// If no versions remain and the value is none, remove the entry fully
+				if len == 0 && value.is_none() {
+					// Drop the version reference
+					drop(versions);
+					// Remove the entry from the datastore
+					self.database.datastore.remove(key);
+				}
+				// If a value is set, add the new version entry
+				else {
 					// Add the version entry to the versions list
-					entry.value().write().push(Version {
+					versions.push(Version {
 						version,
 						value,
 					});

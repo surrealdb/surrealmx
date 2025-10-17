@@ -247,16 +247,16 @@ where
 	/// modified, or when automatic background GC is disabled via
 	/// [`DatabaseOptions::enable_gc`].
 	pub fn run_gc(&self) {
-		// Get the current timestamp version
-		let now = self.oracle.current_timestamp();
-		// Get the earliest used timestamp version
-		let inuse = self.counter_by_oracle.front().map(|e| *e.key());
+		// Get the current time in nanoseconds
+		let now = self.oracle.current_time_ns();
 		// Get the garbage collection epoch as nanoseconds
 		let history = self.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
-		// Fetch the earliest of the inuse or current time
-		let cleanup_ts = inuse.unwrap_or(now);
-		// Get the time before which entries should be removed
-		let cleanup_ts = cleanup_ts.saturating_sub(history as u64);
+		// Calculate the history cutoff (current time - history duration)
+		let history_cutoff = now.saturating_sub(history as u64);
+		// Get the earliest active transaction version
+		let earliest_tx = self.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(now);
+		// Use the earlier of history cutoff or earliest transaction to protect active transactions
+		let cleanup_ts = history_cutoff.min(earliest_tx);
 		// Iterate over the entire tree
 		for entry in self.datastore.iter() {
 			// Fetch the entry value
@@ -363,16 +363,16 @@ where
 					if !db.background_threads_enabled.load(Ordering::Relaxed) {
 						break;
 					}
-					// Get the current timestamp version
-					let now = db.oracle.current_timestamp();
-					// Get the earliest used timestamp version
-					let inuse = db.counter_by_oracle.front().map(|e| *e.key());
+					// Get the current time in nanoseconds
+					let now = db.oracle.current_time_ns();
 					// Get the garbage collection epoch as nanoseconds
 					let history = db.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
-					// Fetch the earliest of the inuse or current time
-					let cleanup_ts = inuse.unwrap_or(now);
-					// Get the time before which entries should be removed
-					let cleanup_ts = cleanup_ts.saturating_sub(history as u64);
+					// Calculate the history cutoff (current time - history duration)
+					let history_cutoff = now.saturating_sub(history as u64);
+					// Get the earliest active transaction version
+					let earliest_tx = db.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(now);
+					// Use the earlier of history cutoff or earliest transaction to protect active transactions
+					let cleanup_ts = history_cutoff.min(earliest_tx);
 					// Iterate over the entire tree
 					for entry in db.datastore.iter() {
 						// Fetch the entry value
