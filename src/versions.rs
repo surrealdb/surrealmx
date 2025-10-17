@@ -44,13 +44,22 @@ where
 	/// Appends an element to the back of a collection.
 	#[inline]
 	pub(crate) fn push(&mut self, value: Version<V>) {
+		// Check for any existing version
 		if let Some(last) = self.inner.last() {
+			// Check if the version is newer
 			if value >= *last {
+				// Don't add duplicate sequential versions
+				if value.value == last.value {
+					return;
+				}
+				// Add the version to the list
 				self.inner.push(value);
 			} else {
+				// Insert at the correct position
 				self.insert(value);
 			}
-		} else {
+		} else if value.value.is_some() {
+			// Add the version to the list
 			self.inner.push(value);
 		}
 	}
