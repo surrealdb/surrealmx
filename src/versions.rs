@@ -73,19 +73,6 @@ where
 		self.inner.get(version).is_some_and(|v| v.value.is_none())
 	}
 
-	/// Get the index for a specific version in the versions list.
-	#[inline]
-	pub(crate) fn find_index(&self, version: u64) -> Option<usize> {
-		// Use partition_point to find the first element where v.version >= version
-		let idx = self.inner.partition_point(|v| v.version < version);
-		// We want the last element where v.version < version
-		if idx > 0 {
-			Some(idx - 1)
-		} else {
-			None
-		}
-	}
-
 	/// Fetch the entry at a specific version in the versions list.
 	#[inline]
 	pub(crate) fn fetch_version(&self, version: u64) -> Option<Arc<V>> {
@@ -120,12 +107,29 @@ where
 
 	/// Remove all versions older than the specified version.
 	#[inline]
-	pub(crate) fn gc_older_versions(&mut self, version: u64) {
+	pub(crate) fn gc_older_versions(&mut self, version: u64) -> usize {
 		// Use partition_point to find the first element where v.version >= version
 		let idx = self.inner.partition_point(|v| v.version < version);
-		// Remove all versions before the cutoff
-		if idx > 0 {
-			self.drain(0..idx);
+		// Handle the case where all versions are older than the cutoff
+		if idx >= self.inner.len() {
+			// Check if the last version is a delete
+			if let Some(last) = self.inner.last() {
+				if last.value.is_none() {
+					// Last version is a delete, remove everything
+					self.inner.clear();
+				} else if idx > 1 {
+					// Last version has data, keep it and remove all others
+					self.drain(..idx - 1);
+				}
+			}
+		} else if self.is_delete(idx) {
+			// Remove all versions up to and including this delete
+			self.drain(..=idx);
+		} else if idx > 0 {
+			// Remove all versions up to this version
+			self.drain(..idx);
 		}
+		// Return the length
+		self.inner.len()
 	}
 }

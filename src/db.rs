@@ -261,16 +261,12 @@ where
 			let versions = entry.value();
 			// Modify the version entries
 			let mut versions = versions.write();
-			// Find the last version with `version < cleanup_ts`
-			if let Some(idx) = versions.find_index(cleanup_ts) {
-				// Check if the found version is a 'delete'
-				if versions.is_delete(idx) {
-					// Remove all versions up to and including this version
-					versions.drain(..=idx);
-				} else if idx > 0 {
-					// Remove all versions up to this version
-					versions.drain(..idx);
-				};
+			// Clean up unnecessary older versions
+			if versions.gc_older_versions(cleanup_ts) == 0 {
+				// Drop the version reference
+				drop(versions);
+				// Remove the entry from the datastore
+				self.datastore.remove(entry.key());
 			}
 		}
 	}
@@ -381,16 +377,12 @@ where
 						let versions = entry.value();
 						// Modify the version entries
 						let mut versions = versions.write();
-						// Find the last version with `version < cleanup_ts`
-						if let Some(idx) = versions.find_index(cleanup_ts) {
-							// Check if the found version is a 'delete'
-							if versions.is_delete(idx) {
-								// Remove all versions up to and including this version
-								versions.drain(..=idx);
-							} else if idx > 0 {
-								// Remove all versions up to this version
-								versions.drain(..idx);
-							};
+						// Clean up unnecessary older versions
+						if versions.gc_older_versions(cleanup_ts) == 0 {
+							// Drop the version reference
+							drop(versions);
+							// Remove the entry from the datastore
+							db.datastore.remove(entry.key());
 						}
 					}
 				}
