@@ -160,15 +160,15 @@ where
 		Ok(db)
 	}
 
-	/// Configure the database to use inactive garbage collection.
+	/// Configure the database to use immediate garbage collection.
 	///
-	/// This function will create a background thread which
-	/// will periodically remove any MVCC transaction entries
-	/// which are older than the current database timestamp,
-	/// and which are no longer being used by any long-running
-	/// transactions. Effectively previous versions are cleaned
-	/// up and removed as soon as possible, whilst ensuring
-	/// that transaction snapshots still operate correctly.
+	/// In this mode, old MVCC transaction entries are cleaned up
+	/// during transaction commits as soon as they are no longer
+	/// needed by any active read transactions. This ensures minimal
+	/// memory usage while maintaining correctness for concurrent
+	/// transactions. Additionally, if [`DatabaseOptions::enable_gc`]
+	/// is set, a background thread will periodically clean up any
+	/// stale versions.
 	pub fn with_gc(self) -> Self {
 		// Store the garbage collection epoch
 		*self.garbage_collection_epoch.write() = None;
@@ -176,17 +176,15 @@ where
 		self
 	}
 
-	/// Configure the database to use historic garbage collection.
+	/// Configure the database to preserve versions for a specified duration.
 	///
-	/// This function will create a background thread which
-	/// will periodically remove any MVCC transaction entries
-	/// which are older than the historic duration subtracted
-	/// from the current database timestamp, and which are no
-	/// longer being used by any long-running transactions.
-	/// Effectively previous versions are cleaned up and
-	/// removed if the transaction entries are older than the
-	/// specified duration, whilst ensuring that transaction
-	/// snapshots still operate correctly.
+	/// In this mode, MVCC transaction entries are retained for at least
+	/// the specified duration, allowing point-in-time reads within that
+	/// window. Old versions are cleaned up during transaction commits
+	/// once they exceed the history duration and are no longer needed
+	/// by active transactions. Additionally, if [`DatabaseOptions::enable_gc`]
+	/// is set, a background thread will periodically clean up stale
+	/// versions across the entire datastore.
 	pub fn with_gc_history(self, history: Duration) -> Self {
 		// Store the garbage collection epoch
 		*self.garbage_collection_epoch.write() = Some(history);
@@ -242,7 +240,11 @@ where
 
 	/// Manually perform garbage collection of stale record versions.
 	///
-	/// This should be called when automatic garbage collection is disabled via
+	/// This function performs a full datastore scan to clean up old versions
+	/// across all keys. Note that inline garbage collection happens automatically
+	/// during transaction commits, but only for keys being modified. This function
+	/// is useful for cleaning up stale versions on keys that haven't been recently
+	/// modified, or when automatic background GC is disabled via
 	/// [`DatabaseOptions::enable_gc`].
 	pub fn run_gc(&self) {
 		// Get the current timestamp version
