@@ -2814,4 +2814,100 @@ mod tests {
 		// Should error when no more savepoints available
 		assert!(matches!(tx_stack.rollback_to_savepoint(), Err(Error::NoSavepoint)));
 	}
+
+	#[test]
+	fn test_gc_does_not_remove_active_versions() {
+		// Test for garbage collection regression issue where versions
+		// were being removed too aggressively
+		// Create a database with GC disabled (automatic version cleanup enabled)
+		let db: Database<Vec<u8>, Vec<u8>> = Database::new();
+
+		// Insert 10,000 keys one-by-one
+		for i in 0..10_000 {
+			let key = format!("key_{:08}", i).into_bytes();
+			let value = format!("value_{:08}", i).into_bytes();
+
+			let mut tx = db.transaction(true);
+			tx.put(key, value).unwrap();
+			tx.commit().unwrap();
+		}
+
+		// Read each key one-by-one
+		for i in 0..10_000 {
+			let key = format!("key_{:08}", i).into_bytes();
+			let expected_value = format!("value_{:08}", i).into_bytes();
+
+			let mut tx = db.transaction(false);
+			let result = tx.get(key.clone());
+			assert!(result.is_ok(), "Failed to get key at index {i}: {result:?}");
+			let value = result.unwrap();
+			assert!(
+				value.is_some(),
+				"Key at index {} was not found (version was garbage collected too early)",
+				i
+			);
+			assert_eq!(*value.unwrap(), expected_value, "Value mismatch at index {i}");
+			tx.cancel().unwrap();
+		}
+	}
+
+	#[test]
+	fn test_gc_concurrent_readers() {
+		use std::sync::Arc;
+		use std::thread;
+
+		// Create a database
+		let db: Database<Vec<u8>, Vec<u8>> = Database::new();
+
+		// Insert initial data
+		{
+			let mut tx = db.transaction(true);
+			for i in 0..1000 {
+				let key = format!("key_{:08}", i).into_bytes();
+				let value = format!("value_{:08}", i).into_bytes();
+				tx.put(key, value).unwrap();
+			}
+			tx.commit().unwrap();
+		}
+
+		// Wrap database in Arc for sharing across threads
+		let db = Arc::new(db);
+
+		// Spawn multiple reader threads
+		let mut handles = vec![];
+		for thread_id in 0..4 {
+			let db = Arc::clone(&db);
+			let handle = thread::spawn(move || {
+				// Each thread reads all keys
+				for i in 0..1000 {
+					let key = format!("key_{:08}", i).into_bytes();
+					let mut tx = db.transaction(false);
+					let result = tx.get(key.clone());
+					assert!(
+						result.is_ok(),
+						"Thread {thread_id} failed to get key at index {i}: {result:?}",
+					);
+					let value = result.unwrap();
+					assert!(value.is_some(), "Thread {thread_id} could not find key at index {i} (version was garbage collected)");
+					tx.cancel().unwrap();
+
+					// Interleave with some writes to trigger GC
+					// Each thread writes to its own keys to avoid conflicts
+					if i % 100 == 0 {
+						let mut write_tx = db.transaction(true);
+						let update_key = format!("thread_{thread_id}_key_{i:08}").into_bytes();
+						let update_value = format!("updated_by_thread_{thread_id}").into_bytes();
+						write_tx.put(update_key, update_value).unwrap();
+						write_tx.commit().unwrap();
+					}
+				}
+			});
+			handles.push(handle);
+		}
+
+		// Wait for all threads to complete
+		for handle in handles {
+			handle.join().unwrap();
+		}
+	}
 }
