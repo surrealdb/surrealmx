@@ -479,7 +479,7 @@ where
 					let earliest = self.database.transaction_commit_queue.front().map(|e| *e.key());
 					// Get a mutable reference to the versions list
 					let mut versions = entry.value().write();
-					// Clean up unnecessaryolder versions
+					// Clean up unnecessary older versions
 					if let Some(version) = earliest {
 						versions.gc_older_versions(version);
 					}
