@@ -920,9 +920,19 @@ where
 				self.track_scan_range(beg, end);
 			}
 		}
-		// Create the 2-way merge iterator
+		// Build combined writeset from merge queue entries only
+		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
+		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
+			if !entry.is_removed() {
+				for (k, v) in entry.value().writeset.range(beg..end) {
+					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+		}
+		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			combined_writeset,
 			self.writeset.range(beg.clone()..end.clone()),
 			direction,
 			version,
@@ -976,9 +986,19 @@ where
 				self.track_scan_range(beg, end);
 			}
 		}
-		// Create the 2-way merge iterator
+		// Build combined writeset from merge queue entries only
+		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
+		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
+			if !entry.is_removed() {
+				for (k, v) in entry.value().writeset.range(beg..end) {
+					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+		}
+		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			combined_writeset,
 			self.writeset.range(beg.clone()..end.clone()),
 			direction,
 			version,
@@ -1032,9 +1052,19 @@ where
 				self.track_scan_range(beg, end);
 			}
 		}
-		// Create the 2-way merge iterator
+		// Build combined writeset from merge queue entries only
+		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
+		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
+			if !entry.is_removed() {
+				for (k, v) in entry.value().writeset.range(beg..end) {
+					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+		}
+		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
 			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			combined_writeset,
 			self.writeset.range(beg.clone()..end.clone()),
 			direction,
 			version,
@@ -1086,9 +1116,19 @@ where
 				self.track_scan_range(beg, end);
 			}
 		}
-		// Create the 2-way merge iterator to iterate over keys
+		// Build combined writeset from merge queue entries only
+		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
+		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
+			if !entry.is_removed() {
+				for (k, v) in entry.value().writeset.range(beg..end) {
+					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+		}
+		// Create the 3-way merge iterator to iterate over keys
 		let iter = MergeIterator::new(
 			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			combined_writeset,
 			self.writeset.range(beg.clone()..end.clone()),
 			Direction::Forward,
 			version,
