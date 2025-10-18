@@ -84,9 +84,35 @@ where
 
 	/// Fetch the entry at a specific version in the versions list.
 	#[inline]
+	pub(crate) fn find_index_lt_version(&self, version: u64) -> usize {
+		// Check the length of the list
+		if self.inner.len() <= 4 {
+			// Linear search for small lists
+			self.inner.iter().rposition(|v| v.version < version).map_or(0, |i| i + 1)
+		} else {
+			// Use partition_point to find the first element where v.version > version
+			self.inner.partition_point(|v| v.version < version)
+		}
+	}
+
+	/// Fetch the entry at a specific version in the versions list.
+	#[inline]
+	pub(crate) fn find_index_lte_version(&self, version: u64) -> usize {
+		// Check the length of the list
+		if self.inner.len() <= 4 {
+			// Linear search for small lists
+			self.inner.iter().rposition(|v| v.version <= version).map_or(0, |i| i + 1)
+		} else {
+			// Use partition_point to find the first element where v.version > version
+			self.inner.partition_point(|v| v.version <= version)
+		}
+	}
+
+	/// Fetch the entry at a specific version in the versions list.
+	#[inline]
 	pub(crate) fn fetch_version(&self, version: u64) -> Option<Arc<V>> {
 		// Use partition_point to find the first element where v.version > version
-		let idx = self.inner.partition_point(|v| v.version <= version);
+		let idx = self.find_index_lte_version(version);
 		// We want the last element where v.version <= version
 		if idx > 0 {
 			self.inner.get(idx - 1).and_then(|v| v.value.clone())
@@ -99,7 +125,7 @@ where
 	#[inline]
 	pub(crate) fn exists_version(&self, version: u64) -> bool {
 		// Use partition_point to find the first element where v.version > version
-		let idx = self.inner.partition_point(|v| v.version <= version);
+		let idx = self.find_index_lte_version(version);
 		// We want the last element where v.version <= version
 		if idx > 0 {
 			self.inner.get(idx - 1).is_some_and(|v| v.value.is_some())
@@ -118,7 +144,7 @@ where
 	#[inline]
 	pub(crate) fn gc_older_versions(&mut self, version: u64) -> usize {
 		// Use partition_point to find the first element where v.version >= version
-		let idx = self.inner.partition_point(|v| v.version < version);
+		let idx = self.find_index_lt_version(version);
 		// Handle the case where all versions are older than the cutoff
 		if idx >= self.inner.len() {
 			// Check if the last version is a delete
