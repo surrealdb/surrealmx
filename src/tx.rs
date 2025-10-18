@@ -920,9 +920,19 @@ where
 				self.track_scan_range(beg, end);
 			}
 		}
-		// Create the 2-way merge iterator
+		// Build combined writeset from merge queue entries only
+		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
+		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
+			if !entry.is_removed() {
+				for (k, v) in entry.value().writeset.range(beg..end) {
+					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+		}
+		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			combined_writeset,
 			self.writeset.range(beg.clone()..end.clone()),
 			direction,
 			version,
@@ -976,9 +986,19 @@ where
 				self.track_scan_range(beg, end);
 			}
 		}
-		// Create the 2-way merge iterator
+		// Build combined writeset from merge queue entries only
+		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
+		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
+			if !entry.is_removed() {
+				for (k, v) in entry.value().writeset.range(beg..end) {
+					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+		}
+		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			combined_writeset,
 			self.writeset.range(beg.clone()..end.clone()),
 			direction,
 			version,
@@ -1032,9 +1052,19 @@ where
 				self.track_scan_range(beg, end);
 			}
 		}
-		// Create the 2-way merge iterator
+		// Build combined writeset from merge queue entries only
+		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
+		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
+			if !entry.is_removed() {
+				for (k, v) in entry.value().writeset.range(beg..end) {
+					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+		}
+		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
 			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			combined_writeset,
 			self.writeset.range(beg.clone()..end.clone()),
 			direction,
 			version,
@@ -1086,9 +1116,19 @@ where
 				self.track_scan_range(beg, end);
 			}
 		}
-		// Create the 2-way merge iterator to iterate over keys
+		// Build combined writeset from merge queue entries only
+		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
+		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
+			if !entry.is_removed() {
+				for (k, v) in entry.value().writeset.range(beg..end) {
+					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+		}
+		// Create the 3-way merge iterator to iterate over keys
 		let iter = MergeIterator::new(
 			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			combined_writeset,
 			self.writeset.range(beg.clone()..end.clone()),
 			Direction::Forward,
 			version,
@@ -1139,6 +1179,19 @@ where
 	where
 		Q: Borrow<K>,
 	{
+		// Fetch the transaction merge queue range
+		let iter = self.database.transaction_merge_queue.range(..=version);
+		// Check the current entry iteration
+		for entry in iter.rev() {
+			// There is a valid merge queue entry
+			if !entry.is_removed() {
+				// Check if the entry has a key
+				if let Some(v) = entry.value().writeset.get(key.borrow()) {
+					// Return the entry value
+					return v.as_ref().map(|arc| arc.as_ref().clone());
+				}
+			}
+		}
 		// Check the key in the datastore
 		self.database
 			.datastore
@@ -1153,6 +1206,19 @@ where
 	where
 		Q: Borrow<K>,
 	{
+		// Fetch the transaction merge queue range
+		let iter = self.database.transaction_merge_queue.range(..=version);
+		// Check the current entry iteration
+		for entry in iter.rev() {
+			// There is a valid merge queue entry
+			if !entry.is_removed() {
+				// Check if the entry has a key
+				if let Some(v) = entry.value().writeset.get(key.borrow()) {
+					// Return whether the entry exists
+					return v.is_some();
+				}
+			}
+		}
 		// Check the key in the datastore
 		self.database
 			.datastore
@@ -1167,6 +1233,22 @@ where
 	where
 		Q: Borrow<K>,
 	{
+		// Fetch the transaction merge queue range
+		let iter = self.database.transaction_merge_queue.range(..=version);
+		// Check the current entry iteration
+		for entry in iter.rev() {
+			if !entry.is_removed() {
+				// Check if the entry has a key
+				if let Some(v) = entry.value().writeset.get(key.borrow()) {
+					// Return whether the entry matches
+					return match (chk.as_ref(), v.as_ref()) {
+						(Some(x), Some(y)) => x == y.as_ref(),
+						(None, None) => true,
+						_ => false,
+					};
+				}
+			}
+		}
 		// Check the key in the datastore
 		match (
 			chk.as_ref(),
