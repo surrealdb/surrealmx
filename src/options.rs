@@ -8,7 +8,7 @@ pub const DEFAULT_RESET_THRESHOLD: usize = 100;
 pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Default interval at which transaction queue cleanup is performed.
-pub const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_millis(250);
+pub const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Default interval at which the timestamp oracle resyncs with the system clock.
 pub const DEFAULT_RESYNC_INTERVAL: Duration = Duration::from_secs(5);

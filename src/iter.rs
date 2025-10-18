@@ -296,32 +296,10 @@ where
 			match next_source {
 				KeySource::Transaction => {
 					let (sk, sv) = self.self_next.unwrap();
+					let exists = sv.is_some();
 
-					// Check if we should skip (only skip existing entries)
-					if sv.is_some() && self.skip_remaining > 0 {
-						// Advance self iterator
-						self.self_next = match self.direction {
-							Direction::Forward => self.self_iter.next(),
-							Direction::Reverse => self.self_iter.next_back(),
-						};
-
-						// Skip same key in tree iterator
-						if let Some(t_entry) = &self.tree_next {
-							if t_entry.key() == sk {
-								self.tree_next = match self.direction {
-									Direction::Forward => self.tree_iter.next(),
-									Direction::Reverse => self.tree_iter.next_back(),
-								};
-							}
-						}
-
-						self.skip_remaining -= 1;
-						continue;
-					}
-
-					// Only clone key and value when returning
-					let key = sk.clone();
-					let value_opt = sv.clone();
+					// Store key reference for deferred cloning
+					let key_ref = sk;
 
 					// Advance self iterator
 					self.self_next = match self.direction {
@@ -331,7 +309,7 @@ where
 
 					// Skip same key in tree iterator
 					if let Some(t_entry) = &self.tree_next {
-						if t_entry.key() == &key {
+						if t_entry.key() == key_ref {
 							self.tree_next = match self.direction {
 								Direction::Forward => self.tree_iter.next(),
 								Direction::Reverse => self.tree_iter.next_back(),
@@ -339,28 +317,35 @@ where
 						}
 					}
 
-					return Some((key, value_opt));
+					// Check if we should skip (only skip existing entries)
+					if exists && self.skip_remaining > 0 {
+						self.skip_remaining -= 1;
+						continue;
+					}
+
+					// Only clone key and value when returning
+					return Some((key_ref.clone(), sv.clone()));
 				}
 				KeySource::Datastore => {
 					let t_entry = self.tree_next.as_ref().unwrap();
 					let tv = t_entry.value().read();
 					let value_opt = tv.fetch_version(self.version);
+					let exists = value_opt.is_some();
 					drop(tv);
 
-					// Check if we should skip (only skip existing entries)
-					if value_opt.is_some() && self.skip_remaining > 0 {
+					// Handle skipping BEFORE cloning the key
+					if exists && self.skip_remaining > 0 {
 						// Advance tree iterator
 						self.tree_next = match self.direction {
 							Direction::Forward => self.tree_iter.next(),
 							Direction::Reverse => self.tree_iter.next_back(),
 						};
-
 						self.skip_remaining -= 1;
 						continue;
 					}
 
-					// Only clone key and entry when returning
-					let tk = t_entry.key().clone();
+					// Only clone key if we're returning it
+					let key_clone = t_entry.key().clone();
 
 					// Advance tree iterator
 					self.tree_next = match self.direction {
@@ -368,7 +353,7 @@ where
 						Direction::Reverse => self.tree_iter.next_back(),
 					};
 
-					return Some((tk, value_opt));
+					return Some((key_clone, value_opt));
 				}
 				KeySource::None => return None,
 			}

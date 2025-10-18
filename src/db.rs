@@ -207,34 +207,14 @@ where
 	/// This should be called when automatic cleanup is disabled via
 	/// [`DatabaseOptions::enable_cleanup`].
 	pub fn run_cleanup(&self) {
-		{
-			// Get the current version sequence number
-			let value = self.oracle.current_timestamp();
-			// Iterate over transaction version counters
-			self.counter_by_oracle.range(..value).for_each(|e| {
-				if e.value().load(Ordering::Relaxed) == 0 {
-					e.remove();
-				}
+		// Get the oldest commit entry which is still active
+		if let Some(entry) = self.counter_by_commit.front() {
+			// Get the oldest commit version
+			let oldest = entry.key();
+			// Remove commits up to this commit queue id from the transaction queue
+			self.transaction_commit_queue.range(..oldest).for_each(|e| {
+				e.remove();
 			});
-		}
-		{
-			// Get the current commit sequence number
-			let value = self.transaction_commit_id.load(Ordering::Relaxed);
-			// Iterate over transaction commit counters
-			self.counter_by_commit.range(..value).for_each(|e| {
-				if e.value().load(Ordering::Relaxed) == 0 {
-					e.remove();
-				}
-			});
-			// Get the oldest commit entry which is still active
-			if let Some(entry) = self.counter_by_commit.front() {
-				// Get the oldest commit version
-				let oldest = entry.key();
-				// Remove commits up to this commit queue id from the transaction queue
-				self.transaction_commit_queue.range(..oldest).for_each(|e| {
-					e.remove();
-				});
-			}
 		}
 	}
 
@@ -307,36 +287,15 @@ where
 					if !db.background_threads_enabled.load(Ordering::Relaxed) {
 						break;
 					}
-					// Clean up the transaction version counters
-					{
-						// Get the current version sequence number
-						let value = db.oracle.current_timestamp();
-						// Iterate over transaction version counters
-						db.counter_by_oracle.range(..value).for_each(|e| {
-							if e.value().load(Ordering::Relaxed) == 0 {
-								e.remove();
-							}
+					// Clean up the transaction commit queue
+					// Get the oldest commit entry which is still active
+					if let Some(entry) = db.counter_by_commit.front() {
+						// Get the oldest commit version
+						let oldest = entry.key();
+						// Remove the commits up to this commit queue id from the transaction queue
+						db.transaction_commit_queue.range(..oldest).for_each(|e| {
+							e.remove();
 						});
-					}
-					// Clean up the transaction commit counters
-					{
-						// Get the current commit sequence number
-						let value = db.transaction_commit_id.load(Ordering::Relaxed);
-						// Iterate over transaction commit counters
-						db.counter_by_commit.range(..value).for_each(|e| {
-							if e.value().load(Ordering::Relaxed) == 0 {
-								e.remove();
-							}
-						});
-						// Get the oldest commit entry which is still active
-						if let Some(entry) = db.counter_by_commit.front() {
-							// Get the oldest commit version
-							let oldest = entry.key();
-							// Remove the commits up to this commit queue id from the transaction queue
-							db.transaction_commit_queue.range(..oldest).for_each(|e| {
-								e.remove();
-							});
-						}
 					}
 				}
 			});

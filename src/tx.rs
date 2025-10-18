@@ -64,12 +64,12 @@ where
 	fn drop(&mut self) {
 		if let Some(inner) = self.inner.take() {
 			// Reduce the transaction commit counter
-			if inner.counter_commit.fetch_sub(1, Ordering::Relaxed) == 0 {
+			if inner.counter_commit.fetch_sub(1, Ordering::Relaxed) == 1 {
 				// If this was the last reference, remove the counter entry
 				inner.database.counter_by_commit.remove(&inner.commit);
 			}
 			// Reduce the transaction version counter
-			if inner.counter_version.fetch_sub(1, Ordering::Relaxed) == 0 {
+			if inner.counter_version.fetch_sub(1, Ordering::Relaxed) == 1 {
 				// If this was the last reference, remove the counter entry
 				inner.database.counter_by_oracle.remove(&inner.version);
 			}
@@ -300,15 +300,16 @@ where
 			true => self.writeset = BTreeMap::new(),
 			false => self.writeset.clear(),
 		};
+		// Clear or completely reset the allocated writeset
+		match self.savepoint_stack.len() > threshold {
+			true => self.savepoint_stack = Vec::new(),
+			false => self.savepoint_stack.clear(),
+		};
 		// Reset the transaction
 		self.done = false;
 		self.write = write;
 		self.commit = commit;
 		self.version = version;
-		self.readset.clear();
-		self.scanset.clear();
-		self.writeset.clear();
-		self.savepoint_stack.clear();
 		self.counter_commit = counter_commit;
 		self.counter_version = counter_version;
 	}
@@ -523,7 +524,9 @@ where
 					// Fetch for the key from the datastore
 					let res = self.exists_in_datastore(key.borrow(), self.version);
 					// Check whether we should track key reads
-					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+					if self.mode >= IsolationLevel::SerializableSnapshotIsolation
+						&& !self.readset.contains(key.borrow())
+					{
 						self.readset.insert(key.into());
 					}
 					// Return the result
@@ -576,7 +579,9 @@ where
 					// Fetch for the key from the datastore
 					let res = self.fetch_in_datastore(key.borrow(), self.version);
 					// Check whether we should track key reads
-					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+					if self.mode >= IsolationLevel::SerializableSnapshotIsolation
+						&& !self.readset.contains(key.borrow())
+					{
 						self.readset.insert(key.into());
 					}
 					// Return the result
@@ -863,6 +868,28 @@ where
 		self.scan_all_versions_any(rng, skip, limit, self.version)
 	}
 
+	/// Helper to track a scan range in the scanset (optimized to minimize clones)
+	#[inline(always)]
+	fn track_scan_range(&mut self, beg: &K, end: &K) {
+		// Add this range scan entry to the saved scans
+		match self.scanset.range_mut(..=beg).next_back() {
+			// There is no entry for this range scan
+			None => {
+				self.scanset.insert(beg.clone(), end.clone());
+			}
+			// The saved scan stops before this range
+			Some(range) if &*range.1 < beg => {
+				self.scanset.insert(beg.clone(), end.clone());
+			}
+			// The saved scan does not extend far enough
+			Some(range) if &*range.1 < end => {
+				*range.1 = end.clone();
+			}
+			// This range scan is already covered
+			_ => (),
+		}
+	}
+
 	/// Retrieve a count of keys from the database
 	fn total_any<Q>(
 		&mut self,
@@ -890,23 +917,7 @@ where
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
 			if version == self.version {
-				// Add this range scan entry to the saved scans
-				match self.scanset.range_mut(..=beg).next_back() {
-					// There is no entry for this range scan
-					None => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan stops before this range
-					Some(range) if &*range.1 < beg => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan does not extend far enough
-					Some(range) if &*range.1 < end => {
-						*range.1 = end.clone();
-					}
-					// This range scan is already covered
-					_ => (),
-				};
+				self.track_scan_range(beg, end);
 			}
 		}
 		// Create the 2-way merge iterator
@@ -962,23 +973,7 @@ where
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
 			if version == self.version {
-				// Add this range scan entry to the saved scans
-				match self.scanset.range_mut(..=beg).next_back() {
-					// There is no entry for this range scan
-					None => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan stops before this range
-					Some(range) if &*range.1 < beg => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan does not extend far enough
-					Some(range) if &*range.1 < end => {
-						*range.1 = end.clone();
-					}
-					// This range scan is already covered
-					_ => (),
-				};
+				self.track_scan_range(beg, end);
 			}
 		}
 		// Create the 2-way merge iterator
@@ -1034,23 +1029,7 @@ where
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
 			if version == self.version {
-				// Add this range scan entry to the saved scans
-				match self.scanset.range_mut(..=beg).next_back() {
-					// There is no entry for this range scan
-					None => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan stops before this range
-					Some(range) if &*range.1 < beg => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan does not extend far enough
-					Some(range) if &*range.1 < end => {
-						*range.1 = end.clone();
-					}
-					// This range scan is already covered
-					_ => (),
-				};
+				self.track_scan_range(beg, end);
 			}
 		}
 		// Create the 2-way merge iterator
@@ -1104,23 +1083,7 @@ where
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			// Track scans if scanning the latest version
 			if version == self.version {
-				// Add this range scan entry to the saved scans
-				match self.scanset.range_mut(..=beg).next_back() {
-					// There is no entry for this range scan
-					None => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan stops before this range
-					Some(range) if &*range.1 < beg => {
-						self.scanset.insert(beg.clone(), end.clone());
-					}
-					// The saved scan does not extend far enough
-					Some(range) if &*range.1 < end => {
-						*range.1 = end.clone();
-					}
-					// This range scan is already covered
-					_ => (),
-				};
+				self.track_scan_range(beg, end);
 			}
 		}
 		// Create the 2-way merge iterator to iterate over keys
@@ -1176,20 +1139,7 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		// Fetch the transaction merge queue range
-		let iter = self.database.transaction_merge_queue.range(..=version);
-		// Check the current entry iteration
-		for entry in iter.rev() {
-			// There is a valid merge queue entry
-			if !entry.is_removed() {
-				// Check if the entry has a key
-				if let Some(v) = entry.value().writeset.get(key.borrow()) {
-					// Return the entry value
-					return v.as_ref().map(|arc| arc.as_ref().clone());
-				}
-			}
-		}
-		// Check the key
+		// Check the key in the datastore
 		self.database
 			.datastore
 			.get(key.borrow())
@@ -1203,20 +1153,7 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		// Fetch the transaction merge queue range
-		let iter = self.database.transaction_merge_queue.range(..=version);
-		// Check the current entry iteration
-		for entry in iter.rev() {
-			// There is a valid merge queue entry
-			if !entry.is_removed() {
-				// Check if the entry has a key
-				if let Some(v) = entry.value().writeset.get(key.borrow()) {
-					// Return whether the entry exists
-					return v.is_some();
-				}
-			}
-		}
-		// Check the key
+		// Check the key in the datastore
 		self.database
 			.datastore
 			.get(key.borrow())
@@ -1230,23 +1167,7 @@ where
 	where
 		Q: Borrow<K>,
 	{
-		// Fetch the transaction merge queue range
-		let iter = self.database.transaction_merge_queue.range(..=version);
-		// Check the current entry iteration
-		for entry in iter.rev() {
-			if !entry.is_removed() {
-				// Check if the entry has a key
-				if let Some(v) = entry.value().writeset.get(key.borrow()) {
-					// Return whether the entry matches
-					return match (chk.as_ref(), v.as_ref()) {
-						(Some(x), Some(y)) => x == y.as_ref(),
-						(None, None) => true,
-						_ => false,
-					};
-				}
-			}
-		}
-		// Check the key
+		// Check the key in the datastore
 		match (
 			chk.as_ref(),
 			self.database
