@@ -524,10 +524,10 @@ where
 					// Fetch for the key from the datastore
 					let res = self.exists_in_datastore(key.borrow(), self.version);
 					// Check whether we should track key reads
-					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-						if !self.readset.contains(key.borrow()) {
-							self.readset.insert(key.into());
-						}
+					if self.mode >= IsolationLevel::SerializableSnapshotIsolation
+						&& !self.readset.contains(key.borrow())
+					{
+						self.readset.insert(key.into());
 					}
 					// Return the result
 					res
@@ -579,10 +579,10 @@ where
 					// Fetch for the key from the datastore
 					let res = self.fetch_in_datastore(key.borrow(), self.version);
 					// Check whether we should track key reads
-					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-						if !self.readset.contains(key.borrow()) {
-							self.readset.insert(key.into());
-						}
+					if self.mode >= IsolationLevel::SerializableSnapshotIsolation
+						&& !self.readset.contains(key.borrow())
+					{
+						self.readset.insert(key.into());
 					}
 					// Return the result
 					res
