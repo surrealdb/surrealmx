@@ -300,12 +300,16 @@ where
 			true => self.writeset = BTreeMap::new(),
 			false => self.writeset.clear(),
 		};
+		// Clear or completely reset the allocated writeset
+		match self.savepoint_stack.len() > threshold {
+			true => self.savepoint_stack = Vec::new(),
+			false => self.savepoint_stack.clear(),
+		};
 		// Reset the transaction
 		self.done = false;
 		self.write = write;
 		self.commit = commit;
 		self.version = version;
-		self.savepoint_stack.clear();
 		self.counter_commit = counter_commit;
 		self.counter_version = counter_version;
 	}
