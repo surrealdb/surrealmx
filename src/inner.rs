@@ -14,7 +14,6 @@
 
 //! This module stores the inner in-memory database type.
 
-use crate::options::DEFAULT_RESET_THRESHOLD;
 use crate::oracle::Oracle;
 use crate::persistence::Persistence;
 use crate::queue::{Commit, Merge};
@@ -88,7 +87,7 @@ where
 			background_threads_enabled: AtomicBool::new(true),
 			transaction_cleanup_handle: RwLock::new(None),
 			garbage_collection_handle: RwLock::new(None),
-			reset_threshold: DEFAULT_RESET_THRESHOLD,
+			reset_threshold: opts.reset_threshold,
 		}
 	}
 }
