@@ -924,10 +924,9 @@ where
 		// Build combined writeset from merge queue entries only
 		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
 		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
-			if !entry.is_removed() {
-				for (k, v) in entry.value().writeset.range(beg..end) {
-					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
-				}
+			// Don't skip removed entries to avoid race conditions
+			for (k, v) in entry.value().writeset.range(beg..end) {
+				combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
 			}
 		}
 		// Create the 3-way merge iterator
@@ -990,10 +989,9 @@ where
 		// Build combined writeset from merge queue entries only
 		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
 		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
-			if !entry.is_removed() {
-				for (k, v) in entry.value().writeset.range(beg..end) {
-					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
-				}
+			// Don't skip removed entries to avoid race conditions
+			for (k, v) in entry.value().writeset.range(beg..end) {
+				combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
 			}
 		}
 		// Create the 3-way merge iterator
@@ -1056,10 +1054,9 @@ where
 		// Build combined writeset from merge queue entries only
 		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
 		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
-			if !entry.is_removed() {
-				for (k, v) in entry.value().writeset.range(beg..end) {
-					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
-				}
+			// Don't skip removed entries to avoid race conditions
+			for (k, v) in entry.value().writeset.range(beg..end) {
+				combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
 			}
 		}
 		// Create the 3-way merge iterator
@@ -1120,10 +1117,9 @@ where
 		// Build combined writeset from merge queue entries only
 		let mut combined_writeset: BTreeMap<K, Option<Arc<V>>> = BTreeMap::new();
 		for entry in self.database.transaction_merge_queue.range(..=version).rev() {
-			if !entry.is_removed() {
-				for (k, v) in entry.value().writeset.range(beg..end) {
-					combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
-				}
+			// Don't skip removed entries to avoid race conditions
+			for (k, v) in entry.value().writeset.range(beg..end) {
+				combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
 			}
 		}
 		// Create the 3-way merge iterator to iterate over keys
@@ -1184,13 +1180,13 @@ where
 		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Check the current entry iteration
 		for entry in iter.rev() {
-			// There is a valid merge queue entry
-			if !entry.is_removed() {
-				// Check if the entry has a key
-				if let Some(v) = entry.value().writeset.get(key.borrow()) {
-					// Return the entry value
-					return v.as_ref().map(|arc| arc.as_ref().clone());
-				}
+			// Even if the entry is marked as removed, we still check it to avoid a race
+			// where the entry is removed after we check but before the data is visible
+			// in the datastore. The merge queue entry remains accessible even when removed.
+			// Check if the entry has a key
+			if let Some(v) = entry.value().writeset.get(key.borrow()) {
+				// Return the entry value
+				return v.as_ref().map(|arc| arc.as_ref().clone());
 			}
 		}
 		// Check the key in the datastore
@@ -1211,13 +1207,13 @@ where
 		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Check the current entry iteration
 		for entry in iter.rev() {
-			// There is a valid merge queue entry
-			if !entry.is_removed() {
-				// Check if the entry has a key
-				if let Some(v) = entry.value().writeset.get(key.borrow()) {
-					// Return whether the entry exists
-					return v.is_some();
-				}
+			// Even if the entry is marked as removed, we still check it to avoid a race
+			// where the entry is removed after we check but before the data is visible
+			// in the datastore. The merge queue entry remains accessible even when removed.
+			// Check if the entry has a key
+			if let Some(v) = entry.value().writeset.get(key.borrow()) {
+				// Return whether the entry exists
+				return v.is_some();
 			}
 		}
 		// Check the key in the datastore
@@ -1238,16 +1234,17 @@ where
 		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Check the current entry iteration
 		for entry in iter.rev() {
-			if !entry.is_removed() {
-				// Check if the entry has a key
-				if let Some(v) = entry.value().writeset.get(key.borrow()) {
-					// Return whether the entry matches
-					return match (chk.as_ref(), v.as_ref()) {
-						(Some(x), Some(y)) => x == y.as_ref(),
-						(None, None) => true,
-						_ => false,
-					};
-				}
+			// Even if the entry is marked as removed, we still check it to avoid a race
+			// where the entry is removed after we check but before the data is visible
+			// in the datastore. The merge queue entry remains accessible even when removed.
+			// Check if the entry has a key
+			if let Some(v) = entry.value().writeset.get(key.borrow()) {
+				// Return whether the entry matches
+				return match (chk.as_ref(), v.as_ref()) {
+					(Some(x), Some(y)) => x == y.as_ref(),
+					(None, None) => true,
+					_ => false,
+				};
 			}
 		}
 		// Check the key in the datastore
@@ -1349,6 +1346,8 @@ mod tests {
 
 	use crate::err::Error;
 	use crate::Database;
+	use std::sync::Arc;
+	use std::thread;
 
 	#[test]
 	fn mvcc_non_conflicting_keys_should_succeed() {
@@ -2898,6 +2897,177 @@ mod tests {
 		// Wait for all threads to complete
 		for handle in handles {
 			handle.join().unwrap();
+		}
+	}
+
+	#[test]
+	fn test_concurrent_write_read_merge_queue_race() {
+		// This test specifically targets the race condition where readers check
+		// is_removed() on merge queue entries and miss data that's being merged.
+		// The race manifests under high concurrency when:
+		// 1. Writer commits and merges data into datastore
+		// 2. Writer removes entry from merge queue
+		// 3. Reader checks merge queue (sees removed), checks datastore (doesn't see data yet)
+		//
+		// This was fixed by removing the is_removed() checks and always checking all
+		// merge queue entries, since crossbeam-skiplist guarantees they remain accessible.
+
+		let db: Database<Vec<u8>, Vec<u8>> = Database::new();
+		let db = Arc::new(db);
+
+		// Run multiple iterations to increase chance of hitting the race
+		for iteration in 0..100 {
+			let key = format!("race_test_key_{}", iteration).into_bytes();
+			let value = format!("race_test_value_{}", iteration).into_bytes();
+
+			let db_writer = Arc::clone(&db);
+			let key_writer = key.clone();
+			let value_writer = value.clone();
+
+			let db_reader = Arc::clone(&db);
+			let key_reader = key.clone();
+			let value_reader = value.clone();
+
+			// Spawn writer thread
+			let writer = thread::spawn(move || {
+				let mut tx = db_writer.transaction(true);
+				tx.set(key_writer, value_writer).unwrap();
+				tx.commit().unwrap();
+			});
+
+			// Spawn reader thread that races with the writer
+			let reader = thread::spawn(move || {
+				// Small delay to let writer start, then race during commit
+				thread::yield_now();
+
+				// Try multiple reads to catch the race window
+				for _ in 0..10 {
+					let mut tx = db_reader.transaction(false);
+					let result = tx.get(key_reader.clone()).unwrap();
+					tx.cancel().unwrap();
+
+					// If we see the value, it must be correct
+					if let Some(v) = result {
+						assert_eq!(v, value_reader, "Read wrong value during race");
+						return true;
+					}
+					// Spin a bit to increase chance of hitting race window
+					thread::yield_now();
+				}
+				false // Didn't see the value (read before commit completed)
+			});
+
+			// Wait for both to complete
+			writer.join().unwrap();
+			let _saw_value = reader.join().unwrap();
+
+			// After both complete, a fresh read MUST see the value
+			let mut tx = db.transaction(false);
+			let result = tx.get(key.clone()).unwrap();
+			tx.cancel().unwrap();
+			assert!(
+				result.is_some(),
+				"Key must be visible after writer completes (iteration {})",
+				iteration
+			);
+			assert_eq!(
+				result.unwrap(),
+				value,
+				"Value mismatch after writer completes (iteration {})",
+				iteration
+			);
+		}
+	}
+
+	#[test]
+	fn test_high_concurrency_merge_queue_visibility() {
+		// Simulate the crud-bench scenario: many concurrent writers and readers
+		// This stresses the merge queue under high contention
+
+		let db: Database<Vec<u8>, Vec<u8>> = Database::new();
+		let db = Arc::new(db);
+
+		let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+		let operations_per_thread = 50;
+
+		let mut handles = vec![];
+
+		// Spawn writer threads
+		for thread_id in 0..num_threads {
+			let db = Arc::clone(&db);
+			let handle = thread::spawn(move || {
+				for op_id in 0..operations_per_thread {
+					let key = format!("thread_{}_key_{}", thread_id, op_id).into_bytes();
+					let value = format!("thread_{}_value_{}", thread_id, op_id).into_bytes();
+
+					let mut tx = db.transaction(true);
+					tx.set(key, value).unwrap();
+					tx.commit().unwrap();
+				}
+			});
+			handles.push(handle);
+		}
+
+		// Spawn reader threads that try to read as writers are committing
+		for reader_id in 0..num_threads {
+			let db = Arc::clone(&db);
+			let handle = thread::spawn(move || {
+				// Read keys from different writers
+				for writer_id in 0..num_threads {
+					for op_id in 0..operations_per_thread {
+						let key = format!("thread_{}_key_{}", writer_id, op_id).into_bytes();
+						let expected_value =
+							format!("thread_{}_value_{}", writer_id, op_id).into_bytes();
+
+						// Try reading multiple times
+						for _ in 0..5 {
+							let mut tx = db.transaction(false);
+							if let Some(value) = tx.get(key.clone()).unwrap() {
+								// If we see a value, it must be correct
+								assert_eq!(
+									value, expected_value,
+									"Reader {} saw wrong value for writer {} op {}",
+									reader_id, writer_id, op_id
+								);
+							}
+							tx.cancel().unwrap();
+							thread::yield_now();
+						}
+					}
+				}
+			});
+			handles.push(handle);
+		}
+
+		// Wait for all threads
+		for handle in handles {
+			handle.join().unwrap();
+		}
+
+		// Final verification: all keys must be visible
+		for thread_id in 0..num_threads {
+			for op_id in 0..operations_per_thread {
+				let key = format!("thread_{}_key_{}", thread_id, op_id).into_bytes();
+				let expected_value = format!("thread_{}_value_{}", thread_id, op_id).into_bytes();
+
+				let mut tx = db.transaction(false);
+				let result = tx.get(key.clone()).unwrap();
+				tx.cancel().unwrap();
+
+				assert!(
+					result.is_some(),
+					"Key from thread {} op {} not found after all threads complete",
+					thread_id,
+					op_id
+				);
+				assert_eq!(
+					result.unwrap(),
+					expected_value,
+					"Wrong value for thread {} op {} after all threads complete",
+					thread_id,
+					op_id
+				);
+			}
 		}
 	}
 }
