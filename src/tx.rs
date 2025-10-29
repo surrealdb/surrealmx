@@ -1271,10 +1271,10 @@ where
 		let id = updates.id;
 		// Store the commit in an Arc
 		let updates = Arc::new(updates);
+		// Get the database transaction merge queue
+		let queue = &self.database.transaction_commit_queue;
 		// Loop until the atomic operation is successful
 		loop {
-			// Get the database transaction merge queue
-			let queue = &self.database.transaction_commit_queue;
 			// Get the current commit queue number
 			let version = self.database.transaction_commit_id.load(Ordering::Acquire) + 1;
 			// Insert into the queue if the number is the same
@@ -1285,7 +1285,7 @@ where
 				return (version, entry.value().clone());
 			}
 			// Ensure the thread backs off when under contention
-			if spins > 10 {
+			if spins < 10 {
 				std::hint::spin_loop();
 			} else if spins < 100 {
 				std::thread::yield_now();
@@ -1308,12 +1308,12 @@ where
 		let updates = Arc::new(updates);
 		// Get the database timestamp oracle
 		let oracle = self.database.oracle.clone();
-		// Get the current nanoseconds since the Unix epoch
-		let mut version = oracle.current_time_ns();
+		// Get the database transaction merge queue
+		let queue = &self.database.transaction_merge_queue;
 		// Loop until we reach the next incremental timestamp
 		loop {
-			// Get the database transaction merge queue
-			let queue = &self.database.transaction_merge_queue;
+			// Get the current nanoseconds since the Unix epoch
+			let mut version = oracle.current_time_ns();
 			// Get the last timestamp for this oracle
 			let last_ts = oracle.inner.timestamp.load(Ordering::Acquire);
 			// Increase the timestamp to ensure monotonicity
@@ -1324,11 +1324,11 @@ where
 			let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
 			// Check if the entry was inserted correctly
 			if id == entry.value().id {
-				oracle.inner.timestamp.store(version, Ordering::Release);
+				oracle.inner.timestamp.fetch_max(version, Ordering::Release);
 				return (version, entry.value().clone());
 			}
 			// Ensure the thread backs off when under contention
-			if spins > 10 {
+			if spins < 10 {
 				std::hint::spin_loop();
 			} else if spins < 100 {
 				std::thread::yield_now();
