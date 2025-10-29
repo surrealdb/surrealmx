@@ -1285,7 +1285,7 @@ where
 				return (version, entry.value().clone());
 			}
 			// Ensure the thread backs off when under contention
-			if spins > 10 {
+			if spins < 10 {
 				std::hint::spin_loop();
 			} else if spins < 100 {
 				std::thread::yield_now();
@@ -1328,7 +1328,7 @@ where
 				return (version, entry.value().clone());
 			}
 			// Ensure the thread backs off when under contention
-			if spins > 10 {
+			if spins < 10 {
 				std::hint::spin_loop();
 			} else if spins < 100 {
 				std::thread::yield_now();
