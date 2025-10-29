@@ -1324,7 +1324,7 @@ where
 			let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
 			// Check if the entry was inserted correctly
 			if id == entry.value().id {
-				oracle.inner.timestamp.store(version, Ordering::Release);
+				oracle.inner.timestamp.fetch_max(version, Ordering::Release);
 				return (version, entry.value().clone());
 			}
 			// Ensure the thread backs off when under contention
