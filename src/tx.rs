@@ -1180,13 +1180,12 @@ where
 		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Check the current entry iteration
 		for entry in iter.rev() {
-			// Even if the entry is marked as removed, we still check it to avoid a race
-			// where the entry is removed after we check but before the data is visible
-			// in the datastore. The merge queue entry remains accessible even when removed.
-			// Check if the entry has a key
-			if let Some(v) = entry.value().writeset.get(key.borrow()) {
-				// Return the entry value
-				return v.as_ref().map(|arc| arc.as_ref().clone());
+			if !entry.is_removed() {
+				// Check for the key in the merge queue
+				if let Some(v) = entry.value().writeset.get(key.borrow()) {
+					// Return the entry value
+					return v.as_ref().map(|arc| arc.as_ref().clone());
+				}
 			}
 		}
 		// Check the key in the datastore
@@ -1210,13 +1209,12 @@ where
 		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Check the current entry iteration
 		for entry in iter.rev() {
-			// Even if the entry is marked as removed, we still check it to avoid a race
-			// where the entry is removed after we check but before the data is visible
-			// in the datastore. The merge queue entry remains accessible even when removed.
-			// Check if the entry has a key
-			if let Some(v) = entry.value().writeset.get(key.borrow()) {
-				// Return whether the entry exists
-				return v.is_some();
+			if !entry.is_removed() {
+				// Check for the key in the merge queue
+				if let Some(v) = entry.value().writeset.get(key.borrow()) {
+					// Return whether the entry exists
+					return v.is_some();
+				}
 			}
 		}
 		// Check the key in the datastore
@@ -1240,17 +1238,16 @@ where
 		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Check the current entry iteration
 		for entry in iter.rev() {
-			// Even if the entry is marked as removed, we still check it to avoid a race
-			// where the entry is removed after we check but before the data is visible
-			// in the datastore. The merge queue entry remains accessible even when removed.
-			// Check if the entry has a key
-			if let Some(v) = entry.value().writeset.get(key.borrow()) {
-				// Return whether the entry matches
-				return match (chk.as_ref(), v.as_ref()) {
-					(Some(x), Some(y)) => x == y.as_ref(),
-					(None, None) => true,
-					_ => false,
-				};
+			if !entry.is_removed() {
+				// Check for the key in the merge queue
+				if let Some(v) = entry.value().writeset.get(key.borrow()) {
+					// Return whether the entry matches
+					return match (chk.as_ref(), v.as_ref()) {
+						(Some(x), Some(y)) => x == y.as_ref(),
+						(None, None) => true,
+						_ => false,
+					};
+				}
 			}
 		}
 		// Check the key in the datastore
