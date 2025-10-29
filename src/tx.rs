@@ -1271,10 +1271,10 @@ where
 		let id = updates.id;
 		// Store the commit in an Arc
 		let updates = Arc::new(updates);
+		// Get the database transaction merge queue
+		let queue = &self.database.transaction_commit_queue;
 		// Loop until the atomic operation is successful
 		loop {
-			// Get the database transaction merge queue
-			let queue = &self.database.transaction_commit_queue;
 			// Get the current commit queue number
 			let version = self.database.transaction_commit_id.load(Ordering::Acquire) + 1;
 			// Insert into the queue if the number is the same
@@ -1310,10 +1310,10 @@ where
 		let oracle = self.database.oracle.clone();
 		// Get the current nanoseconds since the Unix epoch
 		let mut version = oracle.current_time_ns();
+		// Get the database transaction merge queue
+		let queue = &self.database.transaction_merge_queue;
 		// Loop until we reach the next incremental timestamp
 		loop {
-			// Get the database transaction merge queue
-			let queue = &self.database.transaction_merge_queue;
 			// Get the last timestamp for this oracle
 			let last_ts = oracle.inner.timestamp.load(Ordering::Acquire);
 			// Increase the timestamp to ensure monotonicity
