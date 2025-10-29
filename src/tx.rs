@@ -1193,7 +1193,10 @@ where
 		self.database
 			.datastore
 			.get(key.borrow())
-			.and_then(|e| e.value().read().fetch_version(version))
+			.and_then(|e| match e.value().try_read() {
+				Some(guard) => guard.fetch_version(version),
+				None => e.value().read().fetch_version(version),
+			})
 			.map(|arc| arc.as_ref().clone())
 	}
 
@@ -1220,7 +1223,10 @@ where
 		self.database
 			.datastore
 			.get(key.borrow())
-			.map(|e| e.value().read().exists_version(version))
+			.map(|e| match e.value().try_read() {
+				Some(guard) => guard.exists_version(version),
+				None => e.value().read().exists_version(version),
+			})
 			.is_some_and(|v| v)
 	}
 
@@ -1253,7 +1259,10 @@ where
 			self.database
 				.datastore
 				.get(key.borrow())
-				.and_then(|e| e.value().read().fetch_version(version))
+				.and_then(|e| match e.value().try_read() {
+					Some(guard) => guard.fetch_version(version),
+					None => e.value().read().fetch_version(version),
+				})
 				.as_ref(),
 		) {
 			(Some(x), Some(y)) => x == y.as_ref(),
