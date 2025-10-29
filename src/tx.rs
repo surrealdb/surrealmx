@@ -1308,12 +1308,12 @@ where
 		let updates = Arc::new(updates);
 		// Get the database timestamp oracle
 		let oracle = self.database.oracle.clone();
-		// Get the current nanoseconds since the Unix epoch
-		let mut version = oracle.current_time_ns();
 		// Get the database transaction merge queue
 		let queue = &self.database.transaction_merge_queue;
 		// Loop until we reach the next incremental timestamp
 		loop {
+			// Get the current nanoseconds since the Unix epoch
+			let mut version = oracle.current_time_ns();
 			// Get the last timestamp for this oracle
 			let last_ts = oracle.inner.timestamp.load(Ordering::Acquire);
 			// Increase the timestamp to ensure monotonicity
