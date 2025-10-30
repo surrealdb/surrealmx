@@ -18,6 +18,7 @@ use crate::direction::Direction;
 use crate::err::Error;
 use crate::inner::Inner;
 use crate::iter::MergeIterator;
+use crate::kv::IntoBytes;
 use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
@@ -468,8 +469,12 @@ impl TransactionInner {
 	}
 
 	/// Check if a key exists in the database
-	pub fn exists(&mut self, key: impl AsRef<[u8]>) -> Result<bool, Error> {
-		let key = Bytes::copy_from_slice(key.as_ref());
+	pub fn exists<K>(&mut self, key: K) -> Result<bool, Error>
+	where
+		K: IntoBytes,
+	{
+		// Get the key reference
+		let lookup = key.as_slice();
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -477,33 +482,37 @@ impl TransactionInner {
 		// Check the transaction type
 		let res = match self.write {
 			// This is a writeable transaction
-			true => match self.writeset.get(&key) {
+			true => match self.writeset.get(lookup) {
 				// The key exists in the writeset
 				Some(_) => true,
 				// Check for the key in the tree
 				None => {
 					// Fetch for the key from the datastore
-					let res = self.exists_in_datastore(&key, self.version);
+					let res = self.exists_in_datastore(lookup, self.version);
 					// Check whether we should track key reads
 					if self.mode >= IsolationLevel::SerializableSnapshotIsolation
-						&& !self.readset.contains(&key)
+						&& !self.readset.contains(lookup)
 					{
-						self.readset.insert(key.clone());
+						self.readset.insert(key.into_bytes());
 					}
 					// Return the result
 					res
 				}
 			},
 			// This is a readonly transaction
-			false => self.exists_in_datastore(&key, self.version),
+			false => self.exists_in_datastore(lookup, self.version),
 		};
 		// Return result
 		Ok(res)
 	}
 
 	/// Check if a key exists in the database at a specific version
-	pub fn exists_at_version(&self, key: impl AsRef<[u8]>, version: u64) -> Result<bool, Error> {
-		let key = Bytes::copy_from_slice(key.as_ref());
+	pub fn exists_at_version<K>(&self, key: K, version: u64) -> Result<bool, Error>
+	where
+		K: IntoBytes,
+	{
+		// Get the key reference
+		let lookup = key.as_slice();
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -513,14 +522,18 @@ impl TransactionInner {
 			return Err(Error::VersionInFuture);
 		}
 		// Check the key
-		let res = self.exists_in_datastore(&key, version);
+		let res = self.exists_in_datastore(lookup, version);
 		// Return result
 		Ok(res)
 	}
 
 	/// Fetch a key from the database
-	pub fn get(&mut self, key: impl AsRef<[u8]>) -> Result<Option<Bytes>, Error> {
-		let key = Bytes::copy_from_slice(key.as_ref());
+	pub fn get<K>(&mut self, key: K) -> Result<Option<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		// Get the key reference
+		let lookup = key.as_slice();
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -528,37 +541,37 @@ impl TransactionInner {
 		// Check the transaction type
 		let res = match self.write {
 			// This is a writeable transaction
-			true => match self.writeset.get(&key) {
+			true => match self.writeset.get(lookup) {
 				// The key exists in the writeset
 				Some(v) => v.clone(),
 				// Check for the key in the tree
 				None => {
 					// Fetch for the key from the datastore
-					let res = self.fetch_in_datastore(&key, self.version);
+					let res = self.fetch_in_datastore(lookup, self.version);
 					// Check whether we should track key reads
 					if self.mode >= IsolationLevel::SerializableSnapshotIsolation
-						&& !self.readset.contains(&key)
+						&& !self.readset.contains(lookup)
 					{
-						self.readset.insert(key.clone());
+						self.readset.insert(key.into_bytes());
 					}
 					// Return the result
 					res
 				}
 			},
 			// This is a readonly transaction
-			false => self.fetch_in_datastore(&key, self.version),
+			false => self.fetch_in_datastore(lookup, self.version),
 		};
 		// Return result
 		Ok(res)
 	}
 
 	/// Fetch a key from the database at a specific version
-	pub fn get_at_version(
-		&self,
-		key: impl AsRef<[u8]>,
-		version: u64,
-	) -> Result<Option<Bytes>, Error> {
-		let key = Bytes::copy_from_slice(key.as_ref());
+	pub fn get_at_version<K>(&self, key: K, version: u64) -> Result<Option<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		// Get the key reference
+		let lookup = key.as_slice();
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -568,13 +581,17 @@ impl TransactionInner {
 			return Err(Error::VersionInFuture);
 		}
 		// Get the key
-		let res = self.fetch_in_datastore(&key, version);
+		let res = self.fetch_in_datastore(lookup, version);
 		// Return result
 		Ok(res)
 	}
 
 	/// Insert or update a key in the database
-	pub fn set(&mut self, key: impl Into<Bytes>, val: impl Into<Bytes>) -> Result<(), Error> {
+	pub fn set<K, V>(&mut self, key: K, val: V) -> Result<(), Error>
+	where
+		K: IntoBytes,
+		V: IntoBytes,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -584,14 +601,17 @@ impl TransactionInner {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
-		self.writeset.insert(key.into(), Some(val.into()));
+		self.writeset.insert(key.into_bytes(), Some(val.into_bytes()));
 		// Return result
 		Ok(())
 	}
 
 	/// Insert a key if it doesn't exist in the database
-	pub fn put(&mut self, key: impl Into<Bytes>, val: impl Into<Bytes>) -> Result<(), Error> {
-		let key = key.into();
+	pub fn put<K, V>(&mut self, key: K, val: V) -> Result<(), Error>
+	where
+		K: IntoBytes,
+		V: IntoBytes,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -601,8 +621,8 @@ impl TransactionInner {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
-		match self.exists_in_datastore(&key, self.version) {
-			false => self.writeset.insert(key, Some(val.into())),
+		match self.exists_in_datastore(key.as_slice(), self.version) {
+			false => self.writeset.insert(key.into_bytes(), Some(val.into_bytes())),
 			_ => return Err(Error::KeyAlreadyExists),
 		};
 		// Return result
@@ -610,13 +630,12 @@ impl TransactionInner {
 	}
 
 	/// Insert a key if it matches a value
-	pub fn putc(
-		&mut self,
-		key: impl Into<Bytes>,
-		val: impl Into<Bytes>,
-		chk: Option<Bytes>,
-	) -> Result<(), Error> {
-		let key = key.into();
+	pub fn putc<K, V, C>(&mut self, key: K, val: V, chk: Option<C>) -> Result<(), Error>
+	where
+		K: IntoBytes,
+		V: IntoBytes,
+		C: IntoBytes,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -626,8 +645,8 @@ impl TransactionInner {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
-		match self.equals_in_datastore(&key, chk.as_ref(), self.version) {
-			true => self.writeset.insert(key, Some(val.into())),
+		match self.equals_in_datastore(key.as_slice(), chk, self.version) {
+			true => self.writeset.insert(key.into_bytes(), Some(val.into_bytes())),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
 		// Return result
@@ -635,7 +654,10 @@ impl TransactionInner {
 	}
 
 	/// Delete a key from the database
-	pub fn del(&mut self, key: impl Into<Bytes>) -> Result<(), Error> {
+	pub fn del<K>(&mut self, key: K) -> Result<(), Error>
+	where
+		K: IntoBytes,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -645,14 +667,17 @@ impl TransactionInner {
 			return Err(Error::TxNotWritable);
 		}
 		// Remove the key
-		self.writeset.insert(key.into(), None);
+		self.writeset.insert(key.into_bytes(), None);
 		// Return result
 		Ok(())
 	}
 
 	/// Delete a key if it matches a value
-	pub fn delc(&mut self, key: impl Into<Bytes>, chk: Option<Bytes>) -> Result<(), Error> {
-		let key = key.into();
+	pub fn delc<K, C>(&mut self, key: K, chk: Option<C>) -> Result<(), Error>
+	where
+		K: IntoBytes,
+		C: IntoBytes,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -662,8 +687,8 @@ impl TransactionInner {
 			return Err(Error::TxNotWritable);
 		}
 		// Remove the key
-		match self.equals_in_datastore(&key, chk.as_ref(), self.version) {
-			true => self.writeset.insert(key, None),
+		match self.equals_in_datastore(key.as_slice(), chk, self.version) {
+			true => self.writeset.insert(key.into_bytes(), None),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
 		// Return result
@@ -671,142 +696,153 @@ impl TransactionInner {
 	}
 
 	/// Retrieve a count of keys from the database
-	pub fn total(
+	pub fn total<K>(
 		&mut self,
-		rng: Range<impl AsRef<[u8]>>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<usize, Error> {
-		let start = Bytes::copy_from_slice(rng.start.as_ref());
-		let end = Bytes::copy_from_slice(rng.end.as_ref());
-		self.total_any(start..end, skip, limit, Direction::Forward, self.version)
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+	{
+		self.total_any(rng, skip, limit, Direction::Forward, self.version)
 	}
 
 	/// Retrieve a count of keys from the database at a specific version
-	pub fn total_at_version(
+	pub fn total_at_version<K>(
 		&mut self,
-		rng: Range<impl AsRef<[u8]>>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
 		version: u64,
-	) -> Result<usize, Error> {
-		let start = Bytes::copy_from_slice(rng.start.as_ref());
-		let end = Bytes::copy_from_slice(rng.end.as_ref());
-		self.total_any(start..end, skip, limit, Direction::Forward, version)
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+	{
+		self.total_any(rng, skip, limit, Direction::Forward, version)
 	}
 
 	/// Retrieve a range of keys from the database
-	pub fn keys(
+	pub fn keys<K>(
 		&mut self,
-		rng: Range<impl AsRef<[u8]>>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<Vec<Bytes>, Error> {
-		let start = Bytes::copy_from_slice(rng.start.as_ref());
-		let end = Bytes::copy_from_slice(rng.end.as_ref());
-		self.keys_any(start..end, skip, limit, Direction::Forward, self.version)
+	) -> Result<Vec<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.keys_any(rng, skip, limit, Direction::Forward, self.version)
 	}
 
 	/// Retrieve a range of keys from the database, in reverse order
-	pub fn keys_reverse(
+	pub fn keys_reverse<K>(
 		&mut self,
-		rng: Range<impl AsRef<[u8]>>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<Vec<Bytes>, Error> {
-		let start = Bytes::copy_from_slice(rng.start.as_ref());
-		let end = Bytes::copy_from_slice(rng.end.as_ref());
-		self.keys_any(start..end, skip, limit, Direction::Reverse, self.version)
+	) -> Result<Vec<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.keys_any(rng, skip, limit, Direction::Reverse, self.version)
 	}
 
 	/// Retrieve a range of keys from the database at a specific version
-	pub fn keys_at_version(
+	pub fn keys_at_version<K>(
 		&mut self,
-		rng: Range<impl AsRef<[u8]>>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
 		version: u64,
-	) -> Result<Vec<Bytes>, Error> {
-		let start = Bytes::copy_from_slice(rng.start.as_ref());
-		let end = Bytes::copy_from_slice(rng.end.as_ref());
-		self.keys_any(start..end, skip, limit, Direction::Forward, version)
+	) -> Result<Vec<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.keys_any(rng, skip, limit, Direction::Forward, version)
 	}
 
 	/// Retrieve a range of keys from the database at a specific version, in reverse order
-	pub fn keys_at_version_reverse(
+	pub fn keys_at_version_reverse<K>(
 		&mut self,
-		rng: Range<impl AsRef<[u8]>>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
 		version: u64,
-	) -> Result<Vec<Bytes>, Error> {
-		let start = Bytes::copy_from_slice(rng.start.as_ref());
-		let end = Bytes::copy_from_slice(rng.end.as_ref());
-		self.keys_any(start..end, skip, limit, Direction::Reverse, version)
+	) -> Result<Vec<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.keys_any(rng, skip, limit, Direction::Reverse, version)
 	}
 
 	/// Retrieve a range of keys and values from the database
-	pub fn scan(
+	pub fn scan<K>(
 		&mut self,
-		rng: Range<impl AsRef<[u8]>>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<Vec<(Bytes, Bytes)>, Error> {
-		let start = Bytes::copy_from_slice(rng.start.as_ref());
-		let end = Bytes::copy_from_slice(rng.end.as_ref());
-		self.scan_any(start..end, skip, limit, Direction::Forward, self.version)
+	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.scan_any(rng, skip, limit, Direction::Forward, self.version)
 	}
 
 	/// Retrieve a range of keys and values from the database in reverse order
-	pub fn scan_reverse(
+	pub fn scan_reverse<K>(
 		&mut self,
-		rng: Range<impl AsRef<[u8]>>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<Vec<(Bytes, Bytes)>, Error> {
-		let start = Bytes::copy_from_slice(rng.start.as_ref());
-		let end = Bytes::copy_from_slice(rng.end.as_ref());
-		self.scan_any(start..end, skip, limit, Direction::Reverse, self.version)
+	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.scan_any(rng, skip, limit, Direction::Reverse, self.version)
 	}
 
 	/// Retrieve a range of keys and values from the database at a specific version
-	pub fn scan_at_version(
+	pub fn scan_at_version<K>(
 		&mut self,
-		rng: Range<impl AsRef<[u8]>>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
 		version: u64,
-	) -> Result<Vec<(Bytes, Bytes)>, Error> {
-		let start = Bytes::copy_from_slice(rng.start.as_ref());
-		let end = Bytes::copy_from_slice(rng.end.as_ref());
-		self.scan_any(start..end, skip, limit, Direction::Forward, version)
+	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.scan_any(rng, skip, limit, Direction::Forward, version)
 	}
 
 	/// Retrieve a range of keys and values from the database at a specific version, in reverse order
-	pub fn scan_at_version_reverse(
+	pub fn scan_at_version_reverse<K>(
 		&mut self,
-		rng: Range<impl AsRef<[u8]>>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
 		version: u64,
-	) -> Result<Vec<(Bytes, Bytes)>, Error> {
-		let start = Bytes::copy_from_slice(rng.start.as_ref());
-		let end = Bytes::copy_from_slice(rng.end.as_ref());
-		self.scan_any(start..end, skip, limit, Direction::Reverse, version)
+	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.scan_any(rng, skip, limit, Direction::Reverse, version)
 	}
 
 	/// Retrieve all versions of keys within a range from the database
 	/// Returns tuples of (key, version, value) for all historical versions
 	/// The skip and limit parameters apply to the number of keys, not the number of versions
-	pub fn scan_all_versions(
+	pub fn scan_all_versions<K>(
 		&mut self,
-		rng: Range<impl AsRef<[u8]>>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<Vec<(Bytes, u64, Option<Bytes>)>, Error> {
-		let start = Bytes::copy_from_slice(rng.start.as_ref());
-		let end = Bytes::copy_from_slice(rng.end.as_ref());
-		self.scan_all_versions_any(start..end, skip, limit, self.version)
+	) -> Result<Vec<(Bytes, u64, Option<Bytes>)>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.scan_all_versions_any(rng, skip, limit, self.version)
 	}
 
 	/// Helper to track a scan range in the scanset (optimized to minimize clones)
@@ -832,14 +868,17 @@ impl TransactionInner {
 	}
 
 	/// Retrieve a count of keys from the database
-	fn total_any(
+	fn total_any<K>(
 		&mut self,
-		rng: Range<Bytes>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
 		direction: Direction,
 		version: u64,
-	) -> Result<usize, Error> {
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -847,8 +886,8 @@ impl TransactionInner {
 		// Prepare result count
 		let mut res = 0;
 		// Compute the range
-		let beg = &rng.start;
-		let end = &rng.end;
+		let beg = &rng.start.into_bytes();
+		let end = &rng.end.into_bytes();
 		// Calculate how many items to skip
 		let skip = skip.unwrap_or_default();
 		// Check wether we should track range scan reads
@@ -891,14 +930,17 @@ impl TransactionInner {
 	}
 
 	/// Retrieve a range of keys from the database
-	fn keys_any(
+	fn keys_any<K>(
 		&mut self,
-		rng: Range<Bytes>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
 		direction: Direction,
 		version: u64,
-	) -> Result<Vec<Bytes>, Error> {
+	) -> Result<Vec<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -909,8 +951,8 @@ impl TransactionInner {
 			None => Vec::new(),
 		};
 		// Compute the range
-		let beg = &rng.start;
-		let end = &rng.end;
+		let beg = &rng.start.into_bytes();
+		let end = &rng.end.into_bytes();
 		// Calculate how many items to skip
 		let skip = skip.unwrap_or_default();
 		// Check wether we should track range scan reads
@@ -953,14 +995,17 @@ impl TransactionInner {
 	}
 
 	/// Retrieve a range of keys and values from the database
-	fn scan_any(
+	fn scan_any<K>(
 		&mut self,
-		rng: Range<Bytes>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
 		direction: Direction,
 		version: u64,
-	) -> Result<Vec<(Bytes, Bytes)>, Error> {
+	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	where
+		K: IntoBytes,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -971,8 +1016,8 @@ impl TransactionInner {
 			None => Vec::new(),
 		};
 		// Compute the range
-		let beg = &rng.start;
-		let end = &rng.end;
+		let beg = &rng.start.into_bytes();
+		let end = &rng.end.into_bytes();
 		// Calculate how many items to skip
 		let skip = skip.unwrap_or_default();
 		// Check wether we should track range scan reads
@@ -1017,13 +1062,16 @@ impl TransactionInner {
 	}
 
 	/// Retrieve all versions of keys within a range from the database
-	fn scan_all_versions_any(
+	fn scan_all_versions_any<K>(
 		&mut self,
-		rng: Range<Bytes>,
+		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
 		version: u64,
-	) -> Result<Vec<(Bytes, u64, Option<Bytes>)>, Error> {
+	) -> Result<Vec<(Bytes, u64, Option<Bytes>)>, Error>
+	where
+		K: IntoBytes,
+	{
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -1031,8 +1079,8 @@ impl TransactionInner {
 		// Prepare result vector
 		let mut res = Vec::new();
 		// Compute the range
-		let beg = &rng.start;
-		let end = &rng.end;
+		let beg = &rng.start.into_bytes();
+		let end = &rng.end.into_bytes();
 		// Calculate how many items to skip
 		let skip = skip.unwrap_or_default();
 		// Check wether we should track range scan reads
@@ -1100,12 +1148,12 @@ impl TransactionInner {
 
 	/// Fetch a key if it exists in the datastore only
 	#[inline(always)]
-	fn fetch_in_datastore<Q>(&self, key: Q, version: u64) -> Option<Bytes>
+	fn fetch_in_datastore<K>(&self, key: K, version: u64) -> Option<Bytes>
 	where
-		Q: AsRef<[u8]>,
+		K: IntoBytes,
 	{
 		// Get the key reference
-		let key = key.as_ref();
+		let key = key.as_slice();
 		// Fetch the transaction merge queue range
 		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Check the current entry iteration
@@ -1127,12 +1175,12 @@ impl TransactionInner {
 
 	/// Check if a key exists in the datastore only
 	#[inline(always)]
-	fn exists_in_datastore<Q>(&self, key: Q, version: u64) -> bool
+	fn exists_in_datastore<K>(&self, key: K, version: u64) -> bool
 	where
-		Q: AsRef<[u8]>,
+		K: IntoBytes,
 	{
 		// Get the key reference
-		let key = key.as_ref();
+		let key = key.as_slice();
 		// Fetch the transaction merge queue range
 		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Check the current entry iteration
@@ -1158,12 +1206,13 @@ impl TransactionInner {
 
 	/// Check if a key equals a value in the datastore only
 	#[inline(always)]
-	fn equals_in_datastore<Q>(&self, key: Q, chk: Option<Q>, version: u64) -> bool
+	fn equals_in_datastore<C, K>(&self, key: K, chk: Option<C>, version: u64) -> bool
 	where
-		Q: AsRef<[u8]>,
+		K: IntoBytes,
+		C: IntoBytes,
 	{
 		// Get the key reference
-		let key = key.as_ref();
+		let key = key.as_slice();
 		// Fetch the transaction merge queue range
 		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Check the current entry iteration
@@ -1173,7 +1222,7 @@ impl TransactionInner {
 				if let Some(v) = entry.value().writeset.get(key) {
 					// Return whether the entry matches
 					return match (chk.as_ref(), v.as_ref()) {
-						(Some(x), Some(y)) => x.as_ref() == y,
+						(Some(x), Some(y)) => x.as_slice() == y,
 						(None, None) => true,
 						_ => false,
 					};
@@ -1192,7 +1241,7 @@ impl TransactionInner {
 				})
 				.as_ref(),
 		) {
-			(Some(x), Some(y)) => x.as_ref() == y,
+			(Some(x), Some(y)) => x.as_slice() == y,
 			(None, None) => true,
 			_ => false,
 		}

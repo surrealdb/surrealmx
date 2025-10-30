@@ -450,7 +450,7 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 											match op_type {
 												"insert" => {
 													// For inserts, use putc to ensure we're creating new entries
-													let result = tx.putc(key, value, None);
+													let result = tx.putc(key, value, None::<&[u8]>);
 													results.push(result.is_ok());
 												}
 												"update" => {

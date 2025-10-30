@@ -20,6 +20,7 @@ mod direction;
 mod err;
 mod inner;
 mod iter;
+mod kv;
 mod options;
 mod oracle;
 mod persistence;
