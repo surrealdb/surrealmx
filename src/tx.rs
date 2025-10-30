@@ -2587,9 +2587,12 @@ mod tests {
 		// key1: should have 3 versions (v1, v2, v3)
 		// key2: should have 2 versions (v1, v2)
 		// key3: should have 2 versions (v1, None/deleted)
-		let key1_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key1").collect();
-		let key2_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key2").collect();
-		let key3_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key3").collect();
+		let key1_versions: Vec<_> =
+			results.iter().filter(|(k, _, _)| k.as_ref() == b"key1").collect();
+		let key2_versions: Vec<_> =
+			results.iter().filter(|(k, _, _)| k.as_ref() == b"key2").collect();
+		let key3_versions: Vec<_> =
+			results.iter().filter(|(k, _, _)| k.as_ref() == b"key3").collect();
 
 		assert_eq!(key1_versions.len(), 3, "key1 should have 3 versions");
 		assert_eq!(key2_versions.len(), 2, "key2 should have 2 versions");
@@ -2710,10 +2713,12 @@ mod tests {
 		let mut tx4 = db.transaction(false);
 		let results = tx4.scan_all_versions("key0".."key9", None, None).unwrap();
 
-		let key1_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key1").collect();
+		let key1_versions: Vec<_> =
+			results.iter().filter(|(k, _, _)| k.as_ref() == b"key1").collect();
 		assert_eq!(key1_versions.len(), 2, "key1 should only have 2 versions (tx3 was cancelled)");
 
-		let key3_versions: Vec<_> = results.iter().filter(|(k, _, _)| k == &"key3").collect();
+		let key3_versions: Vec<_> =
+			results.iter().filter(|(k, _, _)| k.as_ref() == b"key3").collect();
 		assert_eq!(key3_versions.len(), 0, "key3 should not exist (tx3 was cancelled)");
 	}
 

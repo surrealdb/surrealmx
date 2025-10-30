@@ -160,7 +160,7 @@ fn test_aol_recovery() {
 		// Verify data was recovered from AOL
 		let mut tx = db.transaction(false);
 		assert_eq!(tx.get("recover_key1").unwrap(), Some(Bytes::from("updated_value1")));
-		assert_eq!(tx.get("recover_key2".to_string()).unwrap(), None); // Should be deleted
+		assert_eq!(tx.get("recover_key2").unwrap(), None); // Should be deleted
 		assert_eq!(tx.get("recover_key3").unwrap(), Some(Bytes::from("recover_value3")));
 		tx.cancel().unwrap();
 	}
@@ -716,8 +716,8 @@ fn test_readonly_operations_no_persistence() {
 	// Perform read-only operations (should not trigger persistence)
 	{
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("non_existent_key".to_string()).unwrap(), None);
-		assert!(!tx.exists("non_existent_key".to_string()).unwrap());
+		assert_eq!(tx.get("non_existent_key").unwrap(), None);
+		assert!(!tx.exists("non_existent_key").unwrap());
 		tx.cancel().unwrap();
 	}
 
