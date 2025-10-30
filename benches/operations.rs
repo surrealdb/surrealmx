@@ -566,7 +566,7 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 										let unique_key = Bytes::from(
 											format!(
 												"{}_w{}",
-												String::from_utf8_lossy(&key),
+												String::from_utf8_lossy(key),
 												writer_id
 											)
 											.into_bytes(),
