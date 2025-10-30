@@ -626,7 +626,7 @@ impl TransactionInner {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
-		match self.equals_in_datastore(&key, chk, self.version) {
+		match self.equals_in_datastore(&key, chk.as_ref(), self.version) {
 			true => self.writeset.insert(key, Some(val.into())),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
@@ -662,7 +662,7 @@ impl TransactionInner {
 			return Err(Error::TxNotWritable);
 		}
 		// Remove the key
-		match self.equals_in_datastore(&key, chk, self.version) {
+		match self.equals_in_datastore(&key, chk.as_ref(), self.version) {
 			true => self.writeset.insert(key, None),
 			_ => return Err(Error::ValNotExpectedValue),
 		};
@@ -1100,7 +1100,12 @@ impl TransactionInner {
 
 	/// Fetch a key if it exists in the datastore only
 	#[inline(always)]
-	fn fetch_in_datastore(&self, key: &Bytes, version: u64) -> Option<Bytes> {
+	fn fetch_in_datastore<Q>(&self, key: Q, version: u64) -> Option<Bytes>
+	where
+		Q: AsRef<[u8]>,
+	{
+		// Get the key reference
+		let key = key.as_ref();
 		// Fetch the transaction merge queue range
 		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Check the current entry iteration
@@ -1122,7 +1127,12 @@ impl TransactionInner {
 
 	/// Check if a key exists in the datastore only
 	#[inline(always)]
-	fn exists_in_datastore(&self, key: &Bytes, version: u64) -> bool {
+	fn exists_in_datastore<Q>(&self, key: Q, version: u64) -> bool
+	where
+		Q: AsRef<[u8]>,
+	{
+		// Get the key reference
+		let key = key.as_ref();
 		// Fetch the transaction merge queue range
 		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Check the current entry iteration
@@ -1148,7 +1158,12 @@ impl TransactionInner {
 
 	/// Check if a key equals a value in the datastore only
 	#[inline(always)]
-	fn equals_in_datastore(&self, key: &Bytes, chk: Option<Bytes>, version: u64) -> bool {
+	fn equals_in_datastore<Q>(&self, key: Q, chk: Option<Q>, version: u64) -> bool
+	where
+		Q: AsRef<[u8]>,
+	{
+		// Get the key reference
+		let key = key.as_ref();
 		// Fetch the transaction merge queue range
 		let iter = self.database.transaction_merge_queue.range(..=version);
 		// Check the current entry iteration
@@ -1158,7 +1173,7 @@ impl TransactionInner {
 				if let Some(v) = entry.value().writeset.get(key) {
 					// Return whether the entry matches
 					return match (chk.as_ref(), v.as_ref()) {
-						(Some(x), Some(y)) => x == y,
+						(Some(x), Some(y)) => x.as_ref() == y,
 						(None, None) => true,
 						_ => false,
 					};
@@ -1177,7 +1192,7 @@ impl TransactionInner {
 				})
 				.as_ref(),
 		) {
-			(Some(x), Some(y)) => x == y,
+			(Some(x), Some(y)) => x.as_ref() == y,
 			(None, None) => true,
 			_ => false,
 		}
