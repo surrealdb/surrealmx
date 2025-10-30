@@ -217,7 +217,10 @@ impl<'a> MergeIterator<'a> {
 				}
 				KeySource::Datastore => {
 					let t_entry = self.tree_next.as_ref().unwrap();
-					let tv = t_entry.value().read();
+					let tv = match t_entry.value().try_read() {
+						Some(guard) => guard,
+						None => t_entry.value().read(),
+					};
 					let exists = tv.exists_version(self.version);
 					drop(tv);
 
@@ -371,7 +374,10 @@ impl<'a> MergeIterator<'a> {
 				}
 				KeySource::Datastore => {
 					let t_entry = self.tree_next.as_ref().unwrap();
-					let tv = t_entry.value().read();
+					let tv = match t_entry.value().try_read() {
+						Some(guard) => guard,
+						None => t_entry.value().read(),
+					};
 					let exists = tv.exists_version(self.version);
 					drop(tv);
 
@@ -534,7 +540,10 @@ impl<'a> Iterator for MergeIterator<'a> {
 				}
 				KeySource::Datastore => {
 					let t_entry = self.tree_next.as_ref().unwrap();
-					let tv = t_entry.value().read();
+					let tv = match t_entry.value().try_read() {
+						Some(guard) => guard,
+						None => t_entry.value().read(),
+					};
 					let value_opt = tv.fetch_version(self.version);
 					let exists = value_opt.is_some();
 					drop(tv);
