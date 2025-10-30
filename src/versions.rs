@@ -1,19 +1,13 @@
 use crate::version::Version;
+use bytes::Bytes;
 use smallvec::SmallVec;
-use std::sync::Arc;
 
-pub struct Versions<V>
-where
-	V: Eq + Clone + Sync + Send + 'static,
-{
-	inner: SmallVec<[Version<V>; 4]>,
+pub struct Versions {
+	inner: SmallVec<[Version; 4]>,
 }
 
-impl<V> From<Version<V>> for Versions<V>
-where
-	V: Eq + Clone + Sync + Send + 'static,
-{
-	fn from(value: Version<V>) -> Self {
+impl From<Version> for Versions {
+	fn from(value: Version) -> Self {
 		let mut inner = SmallVec::new();
 		inner.push(value);
 		Versions {
@@ -22,10 +16,7 @@ where
 	}
 }
 
-impl<V> Versions<V>
-where
-	V: Eq + Clone + Sync + Send + 'static,
-{
+impl Versions {
 	/// Create a new versions object.
 	#[inline]
 	pub(crate) fn new() -> Self {
@@ -36,14 +27,14 @@ where
 
 	/// Insert a value into its sorted position
 	#[inline]
-	pub(crate) fn insert(&mut self, value: Version<V>) {
+	pub(crate) fn insert(&mut self, value: Version) {
 		let pos = self.inner.binary_search(&value).unwrap_or_else(|e| e);
 		self.inner.insert(pos, value);
 	}
 
 	/// Appends an element to the back of a collection.
 	#[inline]
-	pub(crate) fn push(&mut self, value: Version<V>) {
+	pub(crate) fn push(&mut self, value: Version) {
 		// Check for any existing version
 		if let Some(last) = self.inner.last() {
 			// Check if the version is newer
@@ -110,7 +101,7 @@ where
 
 	/// Fetch the entry at a specific version in the versions list.
 	#[inline]
-	pub(crate) fn fetch_version(&self, version: u64) -> Option<Arc<V>> {
+	pub(crate) fn fetch_version(&self, version: u64) -> Option<Bytes> {
 		// Use partition_point to find the first element where v.version > version
 		let idx = self.find_index_lte_version(version);
 		// We want the last element where v.version <= version
@@ -136,7 +127,7 @@ where
 
 	/// Get all versions as a vector of (version, value) tuples.
 	#[inline]
-	pub(crate) fn all_versions(&self) -> Vec<(u64, Option<Arc<V>>)> {
+	pub(crate) fn all_versions(&self) -> Vec<(u64, Option<Bytes>)> {
 		self.inner.iter().map(|v| (v.version, v.value.clone())).collect()
 	}
 

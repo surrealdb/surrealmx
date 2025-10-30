@@ -1,12 +1,13 @@
 // Test to demonstrate memory usage improvement with the GC fix
 
+use bytes::Bytes;
 use std::time::Duration;
 use surrealmx::{Database, DatabaseOptions};
 
 #[test]
 fn test_version_cleanup_with_updates() {
 	// Create a database with aggressive inline GC (no history retention)
-	let db: Database<String, Vec<u8>> = Database::new_with_options(
+	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(100))
 			.with_cleanup_interval(Duration::from_millis(50)),
@@ -54,7 +55,7 @@ fn test_version_cleanup_with_updates() {
 		let key = format!("key_{:06}", i);
 		let value = tx.get(key).unwrap();
 		assert!(value.is_some(), "Key {} should exist", i);
-		assert_eq!(value.unwrap(), vec![(num_updates - 1) as u8; 100]);
+		assert_eq!(value.unwrap(), Bytes::from(vec![(num_updates - 1) as u8; 100]));
 	}
 	tx.cancel().unwrap();
 
@@ -65,7 +66,7 @@ fn test_version_cleanup_with_updates() {
 
 #[test]
 fn test_version_cleanup_with_deletes() {
-	let db: Database<String, Vec<u8>> = Database::new().with_gc();
+	let db = Database::new().with_gc();
 
 	let num_keys = 500;
 
@@ -122,7 +123,7 @@ fn test_version_cleanup_with_deletes() {
 
 #[test]
 fn test_memory_with_batch_operations() {
-	let db: Database<String, Vec<u8>> = Database::new_with_options(
+	let db = Database::new_with_options(
 		DatabaseOptions::default().with_gc_interval(Duration::from_millis(100)),
 	)
 	.with_gc();
@@ -171,7 +172,7 @@ fn test_memory_with_batch_operations() {
 			let key = format!("batch_{}_{:04}", batch_num, i);
 			let value = tx.get(&key).unwrap();
 			assert!(value.is_some());
-			assert_eq!(value.unwrap(), vec![(batch_num + 100) as u8; 100]);
+			assert_eq!(value.unwrap(), Bytes::from(vec![(batch_num + 100) as u8; 100]));
 			count += 1;
 		}
 	}

@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use rand::Rng;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -15,9 +16,10 @@ fn concurrent_random_transactions() {
 	// Keep the reference to the threads
 	let mut handles = Vec::new();
 	// Create the database
-	let db: Arc<Database<u32, u32>> = Arc::new(Database::new());
+	let db: Arc<Database> = Arc::new(Database::new());
 	// Store successful modifications
-	let expected: Arc<Mutex<BTreeMap<u32, Option<u32>>>> = Arc::new(Mutex::new(BTreeMap::new()));
+	let expected: Arc<Mutex<BTreeMap<Bytes, Option<Bytes>>>> =
+		Arc::new(Mutex::new(BTreeMap::new()));
 	// Spin up a number of threads
 	for _ in 0..THREADS {
 		// Clone the database
@@ -29,19 +31,21 @@ fn concurrent_random_transactions() {
 			let mut rng = rand::rng();
 			// Run the set of operations
 			for _ in 0..OPERATIONS {
-				let key = rng.random_range(0..KEY_COUNT);
+				let key_num = rng.random_range(0..KEY_COUNT);
+				let key = Bytes::from(key_num.to_be_bytes().to_vec());
 				match rng.random_range(0..3) {
 					0 => {
 						// Read transaction
 						let mut tx = db.transaction(false);
-						let _ = tx.get(key);
+						let _ = tx.get(&key);
 						let _ = tx.cancel();
 					}
 					1 => {
 						// Set value
-						let value = rng.random_range(0..1000);
+						let value_num = rng.random_range(0..1000u32);
+						let value = Bytes::from(value_num.to_be_bytes().to_vec());
 						let mut tx = db.transaction(true);
-						tx.set(key, value).unwrap();
+						tx.set(key.clone(), value.clone()).unwrap();
 						if tx.commit().is_ok() {
 							expected.lock().unwrap().insert(key, Some(value));
 						}
@@ -49,7 +53,7 @@ fn concurrent_random_transactions() {
 					_ => {
 						// Delete value
 						let mut tx = db.transaction(true);
-						tx.del(key).unwrap();
+						tx.del(key.clone()).unwrap();
 						if tx.commit().is_ok() {
 							expected.lock().unwrap().insert(key, None);
 						}
@@ -65,10 +69,11 @@ fn concurrent_random_transactions() {
 	// Check that the snapshots match
 	let snapshot = expected.lock().unwrap().clone();
 	let mut tx = db.transaction(false);
-	for key in 0..KEY_COUNT {
-		let val = tx.get(key).unwrap();
+	for key_num in 0..KEY_COUNT {
+		let key = Bytes::from(key_num.to_be_bytes().to_vec());
+		let val = tx.get(&key).unwrap();
 		let expected_val = snapshot.get(&key).cloned().unwrap_or(None);
-		assert_eq!(val, expected_val, "mismatch for key {}", key);
+		assert_eq!(val, expected_val, "mismatch for key {}", key_num);
 	}
 	tx.cancel().unwrap();
 }

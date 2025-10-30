@@ -29,8 +29,8 @@ mod tx;
 mod version;
 mod versions;
 
-#[cfg(test)]
-pub(crate) mod kv;
+#[doc(inline)]
+pub use bytes::Bytes;
 
 #[doc(inline)]
 pub use self::db::*;

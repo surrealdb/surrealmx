@@ -1,38 +1,26 @@
+use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Debug;
 use std::sync::Arc;
 
 /// A transaction entry in the transaction commit queue
-pub struct Commit<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
+pub struct Commit {
 	/// The unique id of this commit attempt
 	pub(crate) id: u64,
 	/// The local set of updates and deletes
-	pub(crate) writeset: Arc<BTreeMap<K, Option<Arc<V>>>>,
+	pub(crate) writeset: Arc<BTreeMap<Bytes, Option<Bytes>>>,
 }
 
 /// A transaction entry in the transaction merge queue
-pub struct Merge<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
+pub struct Merge {
 	/// The unique id of this commit attempt
 	pub(crate) id: u64,
 	/// The local set of updates and deletes
-	pub(crate) writeset: Arc<BTreeMap<K, Option<Arc<V>>>>,
+	pub(crate) writeset: Arc<BTreeMap<Bytes, Option<Bytes>>>,
 }
 
-impl<K, V> Commit<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
+impl Commit {
 	/// Returns true if self has no elements in common with other
-	pub fn is_disjoint_readset(&self, other: &BTreeSet<K>) -> bool {
+	pub fn is_disjoint_readset(&self, other: &BTreeSet<Bytes>) -> bool {
 		// Create a key iterator for each writeset
 		let mut a = self.writeset.keys();
 		let mut b = other.iter();
@@ -51,7 +39,7 @@ where
 		true
 	}
 	/// Returns true if self has no elements in common with other
-	pub fn is_disjoint_writeset(&self, other: &Arc<Commit<K, V>>) -> bool {
+	pub fn is_disjoint_writeset(&self, other: &Arc<Commit>) -> bool {
 		// Create a key iterator for each writeset
 		let mut a = self.writeset.keys();
 		let mut b = other.writeset.keys();

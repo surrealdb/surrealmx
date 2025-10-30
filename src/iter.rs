@@ -16,33 +16,29 @@
 
 use crate::direction::Direction;
 use crate::versions::Versions;
+use bytes::Bytes;
 use crossbeam_skiplist::map::Entry;
 use crossbeam_skiplist::map::Range as SkipRange;
 use parking_lot::RwLock;
 use std::collections::btree_map::Range as TreeRange;
 use std::collections::BTreeMap;
 use std::ops::Bound;
-use std::sync::Arc;
 
-type RangeBounds<'a, K> = (Bound<&'a K>, Bound<&'a K>);
+type RangeBounds<'a> = (Bound<&'a Bytes>, Bound<&'a Bytes>);
 
 /// Three-way merge iterator over tree, merge queue, and current transaction writesets
-pub struct MergeIterator<'a, K, V>
-where
-	K: Ord + Clone + Sync + Send + 'static,
-	V: Eq + Clone + Sync + Send + 'static,
-{
+pub struct MergeIterator<'a> {
 	// Source iterators
-	pub(crate) tree_iter: SkipRange<'a, K, RangeBounds<'a, K>, K, RwLock<Versions<V>>>,
-	pub(crate) self_iter: TreeRange<'a, K, Option<Arc<V>>>,
+	pub(crate) tree_iter: SkipRange<'a, Bytes, RangeBounds<'a>, Bytes, RwLock<Versions>>,
+	pub(crate) self_iter: TreeRange<'a, Bytes, Option<Bytes>>,
 
 	// Join iterator and its storage
-	pub(crate) join_storage: BTreeMap<K, Option<Arc<V>>>,
+	pub(crate) join_storage: BTreeMap<Bytes, Option<Bytes>>,
 
 	// Current buffered entries from each source
-	pub(crate) tree_next: Option<Entry<'a, K, RwLock<Versions<V>>>>,
-	pub(crate) join_next: Option<(K, Option<Arc<V>>)>,
-	pub(crate) self_next: Option<(&'a K, &'a Option<Arc<V>>)>,
+	pub(crate) tree_next: Option<Entry<'a, Bytes, RwLock<Versions>>>,
+	pub(crate) join_next: Option<(Bytes, Option<Bytes>)>,
+	pub(crate) self_next: Option<(&'a Bytes, &'a Option<Bytes>)>,
 
 	// Iterator configuration
 	pub(crate) direction: Direction,
@@ -61,15 +57,11 @@ enum KeySource {
 	Transaction,
 }
 
-impl<'a, K, V> MergeIterator<'a, K, V>
-where
-	K: Ord + Clone + Sync + Send + 'static,
-	V: Eq + Clone + Sync + Send + 'static,
-{
+impl<'a> MergeIterator<'a> {
 	pub fn new(
-		mut tree_iter: SkipRange<'a, K, RangeBounds<'a, K>, K, RwLock<Versions<V>>>,
-		join_storage: BTreeMap<K, Option<Arc<V>>>,
-		mut self_iter: TreeRange<'a, K, Option<Arc<V>>>,
+		mut tree_iter: SkipRange<'a, Bytes, RangeBounds<'a>, Bytes, RwLock<Versions>>,
+		join_storage: BTreeMap<Bytes, Option<Bytes>>,
+		mut self_iter: TreeRange<'a, Bytes, Option<Bytes>>,
 		direction: Direction,
 		version: u64,
 		skip: usize,
@@ -129,7 +121,7 @@ where
 	pub fn next_count(&mut self) -> Option<bool> {
 		loop {
 			// Find the next key to process (smallest for Forward, largest for Reverse)
-			let mut next_key: Option<&K> = None;
+			let mut next_key: Option<&Bytes> = None;
 			let mut next_source = KeySource::None;
 
 			// Check self iterator (highest priority)
@@ -251,10 +243,10 @@ where
 	}
 
 	/// Get next entry with key (no value cloning) - optimized for key iteration
-	pub fn next_key(&mut self) -> Option<(K, bool)> {
+	pub fn next_key(&mut self) -> Option<(Bytes, bool)> {
 		loop {
 			// Find the next key to process (smallest for Forward, largest for Reverse)
-			let mut next_key: Option<&K> = None;
+			let mut next_key: Option<&Bytes> = None;
 			let mut next_source = KeySource::None;
 
 			// Check self iterator (highest priority)
@@ -411,17 +403,13 @@ where
 	}
 }
 
-impl<'a, K, V> Iterator for MergeIterator<'a, K, V>
-where
-	K: Ord + Clone + Sync + Send + 'static,
-	V: Eq + Clone + Sync + Send + 'static,
-{
-	type Item = (K, Option<Arc<V>>);
+impl<'a> Iterator for MergeIterator<'a> {
+	type Item = (Bytes, Option<Bytes>);
 
 	fn next(&mut self) -> Option<Self::Item> {
 		loop {
 			// Find the next key to process (smallest for Forward, largest for Reverse)
-			let mut next_key: Option<&K> = None;
+			let mut next_key: Option<&Bytes> = None;
 			let mut next_source = KeySource::None;
 
 			// Check self iterator (highest priority)
