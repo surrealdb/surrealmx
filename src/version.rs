@@ -14,36 +14,27 @@
 
 //! This module stores a MVCC versioned entry.
 
+use bytes::Bytes;
 use std::cmp::Ordering;
-use std::sync::Arc;
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct Version<V>
-where
-	V: Eq + Clone + Sync + Send + 'static,
-{
+pub struct Version {
 	/// The version of this entry
 	pub(crate) version: u64,
 	/// The value of this entry. If this is
 	/// None, then the key is deleted and if
 	/// it is Some then the key exists.
-	pub(crate) value: Option<Arc<V>>,
+	pub(crate) value: Option<Bytes>,
 }
 
-impl<V> Ord for Version<V>
-where
-	V: Eq + Clone + Sync + Send + 'static,
-{
+impl Ord for Version {
 	#[inline]
 	fn cmp(&self, other: &Self) -> Ordering {
 		self.version.cmp(&other.version)
 	}
 }
 
-impl<V> PartialOrd for Version<V>
-where
-	V: Eq + Clone + Sync + Send + 'static,
-{
+impl PartialOrd for Version {
 	#[inline]
 	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
 		Some(self.cmp(other))

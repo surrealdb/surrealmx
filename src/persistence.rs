@@ -22,11 +22,10 @@ use crate::inner::Inner;
 use crate::version::Version;
 use crate::versions::Versions;
 use bincode::config;
+use bytes::Bytes;
 use crossbeam_deque::{Injector, Steal};
 use parking_lot::RwLock;
-use serde::{de::DeserializeOwned, Serialize};
 use std::collections::BTreeMap;
-use std::fmt::Debug;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom};
@@ -40,9 +39,9 @@ pub type PersistenceResult<T> = Result<T, PersistenceError>;
 
 /// Represents a pending asynchronous append operation
 #[derive(Debug, Clone)]
-pub struct AsyncAppendOperation<K, V> {
+pub struct AsyncAppendOperation {
 	pub version: u64,
-	pub writeset: BTreeMap<K, Option<Arc<V>>>,
+	pub writeset: BTreeMap<Bytes, Option<Bytes>>,
 }
 
 /// Configuration for AOL (Append-Only Log) behavior
@@ -171,13 +170,9 @@ impl PersistenceOptions {
 /// - Periodic snapshots for efficient recovery
 /// - Background worker for automatic snapshot creation
 #[derive(Clone)]
-pub struct Persistence<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
+pub struct Persistence {
 	/// Reference to the inner database state
-	pub(crate) inner: Arc<Inner<K, V>>,
+	pub(crate) inner: Arc<Inner>,
 	/// File handle for the append-only log (None if AOL is disabled)
 	pub(crate) aol: Option<Arc<Mutex<File>>>,
 	/// Path to the append-only log file (None if AOL is disabled)
@@ -205,14 +200,10 @@ where
 	/// Counter for AOL appends since last fsync
 	pub(crate) pending_syncs: Arc<AtomicU64>,
 	/// Queue for asynchronous append operations
-	pub(crate) async_append_injector: Arc<Injector<AsyncAppendOperation<K, V>>>,
+	pub(crate) async_append_injector: Arc<Injector<AsyncAppendOperation>>,
 }
 
-impl<K, V> Persistence<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static + Serialize + DeserializeOwned,
-	V: Eq + Clone + Debug + Sync + Send + 'static + Serialize + DeserializeOwned,
-{
+impl Persistence {
 	/// Creates a new persistence layer with custom options
 	///
 	/// # Arguments
@@ -223,7 +214,7 @@ where
 	/// * `PersistenceResult<Self>` - The created persistence layer or an error
 	pub fn new_with_options(
 		options: PersistenceOptions,
-		inner: Arc<Inner<K, V>>,
+		inner: Arc<Inner>,
 	) -> PersistenceResult<Self> {
 		// Get the base path from options
 		let base_path = &options.base_path;
@@ -320,9 +311,9 @@ where
 					// Trace the loading of the snapshot entry
 					tracing::trace!("Loading snapshot entry: {count}");
 					// Type alias for the entry
-					type Entry<K, V> = (K, Vec<(u64, Option<V>)>);
+					type Entry = (Bytes, Vec<(u64, Option<Bytes>)>);
 					// Attempt to decode the next entry, handling EOF gracefully
-					let result: Result<Entry<K, V>, _> =
+					let result: Result<Entry, _> =
 						bincode::serde::decode_from_std_read(&mut reader, config::standard());
 					// Detech any end of file errors
 					match result {
@@ -335,7 +326,7 @@ where
 								for (version, value) in versions.into_iter() {
 									entries.push(Version {
 										version,
-										value: value.map(Arc::new),
+										value,
 									});
 								}
 								// Insert the entry into the datastore
@@ -375,9 +366,9 @@ where
 					// Trace the loading of the append-only entry
 					tracing::trace!("Loading AOL entry: {count}");
 					// Type alias for the entry
-					type Entry<K, V> = (K, u64, Option<Arc<V>>);
+					type Entry = (Bytes, u64, Option<Bytes>);
 					// Explicitly type the result to help type inference
-					let result: Result<Entry<K, V>, _> =
+					let result: Result<Entry, _> =
 						bincode::serde::decode_from_std_read(&mut reader, config::standard());
 					// Detech any end of file errors
 					match result {
@@ -823,51 +814,7 @@ where
 			}
 		}
 	}
-}
 
-impl<K, V> Drop for Persistence<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
-	/// Cleans up resources when the persistence layer is dropped
-	fn drop(&mut self) {
-		// Signal shutdown to the worker threads
-		self.background_threads_enabled.store(false, Ordering::Release);
-		// Stop the fsync worker if it exists
-		if let Some(handle) = self.fsync_handle.write().take() {
-			handle.thread().unpark();
-			let _ = handle.join();
-		}
-		// Stop the snapshot worker if it exists
-		if let Some(handle) = self.snapshot_handle.write().take() {
-			handle.thread().unpark();
-			let _ = handle.join();
-		}
-		// Stop the async append worker if it exists
-		if let Some(handle) = self.appender_handle.write().take() {
-			handle.thread().unpark();
-			let _ = handle.join();
-		}
-		// Perform final fsync if there are pending syncs
-		if self.aol_mode != AolMode::Never && self.pending_syncs.load(Ordering::Acquire) > 0 {
-			// Try to acquire lock on AOL file
-			if let Some(ref aol) = self.aol {
-				// Lock the AOL file
-				if let Ok(file) = aol.lock() {
-					// Sync file contents to disk
-					let _ = file.sync_all();
-				}
-			}
-		}
-	}
-}
-
-impl<K, V> Persistence<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static + Serialize,
-	V: Eq + Clone + Debug + Sync + Send + 'static + Serialize,
-{
 	/// Appends a set of changes to the append-only log
 	///
 	/// # Arguments
@@ -879,7 +826,7 @@ where
 	pub fn append(
 		&self,
 		version: u64,
-		writeset: &BTreeMap<K, Option<Arc<V>>>,
+		writeset: &BTreeMap<Bytes, Option<Bytes>>,
 	) -> PersistenceResult<()> {
 		// Skip AOL writing if AOL is disabled
 		if self.aol_mode == AolMode::Never {
@@ -961,5 +908,39 @@ where
 		}
 		// All ok
 		Ok(())
+	}
+}
+
+impl Drop for Persistence {
+	/// Cleans up resources when the persistence layer is dropped
+	fn drop(&mut self) {
+		// Signal shutdown to the worker threads
+		self.background_threads_enabled.store(false, Ordering::Release);
+		// Stop the fsync worker if it exists
+		if let Some(handle) = self.fsync_handle.write().take() {
+			handle.thread().unpark();
+			let _ = handle.join();
+		}
+		// Stop the snapshot worker if it exists
+		if let Some(handle) = self.snapshot_handle.write().take() {
+			handle.thread().unpark();
+			let _ = handle.join();
+		}
+		// Stop the async append worker if it exists
+		if let Some(handle) = self.appender_handle.write().take() {
+			handle.thread().unpark();
+			let _ = handle.join();
+		}
+		// Perform final fsync if there are pending syncs
+		if self.aol_mode != AolMode::Never && self.pending_syncs.load(Ordering::Acquire) > 0 {
+			// Try to acquire lock on AOL file
+			if let Some(ref aol) = self.aol {
+				// Lock the AOL file
+				if let Ok(file) = aol.lock() {
+					// Sync file contents to disk
+					let _ = file.sync_all();
+				}
+			}
+		}
 	}
 }

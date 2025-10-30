@@ -46,7 +46,7 @@ use surrealmx::{Database, DatabaseOptions};
 fn main() {
     // Create a database with custom settings
     let opts = DatabaseOptions { pool_size: 128, ..Default::default() };
-    let db: Database<&str, &str> = Database::new_with_options(opts);
+    let db = Database::new_with_options(opts);
 
     // Start a write transaction
     let mut tx = db.transaction(true);
@@ -55,7 +55,7 @@ fn main() {
 
     // Read the value back
     let mut tx = db.transaction(false);
-    assert_eq!(tx.get("key").unwrap(), Some("value"));
+    assert_eq!(tx.get("key").unwrap(), Some("value".into()));
     tx.cancel().unwrap();
 }
 ```
@@ -73,7 +73,7 @@ use surrealmx::{Database, DatabaseOptions};
 fn main() {
     // Create a database with custom settings
     let opts = DatabaseOptions { enable_gc: false, enable_cleanup: false, ..Default::default() };
-    let db: Database<&str, &str> = Database::new_with_options(opts);
+    let db = Database::new_with_options(opts);
 
     // Start a write transaction
     let mut tx = db.transaction(true);
@@ -111,7 +111,7 @@ fn main() -> std::io::Result<()> {
         .with_aol_mode(AolMode::SynchronousOnCommit)
         .with_snapshot_mode(SnapshotMode::Interval(Duration::from_secs(60)));
     
-    let db: Database<String, String> = Database::new_with_persistence(db_opts, persistence_opts)?;
+    let db = Database::new_with_persistence(db_opts, persistence_opts)?;
     
     let mut tx = db.transaction(true);
     tx.put("key".to_string(), "value".to_string())?;
@@ -135,7 +135,7 @@ fn main() -> std::io::Result<()> {
         .with_aol_mode(AolMode::Never) // Disable AOL, use only snapshots
         .with_snapshot_mode(SnapshotMode::Interval(Duration::from_secs(30)));
     
-    let db: Database<String, String> = Database::new_with_persistence(db_opts, persistence_opts)?;
+    let db = Database::new_with_persistence(db_opts, persistence_opts)?;
     
     let mut tx = db.transaction(true);
     tx.put("key".to_string(), "value".to_string())?;
@@ -179,7 +179,7 @@ fn main() -> std::io::Result<()> {
         .with_fsync_mode(FsyncMode::Interval(Duration::from_secs(1))) // Fsync every second
         .with_compression(CompressionMode::Lz4); // Enable LZ4 compression
     
-    let db: Database<String, String> = Database::new_with_persistence(db_opts, persistence_opts)?;
+    let db = Database::new_with_persistence(db_opts, persistence_opts)?;
     
     let mut tx = db.transaction(true);
     tx.put("key".to_string(), "value".to_string())?;
@@ -210,7 +210,7 @@ MemoDB's MVCC (Multi-Version Concurrency Control) design allows you to read data
 use surrealmx::Database;
 
 fn main() {
-    let db: Database<&str, &str> = Database::new();
+    let db = Database::new();
     
     // Insert some initial data
     let mut tx = db.transaction(true);
@@ -233,16 +233,17 @@ fn main() {
     let mut tx = db.transaction(false);
     
     // Read current state
-    assert_eq!(tx.get("user:1").unwrap(), Some("Alice Smith"));
-    assert_eq!(tx.get("user:2").unwrap(), Some("Bob"));
+    assert_eq!(tx.get("user:1").unwrap().as_deref(), Some(b"Alice Smith" as &[u8]));
+    assert_eq!(tx.get("user:2").unwrap().as_deref(), Some(b"Bob" as &[u8]));
     
     // Read state as it was at version_1 (before changes)
-    assert_eq!(tx.get_at_version("user:1", version_1).unwrap(), Some("Alice"));
+    assert_eq!(tx.get_at_version("user:1", version_1).unwrap().as_deref(), Some(b"Alice" as &[u8]));
     assert_eq!(tx.get_at_version("user:2", version_1).unwrap(), None);
     
     // Range operations also support historical reads
     let historical_keys = tx.keys_at_version("user:0".."user:9", None, None, version_1).unwrap();
-    assert_eq!(historical_keys, vec!["user:1"]);
+    assert_eq!(historical_keys.len(), 1);
+    assert_eq!(historical_keys[0].as_ref(), b"user:1");
     
     tx.cancel().unwrap();
 }
@@ -271,13 +272,13 @@ Provides excellent performance with strong consistency guarantees. Transactions 
 use surrealmx::Database;
 
 fn main() {
-    let db: Database<&str, i32> = Database::new();
+    let db = Database::new();
     
     // Snapshot isolation (default behavior)
     let mut tx1 = db.transaction(true);
     let mut tx2 = db.transaction(false); // Start tx2 before tx1 commits
     
-    tx1.put("counter", 1).unwrap();
+    tx1.put("counter", "1").unwrap();
     tx1.commit().unwrap();
     
     // tx2 started before tx1 committed, so it doesn't see the change
@@ -299,12 +300,12 @@ Provides the strongest consistency guarantee by detecting read-write conflicts a
 use surrealmx::{Database, Error};
 
 fn main() {
-    let db: Database<&str, i32> = Database::new();
+    let db = Database::new();
     
     // Initialize data
     let mut tx = db.transaction(true);
-    tx.put("x", 0).unwrap();
-    tx.put("y", 0).unwrap();
+    tx.put("x", "0").unwrap();
+    tx.put("y", "0").unwrap();
     tx.commit().unwrap();
     
     // Two concurrent transactions that would cause write skew
@@ -312,12 +313,12 @@ fn main() {
     let mut tx2 = db.transaction(true);
     
     // tx1 reads x and writes to y
-    let x_val = tx1.get("x").unwrap().unwrap();
-    tx1.set("y", x_val + 1).unwrap();
+    tx1.get("x").unwrap();
+    tx1.set("y", "modified_by_tx1").unwrap();
     
     // tx2 reads y and writes to x  
-    let y_val = tx2.get("y").unwrap().unwrap();
-    tx2.set("x", y_val + 1).unwrap();
+    tx2.get("y").unwrap();
+    tx2.set("x", "modified_by_tx2").unwrap();
     
     // First transaction commits successfully
     tx1.commit().unwrap();
@@ -352,7 +353,7 @@ MemoDB provides powerful range-based operations for scanning, counting, and iter
 use surrealmx::Database;
 
 fn main() {
-    let db: Database<&str, &str> = Database::new();
+    let db = Database::new();
     
     // Insert test data
     let mut tx = db.transaction(true);
@@ -365,15 +366,15 @@ fn main() {
     
     // Get all keys in range
     let keys = tx.keys("key:03".."key:08", None, None).unwrap();
-    assert_eq!(keys, vec!["key:03", "key:04", "key:05", "key:06", "key:07"]);
+    assert_eq!(keys.len(), 5);
+    assert_eq!(keys[0].as_ref(), b"key:03");
+    assert_eq!(keys[4].as_ref(), b"key:07");
     
     // Get key-value pairs in range
     let pairs = tx.scan("key:03".."key:06", None, None).unwrap();
-    assert_eq!(pairs, vec![
-        ("key:03", "value:3"),
-        ("key:04", "value:4"), 
-        ("key:05", "value:5")
-    ]);
+    assert_eq!(pairs.len(), 3);
+    assert_eq!(pairs[0].0.as_ref(), b"key:03");
+    assert_eq!(pairs[0].1.as_ref(), b"value:3");
     
     // Count keys in range
     let count = tx.total("key:00".."key:99", None, None).unwrap();
@@ -389,12 +390,12 @@ fn main() {
 use surrealmx::Database;
 
 fn main() {
-    let db: Database<&str, i32> = Database::new();
+    let db = Database::new();
     
     // Insert test data
     let mut tx = db.transaction(true);
     for i in 1..=100 {
-        tx.put(&format!("item:{:03}", i), i).unwrap();
+        tx.put(format!("item:{:03}", i), format!("value_{}", i)).unwrap();
     }
     tx.commit().unwrap();
     
@@ -403,14 +404,14 @@ fn main() {
     // Paginated forward scan: skip 10, take 5
     let page1 = tx.scan("item:000".."item:999", Some(10), Some(5)).unwrap();
     assert_eq!(page1.len(), 5);
-    assert_eq!(page1[0].0, "item:011");
-    assert_eq!(page1[4].0, "item:015");
+    assert_eq!(page1[0].0.as_ref(), b"item:011");
+    assert_eq!(page1[4].0.as_ref(), b"item:015");
     
     // Reverse iteration: get last 3 items
     let last_items = tx.scan_reverse("item:000".."item:999", None, Some(3)).unwrap();
     assert_eq!(last_items.len(), 3);
-    assert_eq!(last_items[0].0, "item:100"); // First item is the highest key
-    assert_eq!(last_items[2].0, "item:098"); // Last item is lower
+    assert_eq!(last_items[0].0.as_ref(), b"item:100"); // First item is the highest key
+    assert_eq!(last_items[2].0.as_ref(), b"item:098"); // Last item is lower
     
     tx.cancel().unwrap();
 }
@@ -422,7 +423,7 @@ fn main() {
 use surrealmx::Database;
 
 fn main() {
-    let db: Database<&str, &str> = Database::new();
+    let db = Database::new();
     
     // Insert initial data
     let mut tx = db.transaction(true);
@@ -444,11 +445,15 @@ fn main() {
     
     // Current state: all 4 keys
     let current_keys = tx.keys("a".."z", None, None).unwrap();
-    assert_eq!(current_keys, vec!["a", "b", "c", "d"]);
+    assert_eq!(current_keys.len(), 4);
+    assert_eq!(current_keys[0].as_ref(), b"a");
+    assert_eq!(current_keys[3].as_ref(), b"d");
     
     // Historical state: only first 2 keys
     let historical_keys = tx.keys_at_version("a".."z", None, None, version_1).unwrap();
-    assert_eq!(historical_keys, vec!["a", "b"]);
+    assert_eq!(historical_keys.len(), 2);
+    assert_eq!(historical_keys[0].as_ref(), b"a");
+    assert_eq!(historical_keys[1].as_ref(), b"b");
     
     // Count at different versions
     let current_count = tx.total("a".."z", None, None).unwrap();

@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::time::Duration;
 use surrealmx::{AolMode, Database, DatabaseOptions, FsyncMode, PersistenceOptions, SnapshotMode};
 use tempfile::TempDir;
@@ -18,31 +19,30 @@ fn test_aol_synchronous_basic() {
 		.with_fsync_mode(FsyncMode::EveryAppend);
 
 	// Create persistent database with AOL mode
-	let db: Database<String, String> =
-		Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 	// Add some data
 	{
 		let mut tx = db.transaction(true);
-		tx.set("key1".to_string(), "value1".to_string()).unwrap();
-		tx.set("key2".to_string(), "value2".to_string()).unwrap();
+		tx.set("key1", "value1").unwrap();
+		tx.set("key2", "value2").unwrap();
 		tx.commit().unwrap();
 	}
 
 	// Add more data in a separate transaction
 	{
 		let mut tx = db.transaction(true);
-		tx.set("key3".to_string(), "value3".to_string()).unwrap();
-		tx.del("key1".to_string()).unwrap(); // Delete key1
+		tx.set("key3", "value3").unwrap();
+		tx.del("key1").unwrap(); // Delete key1
 		tx.commit().unwrap();
 	}
 
 	// Verify data is accessible in current session
 	{
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("key1".to_string()).unwrap(), None); // Should be deleted
-		assert_eq!(tx.get("key2".to_string()).unwrap(), Some("value2".to_string()));
-		assert_eq!(tx.get("key3".to_string()).unwrap(), Some("value3".to_string()));
+		assert_eq!(tx.get("key1").unwrap(), None); // Should be deleted
+		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+		assert_eq!(tx.get("key3").unwrap(), Some(Bytes::from("value3")));
 		tx.cancel().unwrap();
 	}
 
@@ -76,31 +76,30 @@ fn test_aol_asynchronous_basic() {
 		.with_fsync_mode(FsyncMode::Never);
 
 	// Create persistent database with AOL mode
-	let db: Database<String, String> =
-		Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 	// Add some data
 	{
 		let mut tx = db.transaction(true);
-		tx.set("key1".to_string(), "value1".to_string()).unwrap();
-		tx.set("key2".to_string(), "value2".to_string()).unwrap();
+		tx.set("key1", "value1").unwrap();
+		tx.set("key2", "value2").unwrap();
 		tx.commit().unwrap();
 	}
 
 	// Add more data in a separate transaction
 	{
 		let mut tx = db.transaction(true);
-		tx.set("key3".to_string(), "value3".to_string()).unwrap();
-		tx.del("key1".to_string()).unwrap(); // Delete key1
+		tx.set("key3", "value3").unwrap();
+		tx.del("key1").unwrap(); // Delete key1
 		tx.commit().unwrap();
 	}
 
 	// Verify data is accessible in current session
 	{
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("key1".to_string()).unwrap(), None); // Should be deleted
-		assert_eq!(tx.get("key2".to_string()).unwrap(), Some("value2".to_string()));
-		assert_eq!(tx.get("key3".to_string()).unwrap(), Some("value3".to_string()));
+		assert_eq!(tx.get("key1").unwrap(), None); // Should be deleted
+		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+		assert_eq!(tx.get("key3").unwrap(), Some(Bytes::from("value3")));
 		tx.cancel().unwrap();
 	}
 
@@ -135,8 +134,7 @@ fn test_aol_recovery() {
 
 	// Create first database instance and add data
 	{
-		let db: Database<String, String> =
-			Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
 		tx.set("recover_key1".to_string(), "recover_value1".to_string()).unwrap();
@@ -157,14 +155,13 @@ fn test_aol_recovery() {
 
 	// Create second database instance from the same directory (simulates restart)
 	{
-		let db: Database<String, String> =
-			Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		// Verify data was recovered from AOL
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("recover_key1".to_string()).unwrap(), Some("updated_value1".to_string()));
-		assert_eq!(tx.get("recover_key2".to_string()).unwrap(), None); // Should be deleted
-		assert_eq!(tx.get("recover_key3".to_string()).unwrap(), Some("recover_value3".to_string()));
+		assert_eq!(tx.get("recover_key1").unwrap(), Some(Bytes::from("updated_value1")));
+		assert_eq!(tx.get("recover_key2").unwrap(), None); // Should be deleted
+		assert_eq!(tx.get("recover_key3").unwrap(), Some(Bytes::from("recover_value3")));
 		tx.cancel().unwrap();
 	}
 }
@@ -181,11 +178,10 @@ fn test_aol_fsync_modes() {
 			.with_aol_mode(AolMode::SynchronousOnCommit)
 			.with_fsync_mode(FsyncMode::EveryAppend);
 
-		let db: Database<i32, String> =
-			Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(true);
-		tx.set(1, "fsync_every_append".to_string()).unwrap();
+		tx.set(&b"key_1"[..], "fsync_every_append").unwrap();
 		tx.commit().unwrap(); // Should fsync immediately
 	}
 
@@ -199,11 +195,10 @@ fn test_aol_fsync_modes() {
 			.with_aol_mode(AolMode::SynchronousOnCommit)
 			.with_fsync_mode(FsyncMode::Interval(Duration::from_millis(100)));
 
-		let db: Database<i32, String> =
-			Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(true);
-		tx.set(1, "fsync_interval".to_string()).unwrap();
+		tx.set(&b"key_1"[..], "fsync_interval").unwrap();
 		tx.commit().unwrap(); // Should not fsync immediately
 
 		// Wait for interval to pass
@@ -220,11 +215,10 @@ fn test_aol_fsync_modes() {
 			.with_aol_mode(AolMode::SynchronousOnCommit)
 			.with_fsync_mode(FsyncMode::Never);
 
-		let db: Database<i32, String> =
-			Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(true);
-		tx.set(1, "fsync_never".to_string()).unwrap();
+		tx.set(&b"key_1"[..], "fsync_never").unwrap();
 		tx.commit().unwrap(); // Should never fsync
 	}
 }
@@ -244,8 +238,7 @@ fn test_snapshot_manual_creation() {
 		.with_snapshot_mode(SnapshotMode::Never);
 
 	// Create persistent database
-	let db: Database<String, String> =
-		Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 	// Add some data
 	{
@@ -287,8 +280,7 @@ fn test_snapshot_only_persistence_basic() {
 		.with_snapshot_mode(SnapshotMode::Interval(Duration::from_secs(60)));
 
 	// Create persistent database with snapshot-only mode
-	let db: Database<String, String> =
-		Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 	// Add some data
 	{
@@ -301,8 +293,8 @@ fn test_snapshot_only_persistence_basic() {
 	// Verify data is accessible in current session
 	{
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("key1".to_string()).unwrap(), Some("value1".to_string()));
-		assert_eq!(tx.get("key2".to_string()).unwrap(), Some("value2".to_string()));
+		assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
+		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
 		tx.cancel().unwrap();
 	}
 
@@ -336,8 +328,7 @@ fn test_snapshot_basic() {
 		.with_aol_mode(AolMode::Never)
 		.with_snapshot_mode(SnapshotMode::Never);
 
-	let db: Database<String, String> =
-		Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 	// Add test data
 	{
@@ -376,8 +367,7 @@ fn test_snapshot_recovery() {
 
 	// Create first database instance and add data
 	{
-		let db: Database<String, String> =
-			Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		// Add initial data
 		{
@@ -410,20 +400,16 @@ fn test_snapshot_recovery() {
 
 	// Create second database instance from the same directory (simulates restart)
 	{
-		let db: Database<String, String> =
-			Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		// Verify data was recovered from snapshot
 		let mut tx = db.transaction(false);
 		assert_eq!(
-			tx.get("snapshot_key1".to_string()).unwrap(),
-			Some("updated_snapshot_value1".to_string())
+			tx.get("snapshot_key1").unwrap().as_deref(),
+			Some(b"updated_snapshot_value1" as &[u8])
 		);
-		assert_eq!(tx.get("snapshot_key2".to_string()).unwrap(), None); // Should be deleted
-		assert_eq!(
-			tx.get("snapshot_key3".to_string()).unwrap(),
-			Some("snapshot_value3".to_string())
-		);
+		assert_eq!(tx.get("snapshot_key2").unwrap(), None); // Should be deleted
+		assert_eq!(tx.get("snapshot_key3").unwrap().as_deref(), Some(b"snapshot_value3" as &[u8]));
 		tx.cancel().unwrap();
 	}
 }
@@ -439,8 +425,7 @@ fn test_snapshot_interval() {
 		.with_aol_mode(AolMode::Never)
 		.with_snapshot_mode(SnapshotMode::Interval(Duration::from_millis(100)));
 
-	let db: Database<String, String> =
-		Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 	// Add some data
 	{
@@ -481,8 +466,7 @@ fn test_combined_aol_and_snapshot() {
 
 	// Create first database instance
 	{
-		let db: Database<String, String> =
-			Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		// Add initial data (will go to AOL)
 		{
@@ -515,23 +499,16 @@ fn test_combined_aol_and_snapshot() {
 
 	// Create second database instance (simulates restart)
 	{
-		let db: Database<String, String> =
-			Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		// Verify data was recovered from both snapshot and AOL
 		let mut tx = db.transaction(false);
 		assert_eq!(
-			tx.get("combined_key1".to_string()).unwrap(),
-			Some("updated_combined_value1".to_string())
+			tx.get("combined_key1").unwrap().as_deref(),
+			Some(b"updated_combined_value1" as &[u8])
 		);
-		assert_eq!(
-			tx.get("combined_key2".to_string()).unwrap(),
-			Some("combined_value2".to_string())
-		);
-		assert_eq!(
-			tx.get("combined_key3".to_string()).unwrap(),
-			Some("combined_value3".to_string())
-		);
+		assert_eq!(tx.get("combined_key2").unwrap().as_deref(), Some(b"combined_value2" as &[u8]));
+		assert_eq!(tx.get("combined_key3").unwrap().as_deref(), Some(b"combined_value3" as &[u8]));
 		tx.cancel().unwrap();
 	}
 }
@@ -548,8 +525,7 @@ fn test_aol_snapshot_with_truncation() {
 		.with_snapshot_mode(SnapshotMode::Never)
 		.with_fsync_mode(FsyncMode::EveryAppend);
 
-	let db: Database<String, String> =
-		Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 	// Add data that will go to AOL
 	{
@@ -589,12 +565,12 @@ fn test_aol_snapshot_with_truncation() {
 	{
 		let mut tx = db.transaction(false);
 		for i in 0..10 {
-			assert_eq!(tx.get(format!("key_{}", i)).unwrap(), Some(format!("value_{}", i)));
+			assert_eq!(
+				tx.get(format!("key_{}", i)).unwrap(),
+				Some(Bytes::from(format!("value_{}", i)))
+			);
 		}
-		assert_eq!(
-			tx.get("post_snapshot_key".to_string()).unwrap(),
-			Some("post_snapshot_value".to_string())
-		);
+		assert_eq!(tx.get("post_snapshot_key").unwrap(), Some(Bytes::from("post_snapshot_value")));
 		tx.cancel().unwrap();
 	}
 }
@@ -613,8 +589,7 @@ fn test_combined_recovery_complex() {
 
 	// First session: Add data, snapshot, add more data
 	{
-		let db: Database<String, String> =
-			Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		// Phase 1: Add initial data
 		{
@@ -649,17 +624,16 @@ fn test_combined_recovery_complex() {
 
 	// Second session: Verify all data is recovered correctly
 	{
-		let db: Database<String, String> =
-			Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
 		assert_eq!(
-			tx.get("phase1_key1".to_string()).unwrap(),
-			Some("final_phase1_value1".to_string())
+			tx.get("phase1_key1").unwrap().as_deref(),
+			Some(b"final_phase1_value1" as &[u8])
 		);
-		assert_eq!(tx.get("phase1_key2".to_string()).unwrap(), None); // Should be deleted
-		assert_eq!(tx.get("phase2_key1".to_string()).unwrap(), Some("phase2_value1".to_string()));
-		assert_eq!(tx.get("phase3_key1".to_string()).unwrap(), Some("phase3_value1".to_string()));
+		assert_eq!(tx.get("phase1_key2").unwrap(), None); // Should be deleted
+		assert_eq!(tx.get("phase2_key1").unwrap(), Some(Bytes::from("phase2_value1")));
+		assert_eq!(tx.get("phase3_key1").unwrap(), Some(Bytes::from("phase3_value1")));
 		tx.cancel().unwrap();
 	}
 }
@@ -683,8 +657,7 @@ fn test_custom_file_paths() {
 		.with_aol_path(aol_dir.join("custom.aol"))
 		.with_snapshot_path(snapshot_dir.join("custom.snapshot"));
 
-	let db: Database<String, String> =
-		Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 	// Add some data
 	{
@@ -724,8 +697,7 @@ fn test_persistence_options_builder() {
 
 	// Test that database can be created with these options
 	let db_opts = DatabaseOptions::default();
-	let _db: Database<String, String> =
-		Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+	let _db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 }
 
 #[test]
@@ -739,14 +711,13 @@ fn test_readonly_operations_no_persistence() {
 		.with_aol_mode(AolMode::SynchronousOnCommit)
 		.with_snapshot_mode(SnapshotMode::Never);
 
-	let db: Database<String, String> =
-		Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 	// Perform read-only operations (should not trigger persistence)
 	{
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("non_existent_key".to_string()).unwrap(), None);
-		assert!(!tx.exists("non_existent_key".to_string()).unwrap());
+		assert_eq!(tx.get("non_existent_key").unwrap(), None);
+		assert!(!tx.exists("non_existent_key").unwrap());
 		tx.cancel().unwrap();
 	}
 

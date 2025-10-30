@@ -20,6 +20,7 @@ mod direction;
 mod err;
 mod inner;
 mod iter;
+mod kv;
 mod options;
 mod oracle;
 mod persistence;
@@ -29,8 +30,8 @@ mod tx;
 mod version;
 mod versions;
 
-#[cfg(test)]
-pub(crate) mod kv;
+#[doc(inline)]
+pub use bytes::Bytes;
 
 #[doc(inline)]
 pub use self::db::*;

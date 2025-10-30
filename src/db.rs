@@ -20,8 +20,6 @@ use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
 use crate::tx::Transaction;
-use serde::{de::DeserializeOwned, Serialize};
-use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -32,28 +30,20 @@ use std::time::Duration;
 // --------------------------------------------------
 
 /// A transactional in-memory database
-pub struct Database<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
+pub struct Database {
 	/// The inner structure of the database
-	inner: Arc<Inner<K, V>>,
+	inner: Arc<Inner>,
 	/// The database transaction pool
-	pool: Arc<Pool<K, V>>,
+	pool: Arc<Pool>,
 	/// Optional persistence configuration
-	persistence: Option<Persistence<K, V>>,
+	persistence: Option<Persistence>,
 	/// Interval used by the garbage collector thread
 	gc_interval: Duration,
 	/// Interval used by the cleanup thread
 	cleanup_interval: Duration,
 }
 
-impl<K, V> Default for Database<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
+impl Default for Database {
 	fn default() -> Self {
 		let inner = Arc::new(Inner::default());
 		let pool = Pool::new(inner.clone(), DEFAULT_POOL_SIZE);
@@ -67,32 +57,20 @@ where
 	}
 }
 
-impl<K, V> Drop for Database<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
+impl Drop for Database {
 	fn drop(&mut self) {
 		self.shutdown();
 	}
 }
 
-impl<K, V> Deref for Database<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
-	type Target = Inner<K, V>;
+impl Deref for Database {
+	type Target = Inner;
 	fn deref(&self) -> &Self::Target {
 		&self.inner
 	}
 }
 
-impl<K, V> Database<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
+impl Database {
 	/// Create a new transactional in-memory database
 	pub fn new() -> Self {
 		Self::new_with_options(DatabaseOptions::default())
@@ -127,11 +105,7 @@ where
 	pub fn new_with_persistence(
 		opts: DatabaseOptions,
 		persistence_opts: crate::PersistenceOptions,
-	) -> std::io::Result<Self>
-	where
-		K: Serialize + DeserializeOwned,
-		V: Serialize + DeserializeOwned,
-	{
+	) -> std::io::Result<Self> {
 		//  Create a new inner database
 		let inner = Arc::new(Inner::new(&opts));
 		// Initialise a transaction pool
@@ -193,12 +167,12 @@ where
 	}
 
 	/// Start a new transaction on this database
-	pub fn transaction(&self, write: bool) -> Transaction<K, V> {
+	pub fn transaction(&self, write: bool) -> Transaction {
 		self.pool.get(write)
 	}
 
 	/// Get a reference to the persistence layer if enabled
-	pub fn persistence(&self) -> Option<&Persistence<K, V>> {
+	pub fn persistence(&self) -> Option<&Persistence> {
 		self.persistence.as_ref()
 	}
 
@@ -358,17 +332,16 @@ where
 mod tests {
 
 	use super::*;
-	use crate::kv::{Key, Val};
 
 	#[test]
 	fn begin_tx() {
-		let db: Database<Key, Val> = Database::new();
+		let db = Database::new();
 		db.transaction(false);
 	}
 
 	#[test]
 	fn finished_tx_not_writeable() {
-		let db: Database<&str, &str> = Database::new();
+		let db = Database::new();
 		// ----------
 		let mut tx = db.transaction(true);
 		let res = tx.cancel();
@@ -387,14 +360,14 @@ mod tests {
 
 	#[test]
 	fn cancelled_tx_is_cancelled() {
-		let db: Database<&str, &str> = Database::new();
+		let db = Database::new();
 		// ----------
 		let mut tx = db.transaction(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert!(res);
 		let res = tx.get("test").unwrap();
-		assert_eq!(res, Some("something"));
+		assert_eq!(res.as_deref(), Some(b"something" as &[u8]));
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		// ----------
@@ -409,14 +382,14 @@ mod tests {
 
 	#[test]
 	fn committed_tx_is_committed() {
-		let db: Database<&str, &str> = Database::new();
+		let db = Database::new();
 		// ----------
 		let mut tx = db.transaction(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert!(res);
 		let res = tx.get("test").unwrap();
-		assert_eq!(res, Some("something"));
+		assert_eq!(res.as_deref(), Some(b"something" as &[u8]));
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
@@ -424,21 +397,21 @@ mod tests {
 		let res = tx.exists("test").unwrap();
 		assert!(res);
 		let res = tx.get("test").unwrap();
-		assert_eq!(res, Some("something"));
+		assert_eq!(res.as_deref(), Some(b"something" as &[u8]));
 		let res = tx.cancel();
 		assert!(res.is_ok());
 	}
 
 	#[test]
 	fn multiple_concurrent_readers() {
-		let db: Database<&str, &str> = Database::new();
+		let db = Database::new();
 		// ----------
 		let mut tx = db.transaction(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert!(res);
 		let res = tx.get("test").unwrap();
-		assert_eq!(res, Some("something"));
+		assert_eq!(res.as_deref(), Some(b"something" as &[u8]));
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
@@ -462,14 +435,14 @@ mod tests {
 
 	#[test]
 	fn multiple_concurrent_operators() {
-		let db: Database<&str, &str> = Database::new();
+		let db = Database::new();
 		// ----------
 		let mut tx = db.transaction(true);
 		tx.put("test", "something").unwrap();
 		let res = tx.exists("test").unwrap();
 		assert!(res);
 		let res = tx.get("test").unwrap();
-		assert_eq!(res, Some("something"));
+		assert_eq!(res.as_deref(), Some(b"something" as &[u8]));
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
@@ -505,7 +478,7 @@ mod tests {
 
 	#[test]
 	fn iterate_keys_forward() {
-		let db: Database<&str, &str> = Database::new();
+		let db = Database::new();
 		// ----------
 		let mut tx = db.transaction(true);
 		tx.put("a", "a").unwrap();
@@ -525,7 +498,7 @@ mod tests {
 		tx.put("o", "o").unwrap();
 		let res = tx.keys("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
-		assert_eq!(res[0], "c");
+		assert_eq!(res[0].as_ref(), b"c");
 		assert_eq!(res[1], "d");
 		assert_eq!(res[2], "e");
 		assert_eq!(res[3], "f");
@@ -541,7 +514,7 @@ mod tests {
 		let mut tx = db.transaction(false);
 		let res = tx.keys("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
-		assert_eq!(res[0], "c");
+		assert_eq!(res[0].as_ref(), b"c");
 		assert_eq!(res[1], "d");
 		assert_eq!(res[2], "e");
 		assert_eq!(res[3], "f");
@@ -573,7 +546,7 @@ mod tests {
 
 	#[test]
 	fn iterate_keys_reverse() {
-		let db: Database<&str, &str> = Database::new();
+		let db = Database::new();
 		// ----------
 		let mut tx = db.transaction(true);
 		tx.put("a", "a").unwrap();
@@ -641,7 +614,7 @@ mod tests {
 
 	#[test]
 	fn iterate_keys_values_forward() {
-		let db: Database<&str, &str> = Database::new();
+		let db = Database::new();
 		// ----------
 		let mut tx = db.transaction(true);
 		tx.put("a", "a").unwrap();
@@ -661,55 +634,59 @@ mod tests {
 		tx.put("o", "o").unwrap();
 		let res = tx.scan("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
-		assert_eq!(res[0], ("c", "c"));
-		assert_eq!(res[1], ("d", "d"));
-		assert_eq!(res[2], ("e", "e"));
-		assert_eq!(res[3], ("f", "f"));
-		assert_eq!(res[4], ("g", "g"));
-		assert_eq!(res[5], ("h", "h"));
-		assert_eq!(res[6], ("i", "i"));
-		assert_eq!(res[7], ("j", "j"));
-		assert_eq!(res[8], ("k", "k"));
-		assert_eq!(res[9], ("l", "l"));
+		assert_eq!(res[0].0.as_ref(), b"c");
+		assert_eq!(res[0].1.as_ref(), b"c");
+		assert_eq!(res[1].0.as_ref(), b"d");
+		assert_eq!(res[1].1.as_ref(), b"d");
+		assert_eq!(res[2].0.as_ref(), b"e");
+		assert_eq!(res[3].0.as_ref(), b"f");
+		assert_eq!(res[4].0.as_ref(), b"g");
+		assert_eq!(res[5].0.as_ref(), b"h");
+		assert_eq!(res[6].0.as_ref(), b"i");
+		assert_eq!(res[7].0.as_ref(), b"j");
+		assert_eq!(res[8].0.as_ref(), b"k");
+		assert_eq!(res[9].0.as_ref(), b"l");
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.transaction(false);
 		let res = tx.scan("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
-		assert_eq!(res[0], ("c", "c"));
-		assert_eq!(res[1], ("d", "d"));
-		assert_eq!(res[2], ("e", "e"));
-		assert_eq!(res[3], ("f", "f"));
-		assert_eq!(res[4], ("g", "g"));
-		assert_eq!(res[5], ("h", "h"));
-		assert_eq!(res[6], ("i", "i"));
-		assert_eq!(res[7], ("j", "j"));
-		assert_eq!(res[8], ("k", "k"));
-		assert_eq!(res[9], ("l", "l"));
+		assert_eq!(res[0].0.as_ref(), b"c");
+		assert_eq!(res[0].1.as_ref(), b"c");
+		assert_eq!(res[1].0.as_ref(), b"d");
+		assert_eq!(res[1].1.as_ref(), b"d");
+		assert_eq!(res[2].0.as_ref(), b"e");
+		assert_eq!(res[3].0.as_ref(), b"f");
+		assert_eq!(res[4].0.as_ref(), b"g");
+		assert_eq!(res[5].0.as_ref(), b"h");
+		assert_eq!(res[6].0.as_ref(), b"i");
+		assert_eq!(res[7].0.as_ref(), b"j");
+		assert_eq!(res[8].0.as_ref(), b"k");
+		assert_eq!(res[9].0.as_ref(), b"l");
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.transaction(false);
 		let res = tx.scan("c".."z", Some(3), Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
-		assert_eq!(res[0], ("f", "f"));
-		assert_eq!(res[1], ("g", "g"));
-		assert_eq!(res[2], ("h", "h"));
-		assert_eq!(res[3], ("i", "i"));
-		assert_eq!(res[4], ("j", "j"));
-		assert_eq!(res[5], ("k", "k"));
-		assert_eq!(res[6], ("l", "l"));
-		assert_eq!(res[7], ("m", "m"));
-		assert_eq!(res[8], ("n", "n"));
-		assert_eq!(res[9], ("o", "o"));
+		assert_eq!(res[0].0.as_ref(), b"f");
+		assert_eq!(res[1].0.as_ref(), b"g");
+		assert_eq!(res[2].0.as_ref(), b"h");
+		assert_eq!(res[3].0.as_ref(), b"i");
+		assert_eq!(res[4].0.as_ref(), b"j");
+		assert_eq!(res[5].0.as_ref(), b"k");
+		assert_eq!(res[6].0.as_ref(), b"l");
+		assert_eq!(res[7].0.as_ref(), b"m");
+		assert_eq!(res[8].0.as_ref(), b"n");
+		assert_eq!(res[9].0.as_ref(), b"o");
 		let res = tx.cancel();
 		assert!(res.is_ok());
 	}
 
 	#[test]
 	fn iterate_keys_values_reverse() {
-		let db: Database<&str, &str> = Database::new();
+		let db = Database::new();
 		// ----------
 		let mut tx = db.transaction(true);
 		tx.put("a", "a").unwrap();
@@ -729,55 +706,55 @@ mod tests {
 		tx.put("o", "o").unwrap();
 		let res = tx.scan_reverse("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
-		assert_eq!(res[0], ("o", "o"));
-		assert_eq!(res[1], ("n", "n"));
-		assert_eq!(res[2], ("m", "m"));
-		assert_eq!(res[3], ("l", "l"));
-		assert_eq!(res[4], ("k", "k"));
-		assert_eq!(res[5], ("j", "j"));
-		assert_eq!(res[6], ("i", "i"));
-		assert_eq!(res[7], ("h", "h"));
-		assert_eq!(res[8], ("g", "g"));
-		assert_eq!(res[9], ("f", "f"));
+		assert_eq!(res[0].0.as_ref(), b"o");
+		assert_eq!(res[1].0.as_ref(), b"n");
+		assert_eq!(res[2].0.as_ref(), b"m");
+		assert_eq!(res[3].0.as_ref(), b"l");
+		assert_eq!(res[4].0.as_ref(), b"k");
+		assert_eq!(res[5].0.as_ref(), b"j");
+		assert_eq!(res[6].0.as_ref(), b"i");
+		assert_eq!(res[7].0.as_ref(), b"h");
+		assert_eq!(res[8].0.as_ref(), b"g");
+		assert_eq!(res[9].0.as_ref(), b"f");
 		let res = tx.commit();
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.transaction(false);
 		let res = tx.scan_reverse("c".."z", None, Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
-		assert_eq!(res[0], ("o", "o"));
-		assert_eq!(res[1], ("n", "n"));
-		assert_eq!(res[2], ("m", "m"));
-		assert_eq!(res[3], ("l", "l"));
-		assert_eq!(res[4], ("k", "k"));
-		assert_eq!(res[5], ("j", "j"));
-		assert_eq!(res[6], ("i", "i"));
-		assert_eq!(res[7], ("h", "h"));
-		assert_eq!(res[8], ("g", "g"));
-		assert_eq!(res[9], ("f", "f"));
+		assert_eq!(res[0].0.as_ref(), b"o");
+		assert_eq!(res[1].0.as_ref(), b"n");
+		assert_eq!(res[2].0.as_ref(), b"m");
+		assert_eq!(res[3].0.as_ref(), b"l");
+		assert_eq!(res[4].0.as_ref(), b"k");
+		assert_eq!(res[5].0.as_ref(), b"j");
+		assert_eq!(res[6].0.as_ref(), b"i");
+		assert_eq!(res[7].0.as_ref(), b"h");
+		assert_eq!(res[8].0.as_ref(), b"g");
+		assert_eq!(res[9].0.as_ref(), b"f");
 		let res = tx.cancel();
 		assert!(res.is_ok());
 		// ----------
 		let mut tx = db.transaction(false);
 		let res = tx.scan_reverse("c".."z", Some(3), Some(10)).unwrap();
 		assert_eq!(res.len(), 10);
-		assert_eq!(res[0], ("l", "l"));
-		assert_eq!(res[1], ("k", "k"));
-		assert_eq!(res[2], ("j", "j"));
-		assert_eq!(res[3], ("i", "i"));
-		assert_eq!(res[4], ("h", "h"));
-		assert_eq!(res[5], ("g", "g"));
-		assert_eq!(res[6], ("f", "f"));
-		assert_eq!(res[7], ("e", "e"));
-		assert_eq!(res[8], ("d", "d"));
-		assert_eq!(res[9], ("c", "c"));
+		assert_eq!(res[0].0.as_ref(), b"l");
+		assert_eq!(res[1].0.as_ref(), b"k");
+		assert_eq!(res[2].0.as_ref(), b"j");
+		assert_eq!(res[3].0.as_ref(), b"i");
+		assert_eq!(res[4].0.as_ref(), b"h");
+		assert_eq!(res[5].0.as_ref(), b"g");
+		assert_eq!(res[6].0.as_ref(), b"f");
+		assert_eq!(res[7].0.as_ref(), b"e");
+		assert_eq!(res[8].0.as_ref(), b"d");
+		assert_eq!(res[9].0.as_ref(), b"c");
 		let res = tx.cancel();
 		assert!(res.is_ok());
 	}
 
 	#[test]
 	fn count_keys_values() {
-		let db: Database<&str, &str> = Database::new();
+		let db = Database::new();
 		// ----------
 		let mut tx = db.transaction(true);
 		tx.put("a", "a").unwrap();

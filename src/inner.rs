@@ -19,24 +19,20 @@ use crate::persistence::Persistence;
 use crate::queue::{Commit, Merge};
 use crate::versions::Versions;
 use crate::DatabaseOptions;
+use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
-use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// The inner structure of the transactional in-memory database
-pub struct Inner<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
+pub struct Inner {
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
 	/// The underlying lock-free Skip Map datastructure
-	pub(crate) datastore: SkipMap<K, RwLock<Versions<V>>>,
+	pub(crate) datastore: SkipMap<Bytes, RwLock<Versions>>,
 	/// A count of total transactions grouped by oracle version
 	pub(crate) counter_by_oracle: SkipMap<u64, Arc<AtomicU64>>,
 	/// A count of total transactions grouped by commit id
@@ -48,13 +44,13 @@ where
 	/// The transaction merge queue attempt sequence number
 	pub(crate) transaction_merge_id: AtomicU64,
 	/// The transaction commit queue list of modifications
-	pub(crate) transaction_commit_queue: SkipMap<u64, Arc<Commit<K, V>>>,
+	pub(crate) transaction_commit_queue: SkipMap<u64, Arc<Commit>>,
 	/// Transaction updates which are committed but not yet applied
-	pub(crate) transaction_merge_queue: SkipMap<u64, Arc<Merge<K, V>>>,
+	pub(crate) transaction_merge_queue: SkipMap<u64, Arc<Merge>>,
 	/// The epoch duration to determine how long to store versioned data
 	pub(crate) garbage_collection_epoch: RwLock<Option<Duration>>,
 	/// Optional persistence handler
-	pub(crate) persistence: RwLock<Option<Arc<Persistence<K, V>>>>,
+	pub(crate) persistence: RwLock<Option<Arc<Persistence>>>,
 	/// Specifies whether background worker threads are enabled
 	pub(crate) background_threads_enabled: AtomicBool,
 	/// Stores a handle to the current transaction cleanup background thread
@@ -65,11 +61,7 @@ where
 	pub(crate) reset_threshold: usize,
 }
 
-impl<K, V> Inner<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
+impl Inner {
 	/// Create a new [`Inner`] structure with the given oracle resync interval.
 	pub fn new(opts: &DatabaseOptions) -> Self {
 		Self {
@@ -92,11 +84,7 @@ where
 	}
 }
 
-impl<K, V> Default for Inner<K, V>
-where
-	K: Ord + Clone + Debug + Sync + Send + 'static,
-	V: Eq + Clone + Debug + Sync + Send + 'static,
-{
+impl Default for Inner {
 	fn default() -> Self {
 		Self::new(&DatabaseOptions::default())
 	}
