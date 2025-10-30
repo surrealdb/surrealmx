@@ -23,9 +23,10 @@ use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::versions::Versions;
+use ahash::AHashSet;
 use bytes::Bytes;
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::Range;
 use std::ops::{Deref, DerefMut};
@@ -122,7 +123,7 @@ impl Transaction {
 #[derive(Clone)]
 struct SavepointState {
 	/// The readset at the time of the savepoint
-	readset: BTreeSet<Bytes>,
+	readset: AHashSet<Bytes>,
 	/// The scanset at the time of the savepoint
 	scanset: BTreeMap<Bytes, Bytes>,
 	/// The writeset at the time of the savepoint
@@ -146,7 +147,7 @@ pub struct TransactionInner {
 	/// The version at which this transaction started
 	pub(crate) version: u64,
 	/// The local set of key reads
-	pub(crate) readset: BTreeSet<Bytes>,
+	pub(crate) readset: AHashSet<Bytes>,
 	/// The local set of key scans
 	pub(crate) scanset: BTreeMap<Bytes, Bytes>,
 	/// The local set of updates and deletes
@@ -203,7 +204,7 @@ impl TransactionInner {
 			write,
 			commit,
 			version,
-			readset: BTreeSet::new(),
+			readset: AHashSet::new(),
 			scanset: BTreeMap::new(),
 			writeset: BTreeMap::new(),
 			database: db,
@@ -255,7 +256,7 @@ impl TransactionInner {
 		// Clear or completely reset the allocated readset
 		let threshold = self.reset_threshold;
 		match self.readset.len() > threshold {
-			true => self.readset = BTreeSet::new(),
+			true => self.readset = AHashSet::new(),
 			false => self.readset.clear(),
 		};
 		// Clear or completely reset the allocated scanset
