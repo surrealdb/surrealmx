@@ -563,22 +563,22 @@ mod tests {
 	#[test]
 	fn test_exists_version_empty() {
 		let versions = Versions::new();
-		assert_eq!(versions.exists_version(0), false);
-		assert_eq!(versions.exists_version(10), false);
-		assert_eq!(versions.exists_version(100), false);
+		assert!(!versions.exists_version(0));
+		assert!(!versions.exists_version(10));
+		assert!(!versions.exists_version(100));
 	}
 
 	#[test]
 	fn test_exists_version_single_version() {
 		let versions = make_versions(vec![(10, Some("value"))]);
 		// Query before the version
-		assert_eq!(versions.exists_version(5), false);
-		assert_eq!(versions.exists_version(9), false);
+		assert!(!versions.exists_version(5));
+		assert!(!versions.exists_version(9));
 		// Query at the version
-		assert_eq!(versions.exists_version(10), true);
+		assert!(versions.exists_version(10));
 		// Query after the version
-		assert_eq!(versions.exists_version(11), true);
-		assert_eq!(versions.exists_version(100), true);
+		assert!(versions.exists_version(11));
+		assert!(versions.exists_version(100));
 	}
 
 	#[test]
@@ -591,27 +591,27 @@ mod tests {
 			(50, Some("v5")),
 		]);
 		// Query before the first version
-		assert_eq!(versions.exists_version(5), false);
+		assert!(!versions.exists_version(5));
 		// Query at the first version
-		assert_eq!(versions.exists_version(10), true);
+		assert!(versions.exists_version(10));
 		// Query after the first version
-		assert_eq!(versions.exists_version(15), true);
+		assert!(versions.exists_version(15));
 		// Query at the second version
-		assert_eq!(versions.exists_version(20), true);
+		assert!(versions.exists_version(20));
 		// Query after the second version
-		assert_eq!(versions.exists_version(25), true);
+		assert!(versions.exists_version(25));
 		// Query at the third version
-		assert_eq!(versions.exists_version(30), true);
+		assert!(versions.exists_version(30));
 		// Query after the third version
-		assert_eq!(versions.exists_version(35), true);
+		assert!(versions.exists_version(35));
 		// Query at the fourth version
-		assert_eq!(versions.exists_version(40), true);
+		assert!(versions.exists_version(40));
 		// Query after the fourth version
-		assert_eq!(versions.exists_version(45), true);
+		assert!(versions.exists_version(45));
 		// Query at the fifth version
-		assert_eq!(versions.exists_version(50), true);
+		assert!(versions.exists_version(50));
 		// Query after the fifth version
-		assert_eq!(versions.exists_version(100), true);
+		assert!(versions.exists_version(100));
 	}
 
 	#[test]
@@ -623,23 +623,23 @@ mod tests {
 			(40, None), // Delete
 		]);
 		// Query before the first version
-		assert_eq!(versions.exists_version(5), false);
+		assert!(!versions.exists_version(5));
 		// Query at the first version
-		assert_eq!(versions.exists_version(10), true);
+		assert!(versions.exists_version(10));
 		// Query after the first version
-		assert_eq!(versions.exists_version(15), true);
+		assert!(versions.exists_version(15));
 		// Query at the second version (delete)
-		assert_eq!(versions.exists_version(20), false);
+		assert!(!versions.exists_version(20));
 		// Query after the second version (delete)
-		assert_eq!(versions.exists_version(25), false);
+		assert!(!versions.exists_version(25));
 		// Query at the third version
-		assert_eq!(versions.exists_version(30), true);
+		assert!(versions.exists_version(30));
 		// Query after the third version
-		assert_eq!(versions.exists_version(35), true);
+		assert!(versions.exists_version(35));
 		// Query at the fourth version (delete)
-		assert_eq!(versions.exists_version(40), false);
+		assert!(!versions.exists_version(40));
 		// Query after the fourth version (delete)
-		assert_eq!(versions.exists_version(50), false);
+		assert!(!versions.exists_version(50));
 	}
 
 	// ==================== Tests for push ====================
@@ -714,11 +714,11 @@ mod tests {
 		// Push delete
 		versions.push(make_version(20, None));
 		assert_eq!(versions.inner.len(), 2);
-		assert_eq!(versions.exists_version(20), false);
+		assert!(!versions.exists_version(20));
 		// Push new value
 		versions.push(make_version(30, Some("v3")));
 		assert_eq!(versions.inner.len(), 3);
-		assert_eq!(versions.exists_version(30), true);
+		assert!(versions.exists_version(30));
 	}
 
 	#[test]
@@ -875,7 +875,7 @@ mod tests {
 		versions.push(make_version(30, None));
 
 		assert_eq!(versions.inner.len(), 3);
-		assert_eq!(versions.exists_version(30), false);
+		assert!(!versions.exists_version(30));
 		assert_eq!(versions.fetch_version(30), None);
 	}
 
@@ -885,11 +885,11 @@ mod tests {
 		versions.push(make_version(10, Some("v1")));
 		// Push delete
 		versions.push(make_version(20, None));
-		assert_eq!(versions.exists_version(20), false);
+		assert!(!versions.exists_version(20));
 		// Update same version with a value
 		versions.push(make_version(20, Some("v2")));
 		assert_eq!(versions.inner.len(), 2);
-		assert_eq!(versions.exists_version(20), true);
+		assert!(versions.exists_version(20));
 		assert_eq!(versions.fetch_version(20), Some(Bytes::from("v2".to_string())));
 	}
 
@@ -902,7 +902,7 @@ mod tests {
 		versions.push(make_version(20, None));
 
 		assert_eq!(versions.inner.len(), 2);
-		assert_eq!(versions.exists_version(20), false);
+		assert!(!versions.exists_version(20));
 		assert_eq!(versions.fetch_version(20), None);
 	}
 
@@ -917,8 +917,8 @@ mod tests {
 
 		// Should only have 2 entries - version 20 and 30 deletes should be separate
 		assert_eq!(versions.inner.len(), 2);
-		assert_eq!(versions.exists_version(20), false);
-		assert_eq!(versions.exists_version(30), false);
+		assert!(!versions.exists_version(20));
+		assert!(!versions.exists_version(30));
 	}
 
 	#[test]
