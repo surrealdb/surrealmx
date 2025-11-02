@@ -15,10 +15,11 @@
 use bytes::Bytes;
 use std::borrow::Cow;
 
+/// An optimised trait for converting values to bytes only when needed
 pub trait IntoBytes {
-	// Convert the key to a slice of bytes
+	/// Convert the key to a slice of bytes
 	fn as_slice(&self) -> &[u8];
-	// Convert the key to an owned bytes slice
+	/// Convert the key to an owned bytes slice
 	fn into_bytes(self) -> Bytes;
 }
 

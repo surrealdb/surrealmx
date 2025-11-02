@@ -38,6 +38,8 @@ pub use self::db::*;
 #[doc(inline)]
 pub use self::err::*;
 #[doc(inline)]
+pub use self::kv::*;
+#[doc(inline)]
 pub use self::options::*;
 #[doc(inline)]
 pub use self::persistence::*;
