@@ -76,6 +76,14 @@ impl Versions {
 	/// Find the index of the entry where item.version < version.
 	#[inline]
 	pub(crate) fn find_index_lt_version(&self, version: u64) -> usize {
+		// Check for any existing version
+		if let Some(last) = self.inner.last() {
+			// Check if the version is newer
+			if version > last.version {
+				// Return the index of the last version
+				return self.inner.len();
+			}
+		}
 		// Check the list length for reverse iteration or binary search
 		if self.inner.len() <= 4 {
 			// Use linear search to find the first element where v.version > version
@@ -89,6 +97,14 @@ impl Versions {
 	/// Find the index of the entry where item.version <= version.
 	#[inline]
 	pub(crate) fn find_index_lte_version(&self, version: u64) -> usize {
+		// Check for any existing version
+		if let Some(last) = self.inner.last() {
+			// Check if the version is newer
+			if version >= last.version {
+				// Return the index of the last version
+				return self.inner.len();
+			}
+		}
 		// Check the list length for reverse iteration or binary search
 		if self.inner.len() <= 4 {
 			// Use linear search to find the first element where v.version > version
