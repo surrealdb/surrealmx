@@ -29,7 +29,6 @@ use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::Range;
-use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,30 +71,16 @@ impl Drop for Transaction {
 	}
 }
 
-impl Deref for Transaction {
-	type Target = TransactionInner;
-
-	fn deref(&self) -> &Self::Target {
-		self.inner.as_ref().unwrap()
-	}
-}
-
-impl DerefMut for Transaction {
-	fn deref_mut(&mut self) -> &mut Self::Target {
-		self.inner.as_mut().unwrap()
-	}
-}
-
 impl Transaction {
 	/// Ensure this transaction is committed with snapshot isolation guarantees
 	pub fn with_snapshot_isolation(mut self) -> Self {
-		self.mode = IsolationLevel::SnapshotIsolation;
+		self.inner.as_mut().unwrap().mode = IsolationLevel::SnapshotIsolation;
 		self
 	}
 
 	/// Ensure this transaction is committed with serializable snapshot isolation guarantees
 	pub fn with_serializable_snapshot_isolation(mut self) -> Self {
-		self.mode = IsolationLevel::SerializableSnapshotIsolation;
+		self.inner.as_mut().unwrap().mode = IsolationLevel::SerializableSnapshotIsolation;
 		self
 	}
 
@@ -112,6 +97,253 @@ impl Transaction {
 	/// again if there are more savepoints in the stack
 	pub fn rollback_to_savepoint(&mut self) -> Result<(), Error> {
 		self.inner.as_mut().unwrap().rollback_to_savepoint()
+	}
+
+	/// Get the starting sequence number of this transaction
+	pub fn version(&self) -> u64 {
+		self.inner.as_ref().unwrap().version()
+	}
+
+	/// Check if the transaction is closed
+	pub fn closed(&self) -> bool {
+		self.inner.as_ref().unwrap().closed()
+	}
+
+	/// Cancel the transaction and rollback any changes
+	pub fn cancel(&mut self) -> Result<(), Error> {
+		self.inner.as_mut().unwrap().cancel()
+	}
+
+	/// Commit the transaction and store all changes
+	pub fn commit(&mut self) -> Result<(), Error> {
+		self.inner.as_mut().unwrap().commit()
+	}
+
+	/// Check if a key exists in the database
+	pub fn exists<K>(&mut self, key: K) -> Result<bool, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().exists(key)
+	}
+
+	/// Check if a key exists in the database at a specific version
+	pub fn exists_at_version<K>(&self, key: K, version: u64) -> Result<bool, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().exists_at_version(key, version)
+	}
+
+	/// Fetch a key from the database
+	pub fn get<K>(&mut self, key: K) -> Result<Option<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().get(key)
+	}
+
+	/// Fetch a key from the database at a specific version
+	pub fn get_at_version<K>(&self, key: K, version: u64) -> Result<Option<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().get_at_version(key, version)
+	}
+
+	/// Insert or update a key in the database
+	pub fn set<K, V>(&mut self, key: K, val: V) -> Result<(), Error>
+	where
+		K: IntoBytes,
+		V: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().set(key, val)
+	}
+
+	/// Insert a key if it doesn't exist in the database
+	pub fn put<K, V>(&mut self, key: K, val: V) -> Result<(), Error>
+	where
+		K: IntoBytes,
+		V: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().put(key, val)
+	}
+
+	/// Insert a key if it matches a value
+	pub fn putc<K, V, C>(&mut self, key: K, val: V, chk: Option<C>) -> Result<(), Error>
+	where
+		K: IntoBytes,
+		V: IntoBytes,
+		C: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().putc(key, val, chk)
+	}
+
+	/// Delete a key from the database
+	pub fn del<K>(&mut self, key: K) -> Result<(), Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().del(key)
+	}
+
+	/// Delete a key if it matches a value
+	pub fn delc<K, C>(&mut self, key: K, chk: Option<C>) -> Result<(), Error>
+	where
+		K: IntoBytes,
+		C: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().delc(key, chk)
+	}
+
+	/// Retrieve a count of keys from the database
+	pub fn total<K>(
+		&mut self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().total(rng, skip, limit)
+	}
+
+	/// Retrieve a count of keys from the database at a specific version
+	pub fn total_at_version<K>(
+		&mut self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().total_at_version(rng, skip, limit, version)
+	}
+
+	/// Retrieve a range of keys from the database
+	pub fn keys<K>(
+		&mut self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().keys(rng, skip, limit)
+	}
+
+	/// Retrieve a range of keys from the database, in reverse order
+	pub fn keys_reverse<K>(
+		&mut self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().keys_reverse(rng, skip, limit)
+	}
+
+	/// Retrieve a range of keys from the database at a specific version
+	pub fn keys_at_version<K>(
+		&mut self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<Vec<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().keys_at_version(rng, skip, limit, version)
+	}
+
+	/// Retrieve a range of keys from the database at a specific version, in reverse order
+	pub fn keys_at_version_reverse<K>(
+		&mut self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<Vec<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().keys_at_version_reverse(rng, skip, limit, version)
+	}
+
+	/// Retrieve a range of keys and values from the database
+	pub fn scan<K>(
+		&mut self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().scan(rng, skip, limit)
+	}
+
+	/// Retrieve a range of keys and values from the database in reverse order
+	pub fn scan_reverse<K>(
+		&mut self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().scan_reverse(rng, skip, limit)
+	}
+
+	/// Retrieve a range of keys and values from the database at a specific version
+	pub fn scan_at_version<K>(
+		&mut self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().scan_at_version(rng, skip, limit, version)
+	}
+
+	/// Retrieve a range of keys and values from the database at a specific version, in reverse order
+	pub fn scan_at_version_reverse<K>(
+		&mut self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		version: u64,
+	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().scan_at_version_reverse(rng, skip, limit, version)
+	}
+
+	/// Retrieve all versions of keys within a range from the database
+	/// Returns tuples of (key, version, value) for all historical versions
+	/// The skip and limit parameters apply to the number of keys, not the number of versions
+	pub fn scan_all_versions<K>(
+		&mut self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<(Bytes, u64, Option<Bytes>)>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().unwrap().scan_all_versions(rng, skip, limit)
 	}
 }
 
@@ -135,7 +367,7 @@ struct SavepointState {
 // --------------------------------------------------
 
 /// The inner structure of a database transaction
-pub struct TransactionInner {
+pub(crate) struct TransactionInner {
 	/// The isolation level of this transaction
 	pub(crate) mode: IsolationLevel,
 	/// Is the transaction complete?

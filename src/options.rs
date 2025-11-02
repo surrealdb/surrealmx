@@ -2,33 +2,33 @@ use crate::pool::DEFAULT_POOL_SIZE;
 use std::time::Duration;
 
 /// Default threshold at which transaction state is fully reset.
-pub const DEFAULT_RESET_THRESHOLD: usize = 100;
+pub(crate) const DEFAULT_RESET_THRESHOLD: usize = 100;
 
 /// Default interval at which garbage collection is performed.
-pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60);
+pub(crate) const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Default interval at which transaction queue cleanup is performed.
-pub const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Default interval at which the timestamp oracle resyncs with the system clock.
-pub const DEFAULT_RESYNC_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const DEFAULT_RESYNC_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Configuration options for [`crate::Database`].
 #[derive(Debug, Clone)]
 pub struct DatabaseOptions {
-	/// Maximum number of transactions kept in the pool.
+	/// Maximum number of transactions kept in the pool (default: 512).
 	pub pool_size: usize,
-	/// Whether the garbage collector thread is started automatically.
+	/// Whether the garbage collector thread is started automatically (default: true).
 	pub enable_gc: bool,
-	/// Interval at which the garbage collector wakes up.
+	/// Interval at which the garbage collector wakes up (default: 60 seconds).
 	pub gc_interval: Duration,
-	/// Whether the cleanup worker thread is started automatically.
+	/// Whether the cleanup worker thread is started automatically (default: true).
 	pub enable_cleanup: bool,
-	/// Interval at which the cleanup worker wakes up.
+	/// Interval at which the cleanup worker wakes up (default: 1 second).
 	pub cleanup_interval: Duration,
-	/// Threshold after which transaction state maps are reset.
+	/// Threshold after which transaction state maps are reset (default: 100).
 	pub reset_threshold: usize,
-	/// Interval at which the timestamp oracle resyncs with the system clock.
+	/// Interval at which the timestamp oracle resyncs with the system clock (default: 5 seconds).
 	pub resync_interval: Duration,
 }
 

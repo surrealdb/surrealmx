@@ -35,11 +35,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-pub type PersistenceResult<T> = Result<T, PersistenceError>;
-
 /// Represents a pending asynchronous append operation
 #[derive(Debug, Clone)]
-pub struct AsyncAppendOperation {
+pub(crate) struct AsyncAppendOperation {
 	pub version: u64,
 	pub writeset: BTreeMap<Bytes, Option<Bytes>>,
 }
@@ -211,11 +209,11 @@ impl Persistence {
 	/// * `inner` - Reference to the database state
 	///
 	/// # Returns
-	/// * `PersistenceResult<Self>` - The created persistence layer or an error
-	pub fn new_with_options(
+	/// * `Result<Self, PersistenceError>` - The created persistence layer or an error
+	pub(crate) fn new_with_options(
 		options: PersistenceOptions,
 		inner: Arc<Inner>,
-	) -> PersistenceResult<Self> {
+	) -> Result<Self, PersistenceError> {
 		// Get the base path from options
 		let base_path = &options.base_path;
 		// Ensure the directory exists
@@ -286,12 +284,76 @@ impl Persistence {
 		Ok(this)
 	}
 
+	/// Creates a new snapshot of the current database state
+	///
+	/// This function:
+	/// 1. Captures the current AOL file position as a cutoff point
+	/// 2. Creates a new snapshot file atomically using a temporary file
+	/// 3. Streams data to reduce memory usage
+	/// 4. Truncates AOL only up to the cutoff position, preserving newer entries
+	///
+	/// # Returns
+	/// * `Result<(), PersistenceError>` - Success or an error
+	pub fn snapshot(&self) -> Result<(), PersistenceError> {
+		// Create temporary file for atomic swap
+		let temp_path = self.snapshot_path.with_extension("tmp");
+		// Execute snapshot operation in closure for clean error handling
+		let result = (|| -> Result<(), PersistenceError> {
+			// Create temporary file
+			let file = File::create(&temp_path)?;
+			// Create compressed writer (handles buffering internally)
+			let mut writer = CompressedWriter::new(file, self.compression_mode)?;
+			// Get the current position in the AOL file (if AOL is enabled)
+			let aol_cutoff_position = if let Some(ref aol) = self.aol {
+				aol.lock()?.metadata()?.len()
+			} else {
+				0
+			};
+			// Stream write each key-value pair to reduce memory usage
+			for entry in self.inner.datastore.iter() {
+				// Get all versions for this key
+				let versions = entry.value().read().all_versions();
+				// Ensure that there are version entries
+				if !versions.is_empty() {
+					// Serialize and write this single entry
+					bincode::serde::encode_into_std_write(
+						&(entry.key().clone(), versions),
+						&mut writer,
+						config::standard(),
+					)?;
+				}
+			}
+			// Flush the compressed writer
+			writer.flush()?;
+			// Finish compression (finalizes LZ4 stream)
+			writer.finish()?;
+			// Atomically rename temporary file to actual snapshot
+			fs::rename(&temp_path, &self.snapshot_path)?;
+			// Sync the renamed file to disk for durability
+			{
+				let final_file = File::open(&self.snapshot_path)?;
+				final_file.sync_all()?;
+			}
+			// Truncate AOL only up to the cutoff position
+			Self::truncate(&self.aol, aol_cutoff_position, &self.pending_syncs)?;
+			// All ok
+			Ok(())
+		})();
+		// Clean up temporary file if operation failed
+		if result.is_err() {
+			// Ignore removal errors
+			let _ = fs::remove_file(&temp_path);
+		}
+		// Return the operation result
+		result
+	}
+
 	/// Loads the database state from disk
 	///
 	/// This function:
 	/// 1. Loads the latest snapshot if it exists
 	/// 2. Applies any changes from the append-only log
-	fn load(&self) -> PersistenceResult<()> {
+	fn load(&self) -> Result<(), PersistenceError> {
 		// Check if snapshot file exists
 		if self.snapshot_path.exists() {
 			// Read and deserialize the snapshot data
@@ -409,76 +471,12 @@ impl Persistence {
 		Ok(())
 	}
 
-	/// Creates a new snapshot of the current database state
-	///
-	/// This function:
-	/// 1. Captures the current AOL file position as a cutoff point
-	/// 2. Creates a new snapshot file atomically using a temporary file
-	/// 3. Streams data to reduce memory usage
-	/// 4. Truncates AOL only up to the cutoff position, preserving newer entries
-	///
-	/// # Returns
-	/// * `PersistenceResult<()>` - Success or an error
-	pub fn snapshot(&self) -> PersistenceResult<()> {
-		// Create temporary file for atomic swap
-		let temp_path = self.snapshot_path.with_extension("tmp");
-		// Execute snapshot operation in closure for clean error handling
-		let result = (|| -> PersistenceResult<()> {
-			// Create temporary file
-			let file = File::create(&temp_path)?;
-			// Create compressed writer (handles buffering internally)
-			let mut writer = CompressedWriter::new(file, self.compression_mode)?;
-			// Get the current position in the AOL file (if AOL is enabled)
-			let aol_cutoff_position = if let Some(ref aol) = self.aol {
-				aol.lock()?.metadata()?.len()
-			} else {
-				0
-			};
-			// Stream write each key-value pair to reduce memory usage
-			for entry in self.inner.datastore.iter() {
-				// Get all versions for this key
-				let versions = entry.value().read().all_versions();
-				// Ensure that there are version entries
-				if !versions.is_empty() {
-					// Serialize and write this single entry
-					bincode::serde::encode_into_std_write(
-						&(entry.key().clone(), versions),
-						&mut writer,
-						config::standard(),
-					)?;
-				}
-			}
-			// Flush the compressed writer
-			writer.flush()?;
-			// Finish compression (finalizes LZ4 stream)
-			writer.finish()?;
-			// Atomically rename temporary file to actual snapshot
-			fs::rename(&temp_path, &self.snapshot_path)?;
-			// Sync the renamed file to disk for durability
-			{
-				let final_file = File::open(&self.snapshot_path)?;
-				final_file.sync_all()?;
-			}
-			// Truncate AOL only up to the cutoff position
-			Self::truncate(&self.aol, aol_cutoff_position, &self.pending_syncs)?;
-			// All ok
-			Ok(())
-		})();
-		// Clean up temporary file if operation failed
-		if result.is_err() {
-			// Ignore removal errors
-			let _ = fs::remove_file(&temp_path);
-		}
-		// Return the operation result
-		result
-	}
-
 	/// Truncate the AOL file up to the specified position, preserving any data after.
 	fn truncate(
 		aol: &Option<Arc<Mutex<File>>>,
 		position: u64,
 		pending_syncs: &Arc<AtomicU64>,
-	) -> PersistenceResult<()> {
+	) -> Result<(), PersistenceError> {
 		// Check that we have a AOL file handle
 		if let Some(ref aol) = aol {
 			// Lock the AOL file
@@ -492,7 +490,7 @@ impl Persistence {
 				// Generate the path for the temporary file
 				let path = std::env::temp_dir().join(name);
 				// Execute truncation in a closure for clean error handling
-				let result = (|| -> PersistenceResult<()> {
+				let result = (|| -> Result<(), PersistenceError> {
 					// Create temporary file and copy remaining data
 					{
 						file.seek(SeekFrom::Start(position))?;
@@ -822,12 +820,12 @@ impl Persistence {
 	/// * `writeset` - Map of key-value changes to append
 	///
 	/// # Returns
-	/// * `PersistenceResult<()>` - Success or an error
-	pub fn append(
+	/// * `Result<(), PersistenceError>` - Success or an error
+	pub(crate) fn append(
 		&self,
 		version: u64,
 		writeset: &BTreeMap<Bytes, Option<Bytes>>,
-	) -> PersistenceResult<()> {
+	) -> Result<(), PersistenceError> {
 		// Skip AOL writing if AOL is disabled
 		if self.aol_mode == AolMode::Never {
 			return Ok(());

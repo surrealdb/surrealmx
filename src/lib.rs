@@ -34,9 +34,13 @@ mod versions;
 pub use bytes::Bytes;
 
 #[doc(inline)]
+pub use self::compression::*;
+#[doc(inline)]
 pub use self::db::*;
 #[doc(inline)]
 pub use self::err::*;
+#[doc(inline)]
+pub use self::kv::*;
 #[doc(inline)]
 pub use self::options::*;
 #[doc(inline)]
