@@ -6,7 +6,7 @@
     </a>
 </p>
 
-<p align="center">An embedded, in-memory, immutable, copy-on-write, key-value database engine.</p>
+<p align="center">An embedded, in-memory, lock-free, transaction-based, key-value database engine.</p>
 
 <br>
 

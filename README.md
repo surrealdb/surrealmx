@@ -95,7 +95,7 @@ fn main() {
 
 #### Persistence modes
 
-MemoDB supports optional persistence with two modes:
+SurrealMX supports optional persistence with two modes:
 
 ##### Full persistence (AOL + Snapshots) - Default
 
@@ -201,11 +201,11 @@ See the [Durability guarantees](#durability-guarantees) section for detailed inf
 
 #### Durability guarantees
 
-MemoDB provides different levels of durability (the "D" in ACID) depending on the persistence configuration:
+SurrealMX provides different levels of durability (the "D" in ACID) depending on the persistence configuration:
 
 ##### In-memory only mode (No persistence)
 
-When persistence is disabled (the default), MemoDB provides **no durability guarantees**. All data is lost when the process terminates, crashes, or the system shuts down. This mode is ideal for:
+When persistence is disabled (the default), SurrealMX provides **no durability guarantees**. All data is lost when the process terminates, crashes, or the system shuts down. This mode is ideal for:
 - Caching and temporary data storage
 - Development and testing
 - Scenarios where data can be reconstructed from other sources
@@ -271,7 +271,7 @@ Choose the configuration that best balances your durability requirements against
 
 #### Historical reads
 
-MemoDB's MVCC (Multi-Version Concurrency Control) design allows you to read data as it existed at any point in time. This enables powerful use cases like:
+SurrealMX's MVCC (Multi-Version Concurrency Control) design allows you to read data as it existed at any point in time. This enables powerful use cases like:
 
 - **Audit trails**: See what data looked like at specific timestamps
 - **Time-travel debugging**: Examine application state at the time of an issue
@@ -329,7 +329,7 @@ fn main() {
 
 #### Isolation levels
 
-MemoDB supports two isolation levels to balance between performance and consistency guarantees:
+SurrealMX supports two isolation levels to balance between performance and consistency guarantees:
 
 ##### Snapshot Isolation (Default)
 
@@ -412,7 +412,7 @@ fn main() {
 
 #### Range operations
 
-MemoDB provides powerful range-based operations for scanning, counting, and iterating over keys. All range operations support:
+SurrealMX provides powerful range-based operations for scanning, counting, and iterating over keys. All range operations support:
 
 - **Forward and reverse iteration**
 - **Skip and limit parameters** for pagination  
