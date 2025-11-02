@@ -259,10 +259,13 @@ Different persistence configurations provide different durability guarantees:
 | Configuration | Survives Process Crash | Survives System Crash | Performance |
 |--------------|----------------------|---------------------|-------------|
 | No persistence | ❌ | ❌ | Fastest |
-| Snapshot-only | ⚠️ (last snapshot) | ⚠️ (last snapshot) | Fast |
-| Async AOL + No fsync | ⚠️ (mostly) | ❌ | Good |
-| Async AOL + Interval fsync | ⚠️ (mostly) | ⚠️ (after fsync) | Moderate |
-| Sync AOL + Every fsync | ✅ | ✅ | Slowest |
+| Snapshot-only | ⚠️ (last snapshot) | ⚠️ (last snapshot) | Fastest |
+| Async AOL + No fsync | ⚠️ (mostly) | ⚠️ (mostly + OS buffers) | Very fast |
+| Async AOL + Interval fsync | ⚠️ (mostly) | ⚠️ (mostly + since last fsync) | Very fast |
+| Async AOL + Every fsync | ⚠️ (mostly) | ⚠️ (mostly) | Very fast |
+| Sync AOL + No fsync | ✅ | ⚠️ (OS buffers) | Fast |
+| Sync AOL + Interval fsync | ✅ | ⚠️ (since last fsync) | Fast |
+| Sync AOL + Every fsync | ✅ | ✅ | Slow |
 
 Choose the configuration that best balances your durability requirements against performance needs.
 
