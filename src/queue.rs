@@ -14,8 +14,9 @@
 
 //! This module stores the transaction commit and merge queues.
 
+use ahash::AHashSet;
 use bytes::Bytes;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// A transaction entry in the transaction commit queue
@@ -36,19 +37,24 @@ pub struct Merge {
 
 impl Commit {
 	/// Returns true if self has no elements in common with other
-	pub fn is_disjoint_readset(&self, other: &BTreeSet<Bytes>) -> bool {
-		// Create a key iterator for each writeset
-		let mut a = self.writeset.keys();
-		let mut b = other.iter();
-		// Move to the next value in each iterator
-		let mut next_a = a.next();
-		let mut next_b = b.next();
-		// Advance each iterator independently in order
-		while let (Some(ka), Some(kb)) = (next_a, next_b) {
-			match ka.cmp(kb) {
-				std::cmp::Ordering::Less => next_a = a.next(),
-				std::cmp::Ordering::Greater => next_b = b.next(),
-				std::cmp::Ordering::Equal => return false,
+	pub fn is_disjoint_readset(&self, other: &AHashSet<Bytes>) -> bool {
+		// Check if the readset is not empty
+		if !other.is_empty() {
+			// Choose iteration direction based on size to minimize iterations
+			if other.len() < self.writeset.len() {
+				// Check if any key in readset exists in the writeset
+				for key in other.iter() {
+					if self.writeset.contains_key(key) {
+						return false;
+					}
+				}
+			} else {
+				// Check if any key in writeset exists in the readset
+				for key in self.writeset.keys() {
+					if other.contains(key) {
+						return false;
+					}
+				}
 			}
 		}
 		// No overlap was found
