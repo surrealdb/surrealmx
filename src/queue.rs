@@ -40,10 +40,20 @@ impl Commit {
 	pub fn is_disjoint_readset(&self, other: &AHashSet<Bytes>) -> bool {
 		// Check if the readset is not empty
 		if !other.is_empty() {
-			// Check if any key in writeset exists in the readset
-			for key in self.writeset.keys() {
-				if other.contains(key) {
-					return false;
+			// Choose iteration direction based on size to minimize iterations
+			if other.len() < self.writeset.len() {
+				// Check if any key in readset exists in the writeset
+				for key in other.iter() {
+					if self.writeset.contains_key(key) {
+						return false;
+					}
+				}
+			} else {
+				// Check if any key in writeset exists in the readset
+				for key in self.writeset.keys() {
+					if other.contains(key) {
+						return false;
+					}
 				}
 			}
 		}
