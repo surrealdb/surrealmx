@@ -491,9 +491,7 @@ impl TransactionInner {
 					// Fetch for the key from the datastore
 					let res = self.exists_in_datastore(lookup, self.version);
 					// Check whether we should track key reads
-					if self.mode >= IsolationLevel::SerializableSnapshotIsolation
-						&& !self.readset.contains(lookup)
-					{
+					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 						self.readset.insert(key.into_bytes());
 					}
 					// Return the result
