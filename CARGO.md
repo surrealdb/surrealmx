@@ -28,7 +28,7 @@
 - Multiple concurrent readers without locking
 - Multiple concurrent writers without locking
 - Support for serializable, snapshot isolated transactions
-- Atomicity, Consistency and Isolation from ACID
+- Atomicity, Consistency, Isolation, and optional Durability from ACID
 - Optional persistence with configurable modes:
   - Support for synchronous and asynchronous append-only logging
   - Support for periodic full-datastore snapshots
@@ -193,6 +193,78 @@ fn main() -> std::io::Result<()> {
 - **Asynchronous AOL**: Better performance, small risk of data loss on system crash
 - **Frequent fsync**: Higher durability, reduced performance
 - **LZ4 Compression**: Smaller storage footprint, slight CPU overhead
+
+See the [Durability guarantees](#durability-guarantees) section for detailed information about ACID durability levels.
+
+#### Durability guarantees
+
+SurrealMX provides different levels of durability (the "D" in ACID) depending on the persistence configuration:
+
+##### In-memory only mode (No persistence)
+
+When persistence is disabled (the default), SurrealMX provides **no durability guarantees**. All data is lost when the process terminates, crashes, or the system shuts down. This mode is ideal for:
+- Caching and temporary data storage
+- Development and testing
+- Scenarios where data can be reconstructed from other sources
+
+##### Maximum durability (AOL with fsync)
+
+For maximum durability that survives system crashes and power failures, use synchronous AOL with fsync on every append:
+
+```rust
+use surrealmx::{Database, DatabaseOptions, PersistenceOptions, AolMode, FsyncMode};
+
+fn main() -> std::io::Result<()> {
+    let db_opts = DatabaseOptions::default();
+    let persistence_opts = PersistenceOptions::new("./data")
+        .with_aol_mode(AolMode::SynchronousOnCommit)
+        .with_fsync_mode(FsyncMode::EveryAppend);
+    
+    let db = Database::new_with_persistence(db_opts, persistence_opts)?;
+    
+    let mut tx = db.transaction(true);
+    tx.put("key", "value")?;
+    tx.commit()?; // Guaranteed to be durable after this returns
+    
+    Ok(())
+}
+```
+
+With this configuration:
+- Changes are written to the AOL immediately on commit
+- `fsync()` is called to ensure data reaches physical storage
+- Transactions are fully durable once `commit()` returns successfully
+- Data survives process crashes, system crashes, and power failures
+
+##### Configurable durability levels
+
+Different persistence configurations provide different durability guarantees:
+
+**AOL Modes:**
+- **`AolMode::SynchronousOnCommit`**: Changes written to AOL immediately on commit. Durable after commit returns (if combined with appropriate fsync mode).
+- **`AolMode::AsynchronousAfterCommit`**: Changes written to AOL asynchronously. Small window where recent commits may be lost on sudden system crash.
+- **`AolMode::Never`**: No AOL logging. Changes only persisted via snapshots.
+
+**Fsync Modes:**
+- **`FsyncMode::EveryAppend`**: Calls `fsync()` after every AOL write. Maximum durability but slowest performance.
+- **`FsyncMode::Interval(Duration)`**: Calls `fsync()` periodically. Durability guaranteed after the interval passes.
+- **`FsyncMode::Never`**: Never calls `fsync()`. Relies on OS to flush data. Risk of data loss if OS crashes before flush.
+
+**Snapshot Modes:**
+- **`SnapshotMode::Interval(Duration)`**: Takes periodic snapshots. Without AOL, only data from the last snapshot is durable.
+- **`SnapshotMode::Never`**: No snapshots. Must use AOL for any durability.
+
+**Durability guarantees summary:**
+
+| Configuration | Survives Process Crash | Survives System Crash | Performance |
+|--------------|----------------------|---------------------|-------------|
+| No persistence | ❌ | ❌ | Fastest |
+| Snapshot-only | ⚠️ (last snapshot) | ⚠️ (last snapshot) | Fast |
+| Async AOL + No fsync | ⚠️ (mostly) | ❌ | Good |
+| Async AOL + Interval fsync | ⚠️ (mostly) | ⚠️ (after fsync) | Moderate |
+| Sync AOL + Every fsync | ✅ | ✅ | Slowest |
+
+Choose the configuration that best balances your durability requirements against performance needs.
 
 #### Historical reads
 
