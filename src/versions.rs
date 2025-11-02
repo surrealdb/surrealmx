@@ -255,3 +255,695 @@ impl Versions {
 		self.inner.len()
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use bytes::Bytes;
+
+	/// Helper function to create a Version from a version number and optional value
+	fn make_version(version: u64, value: Option<&str>) -> Version {
+		Version {
+			version,
+			value: value.map(|s| Bytes::from(s.to_string())),
+		}
+	}
+
+	/// Helper function to create a Versions instance with the given version tuples
+	fn make_versions(versions: Vec<(u64, Option<&str>)>) -> Versions {
+		let mut v = Versions::new();
+		for (version, value) in versions {
+			v.push(make_version(version, value));
+		}
+		v
+	}
+
+	// ==================== Tests for find_index_lt_version ====================
+
+	#[test]
+	fn test_find_index_lt_version_empty() {
+		let versions = Versions::new();
+		assert_eq!(versions.find_index_lt_version(0), 0);
+		assert_eq!(versions.find_index_lt_version(1), 0);
+		assert_eq!(versions.find_index_lt_version(100), 0);
+	}
+
+	#[test]
+	fn test_find_index_lt_version_single_version() {
+		let versions = make_versions(vec![(10, Some("value"))]);
+		// Query before the version
+		assert_eq!(versions.find_index_lt_version(5), 0);
+		assert_eq!(versions.find_index_lt_version(9), 0);
+		// Query at the version
+		assert_eq!(versions.find_index_lt_version(10), 0);
+		// Query after the version
+		assert_eq!(versions.find_index_lt_version(11), 1);
+		assert_eq!(versions.find_index_lt_version(100), 1);
+	}
+
+	#[test]
+	fn test_find_index_lt_version_multiple_versions() {
+		// Create a small list (≤32 elements) to trigger linear search
+		let versions = make_versions(vec![
+			(10, Some("v1")),
+			(20, Some("v2")),
+			(30, Some("v3")),
+			(40, Some("v4")),
+			(50, Some("v5")),
+		]);
+		// Query before the first version
+		assert_eq!(versions.find_index_lt_version(0), 0);
+		assert_eq!(versions.find_index_lt_version(5), 0);
+		// Query at the first version
+		assert_eq!(versions.find_index_lt_version(10), 0);
+		// Query after the first version
+		assert_eq!(versions.find_index_lt_version(15), 1);
+		// Query at the second version
+		assert_eq!(versions.find_index_lt_version(20), 1);
+		// Query after the second version
+		assert_eq!(versions.find_index_lt_version(25), 2);
+		assert_eq!(versions.find_index_lt_version(30), 2);
+		// Query at the third version
+		assert_eq!(versions.find_index_lt_version(35), 3);
+		assert_eq!(versions.find_index_lt_version(40), 3);
+		// Query at the fourth version
+		assert_eq!(versions.find_index_lt_version(45), 4);
+		// Query at the fifth version
+		assert_eq!(versions.find_index_lt_version(50), 4);
+		// Query after the fifth version
+		assert_eq!(versions.find_index_lt_version(51), 5);
+		assert_eq!(versions.find_index_lt_version(100), 5);
+	}
+
+	#[test]
+	fn test_find_index_lt_version_with_deletes() {
+		let versions = make_versions(vec![
+			(10, Some("v1")),
+			(20, None), // Delete
+			(30, Some("v3")),
+			(40, None), // Delete
+		]);
+		// Query before the first version
+		assert_eq!(versions.find_index_lt_version(5), 0);
+		assert_eq!(versions.find_index_lt_version(9), 0);
+		// Query at the first version
+		assert_eq!(versions.find_index_lt_version(10), 0);
+		// Query after the first version
+		assert_eq!(versions.find_index_lt_version(15), 1);
+		// Query at the second version
+		assert_eq!(versions.find_index_lt_version(20), 1);
+		// Query after the second version
+		assert_eq!(versions.find_index_lt_version(25), 2);
+		assert_eq!(versions.find_index_lt_version(30), 2);
+		// Query at the third version
+		assert_eq!(versions.find_index_lt_version(35), 3);
+		assert_eq!(versions.find_index_lt_version(40), 3);
+		// Query after the third version
+		assert_eq!(versions.find_index_lt_version(50), 4);
+	}
+
+	// ==================== Tests for find_index_lte_version ====================
+
+	#[test]
+	fn test_find_index_lte_version_empty() {
+		let versions = Versions::new();
+		assert_eq!(versions.find_index_lte_version(0), 0);
+		assert_eq!(versions.find_index_lte_version(1), 0);
+		assert_eq!(versions.find_index_lte_version(100), 0);
+	}
+
+	#[test]
+	fn test_find_index_lte_version_single_version() {
+		let versions = make_versions(vec![(10, Some("value"))]);
+		// Query before the version
+		assert_eq!(versions.find_index_lte_version(5), 0);
+		assert_eq!(versions.find_index_lte_version(9), 0);
+		// Query at the version
+		assert_eq!(versions.find_index_lte_version(10), 1);
+		// Query after the version
+		assert_eq!(versions.find_index_lte_version(11), 1);
+		assert_eq!(versions.find_index_lte_version(100), 1);
+	}
+
+	#[test]
+	fn test_find_index_lte_version_multiple_versions() {
+		// Create a small list (≤32 elements) to trigger linear search
+		let versions = make_versions(vec![
+			(10, Some("v1")),
+			(20, Some("v2")),
+			(30, Some("v3")),
+			(40, Some("v4")),
+			(50, Some("v5")),
+		]);
+		// Query before the first version
+		assert_eq!(versions.find_index_lte_version(0), 0);
+		assert_eq!(versions.find_index_lte_version(5), 0);
+		// Query at the first version
+		assert_eq!(versions.find_index_lte_version(10), 1);
+		// Query after the first version
+		assert_eq!(versions.find_index_lte_version(15), 1);
+		// Query at the second version
+		assert_eq!(versions.find_index_lte_version(20), 2);
+		// Query after the second version
+		assert_eq!(versions.find_index_lte_version(25), 2);
+		// Query at the third version
+		assert_eq!(versions.find_index_lte_version(30), 3);
+		// Query after the third version
+		assert_eq!(versions.find_index_lte_version(35), 3);
+		// Query at the fourth version
+		assert_eq!(versions.find_index_lte_version(40), 4);
+		// Query after the fourth version
+		assert_eq!(versions.find_index_lte_version(45), 4);
+		// Query at the fifth version
+		assert_eq!(versions.find_index_lte_version(50), 5);
+		// Query after the fifth version
+		assert_eq!(versions.find_index_lte_version(51), 5);
+		assert_eq!(versions.find_index_lte_version(100), 5);
+	}
+
+	#[test]
+	fn test_find_index_lte_version_with_deletes() {
+		let versions = make_versions(vec![
+			(10, Some("v1")),
+			(20, None), // Delete
+			(30, Some("v3")),
+			(40, None), // Delete
+		]);
+		// Query at the first version
+		assert_eq!(versions.find_index_lte_version(10), 1);
+		// Query after the first version
+		assert_eq!(versions.find_index_lte_version(15), 1);
+		// Query at the second version
+		assert_eq!(versions.find_index_lte_version(20), 2);
+		// Query after the second version
+		assert_eq!(versions.find_index_lte_version(25), 2);
+		// Query at the third version
+		assert_eq!(versions.find_index_lte_version(30), 3);
+		// Query after the third version
+		assert_eq!(versions.find_index_lte_version(35), 3);
+		// Query at the fourth version
+		assert_eq!(versions.find_index_lte_version(40), 4);
+		// Query after the fourth version
+		assert_eq!(versions.find_index_lte_version(50), 4);
+	}
+
+	#[test]
+	fn test_find_index_lt_vs_lte_difference() {
+		// This test demonstrates the key difference between < and <=
+		let versions = make_versions(vec![
+			(10, Some("v1")),
+			(20, Some("v2")),
+			(30, Some("v3")),
+			(40, Some("v4")),
+			(50, Some("v5")),
+		]);
+		// Query at the first version
+		assert_eq!(versions.find_index_lt_version(10), 0);
+		assert_eq!(versions.find_index_lte_version(10), 1);
+		// Query after the first version
+		assert_eq!(versions.find_index_lt_version(15), 1);
+		assert_eq!(versions.find_index_lte_version(15), 1);
+		// Query at the second version
+		assert_eq!(versions.find_index_lt_version(20), 1);
+		assert_eq!(versions.find_index_lte_version(20), 2);
+		// Query at the third version
+		assert_eq!(versions.find_index_lt_version(30), 2);
+		assert_eq!(versions.find_index_lte_version(30), 3);
+		// Query after the third version
+		assert_eq!(versions.find_index_lt_version(35), 3);
+		assert_eq!(versions.find_index_lte_version(35), 3);
+	}
+
+	// ==================== Tests for fetch_version ====================
+
+	#[test]
+	fn test_fetch_version_empty() {
+		let versions = Versions::new();
+		assert_eq!(versions.fetch_version(0), None);
+		assert_eq!(versions.fetch_version(10), None);
+		assert_eq!(versions.fetch_version(100), None);
+	}
+
+	#[test]
+	fn test_fetch_version_single_version() {
+		let versions = make_versions(vec![(10, Some("value"))]);
+		// Query before the version
+		assert_eq!(versions.fetch_version(5), None);
+		assert_eq!(versions.fetch_version(9), None);
+		// Query at the version
+		assert_eq!(versions.fetch_version(10), Some(Bytes::from("value".to_string())));
+		// Query after the version
+		assert_eq!(versions.fetch_version(11), Some(Bytes::from("value".to_string())));
+		assert_eq!(versions.fetch_version(100), Some(Bytes::from("value".to_string())));
+	}
+
+	#[test]
+	fn test_fetch_version_multiple_versions() {
+		let versions = make_versions(vec![
+			(10, Some("v1")),
+			(20, Some("v2")),
+			(30, Some("v3")),
+			(40, Some("v4")),
+			(50, Some("v5")),
+		]);
+		// Query before the first version
+		assert_eq!(versions.fetch_version(5), None);
+		// Query at the first version
+		assert_eq!(versions.fetch_version(10), Some(Bytes::from("v1".to_string())));
+		// Query after the first version
+		assert_eq!(versions.fetch_version(15), Some(Bytes::from("v1".to_string())));
+		// Query at the second version
+		assert_eq!(versions.fetch_version(20), Some(Bytes::from("v2".to_string())));
+		// Query after the second version
+		assert_eq!(versions.fetch_version(25), Some(Bytes::from("v2".to_string())));
+		// Query at the third version
+		assert_eq!(versions.fetch_version(30), Some(Bytes::from("v3".to_string())));
+		// Query after the third version
+		assert_eq!(versions.fetch_version(35), Some(Bytes::from("v3".to_string())));
+		// Query at the fourth version
+		assert_eq!(versions.fetch_version(40), Some(Bytes::from("v4".to_string())));
+		// Query after the fourth version
+		assert_eq!(versions.fetch_version(45), Some(Bytes::from("v4".to_string())));
+		// Query at the fifth version
+		assert_eq!(versions.fetch_version(50), Some(Bytes::from("v5".to_string())));
+		// Query after the fifth version
+		assert_eq!(versions.fetch_version(100), Some(Bytes::from("v5".to_string())));
+	}
+
+	#[test]
+	fn test_fetch_version_with_deletes() {
+		let versions = make_versions(vec![
+			(10, Some("v1")),
+			(20, None), // Delete
+			(30, Some("v3")),
+			(40, None), // Delete
+		]);
+		// Query before the first version
+		assert_eq!(versions.fetch_version(5), None);
+		// Query at the first version
+		assert_eq!(versions.fetch_version(10), Some(Bytes::from("v1".to_string())));
+		// Query after the first version
+		assert_eq!(versions.fetch_version(15), Some(Bytes::from("v1".to_string())));
+		// Query at the second version (delete)
+		assert_eq!(versions.fetch_version(20), None);
+		// Query after the second version (delete)
+		assert_eq!(versions.fetch_version(25), None);
+		// Query at the third version
+		assert_eq!(versions.fetch_version(30), Some(Bytes::from("v3".to_string())));
+		// Query after the third version
+		assert_eq!(versions.fetch_version(35), Some(Bytes::from("v3".to_string())));
+		// Query at the fourth version (delete)
+		assert_eq!(versions.fetch_version(40), None);
+		// Query after the fourth version (delete)
+		assert_eq!(versions.fetch_version(50), None);
+	}
+
+	// ==================== Tests for exists_version ====================
+
+	#[test]
+	fn test_exists_version_empty() {
+		let versions = Versions::new();
+		assert_eq!(versions.exists_version(0), false);
+		assert_eq!(versions.exists_version(10), false);
+		assert_eq!(versions.exists_version(100), false);
+	}
+
+	#[test]
+	fn test_exists_version_single_version() {
+		let versions = make_versions(vec![(10, Some("value"))]);
+		// Query before the version
+		assert_eq!(versions.exists_version(5), false);
+		assert_eq!(versions.exists_version(9), false);
+		// Query at the version
+		assert_eq!(versions.exists_version(10), true);
+		// Query after the version
+		assert_eq!(versions.exists_version(11), true);
+		assert_eq!(versions.exists_version(100), true);
+	}
+
+	#[test]
+	fn test_exists_version_multiple_versions() {
+		let versions = make_versions(vec![
+			(10, Some("v1")),
+			(20, Some("v2")),
+			(30, Some("v3")),
+			(40, Some("v4")),
+			(50, Some("v5")),
+		]);
+		// Query before the first version
+		assert_eq!(versions.exists_version(5), false);
+		// Query at the first version
+		assert_eq!(versions.exists_version(10), true);
+		// Query after the first version
+		assert_eq!(versions.exists_version(15), true);
+		// Query at the second version
+		assert_eq!(versions.exists_version(20), true);
+		// Query after the second version
+		assert_eq!(versions.exists_version(25), true);
+		// Query at the third version
+		assert_eq!(versions.exists_version(30), true);
+		// Query after the third version
+		assert_eq!(versions.exists_version(35), true);
+		// Query at the fourth version
+		assert_eq!(versions.exists_version(40), true);
+		// Query after the fourth version
+		assert_eq!(versions.exists_version(45), true);
+		// Query at the fifth version
+		assert_eq!(versions.exists_version(50), true);
+		// Query after the fifth version
+		assert_eq!(versions.exists_version(100), true);
+	}
+
+	#[test]
+	fn test_exists_version_with_deletes() {
+		let versions = make_versions(vec![
+			(10, Some("v1")),
+			(20, None), // Delete
+			(30, Some("v3")),
+			(40, None), // Delete
+		]);
+		// Query before the first version
+		assert_eq!(versions.exists_version(5), false);
+		// Query at the first version
+		assert_eq!(versions.exists_version(10), true);
+		// Query after the first version
+		assert_eq!(versions.exists_version(15), true);
+		// Query at the second version (delete)
+		assert_eq!(versions.exists_version(20), false);
+		// Query after the second version (delete)
+		assert_eq!(versions.exists_version(25), false);
+		// Query at the third version
+		assert_eq!(versions.exists_version(30), true);
+		// Query after the third version
+		assert_eq!(versions.exists_version(35), true);
+		// Query at the fourth version (delete)
+		assert_eq!(versions.exists_version(40), false);
+		// Query after the fourth version (delete)
+		assert_eq!(versions.exists_version(50), false);
+	}
+
+	// ==================== Tests for push ====================
+
+	#[test]
+	fn test_push_to_empty_list() {
+		let mut versions = Versions::new();
+		// Push a value to empty list
+		versions.push(make_version(10, Some("v1")));
+		assert_eq!(versions.inner.len(), 1);
+		assert_eq!(versions.fetch_version(10), Some(Bytes::from("v1".to_string())));
+	}
+
+	#[test]
+	fn test_push_delete_to_empty_list() {
+		let mut versions = Versions::new();
+		// Push a delete (None) to empty list - should not add
+		versions.push(make_version(10, None));
+		assert_eq!(versions.inner.len(), 0);
+	}
+
+	#[test]
+	fn test_push_in_order() {
+		let mut versions = Versions::new();
+		// Push versions in increasing order
+		versions.push(make_version(10, Some("v1")));
+		versions.push(make_version(20, Some("v2")));
+		versions.push(make_version(30, Some("v3")));
+		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.fetch_version(10), Some(Bytes::from("v1".to_string())));
+		assert_eq!(versions.fetch_version(20), Some(Bytes::from("v2".to_string())));
+		assert_eq!(versions.fetch_version(30), Some(Bytes::from("v3".to_string())));
+	}
+
+	#[test]
+	fn test_push_duplicate_values() {
+		let mut versions = Versions::new();
+		// Push first version
+		versions.push(make_version(10, Some("v1")));
+		assert_eq!(versions.inner.len(), 1);
+		// Push same value at newer version - should be skipped
+		versions.push(make_version(20, Some("v1")));
+		assert_eq!(versions.inner.len(), 1);
+		// Push different value - should be added
+		versions.push(make_version(30, Some("v2")));
+		assert_eq!(versions.inner.len(), 2);
+		// Push same value again - should be skipped
+		versions.push(make_version(40, Some("v2")));
+		assert_eq!(versions.inner.len(), 2);
+	}
+
+	#[test]
+	fn test_push_out_of_order() {
+		let mut versions = Versions::new();
+		// Push versions out of order
+		versions.push(make_version(30, Some("v3")));
+		versions.push(make_version(10, Some("v1")));
+		versions.push(make_version(20, Some("v2")));
+		// Should be sorted correctly
+		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.inner[0].version, 10);
+		assert_eq!(versions.inner[1].version, 20);
+		assert_eq!(versions.inner[2].version, 30);
+	}
+
+	#[test]
+	fn test_push_with_deletes() {
+		let mut versions = Versions::new();
+		// Push value, then delete, then value again
+		versions.push(make_version(10, Some("v1")));
+		assert_eq!(versions.inner.len(), 1);
+		// Push delete
+		versions.push(make_version(20, None));
+		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.exists_version(20), false);
+		// Push new value
+		versions.push(make_version(30, Some("v3")));
+		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.exists_version(30), true);
+	}
+
+	#[test]
+	fn test_push_same_version_different_value() {
+		let mut versions = Versions::new();
+		// Push a version
+		versions.push(make_version(10, Some("v1")));
+		assert_eq!(versions.inner.len(), 1);
+		// Push same version with different value - should update/replace
+		versions.push(make_version(10, Some("v2")));
+		assert_eq!(versions.inner.len(), 1);
+		// The new value should have replaced the old one
+		assert_eq!(versions.fetch_version(10), Some(Bytes::from("v2".to_string())));
+	}
+
+	#[test]
+	fn test_push_same_version_same_value() {
+		let mut versions = Versions::new();
+		// Push a version
+		versions.push(make_version(10, Some("v1")));
+		assert_eq!(versions.inner.len(), 1);
+		// Push same version with same value - should still update (no-op)
+		versions.push(make_version(10, Some("v1")));
+		assert_eq!(versions.inner.len(), 1);
+		assert_eq!(versions.fetch_version(10), Some(Bytes::from("v1".to_string())));
+	}
+
+	// ==================== Fast Path Tests ====================
+
+	#[test]
+	fn test_push_fast_path_append_different_value() {
+		let mut versions = Versions::new();
+		versions.push(make_version(10, Some("v1")));
+		versions.push(make_version(20, Some("v2")));
+		// Fast path: append with different value
+		versions.push(make_version(30, Some("v3")));
+		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.inner[2].version, 30);
+		assert_eq!(versions.fetch_version(30), Some(Bytes::from("v3".to_string())));
+	}
+
+	#[test]
+	fn test_push_fast_path_append_same_value() {
+		let mut versions = Versions::new();
+		versions.push(make_version(10, Some("v1")));
+		versions.push(make_version(20, Some("v2")));
+		// Fast path: append with same value as last - should be ignored
+		versions.push(make_version(30, Some("v2")));
+		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.fetch_version(30), Some(Bytes::from("v2".to_string())));
+	}
+
+	#[test]
+	fn test_push_fast_path_update_last_different_value() {
+		let mut versions = Versions::new();
+		versions.push(make_version(10, Some("v1")));
+		versions.push(make_version(20, Some("v2")));
+		// Fast path: update last version with different value
+		versions.push(make_version(20, Some("v2_updated")));
+		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.fetch_version(20), Some(Bytes::from("v2_updated".to_string())));
+	}
+
+	#[test]
+	fn test_push_fast_path_update_last_same_value() {
+		let mut versions = Versions::new();
+		versions.push(make_version(10, Some("v1")));
+		versions.push(make_version(20, Some("v2")));
+		// Fast path: update last version with same value - no-op
+		versions.push(make_version(20, Some("v2")));
+		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.fetch_version(20), Some(Bytes::from("v2".to_string())));
+	}
+
+	#[test]
+	fn test_push_fast_path_multiple_updates_to_last() {
+		let mut versions = Versions::new();
+		versions.push(make_version(10, Some("v1")));
+		// Multiple sequential updates to the same version
+		versions.push(make_version(10, Some("v2")));
+		versions.push(make_version(10, Some("v3")));
+		versions.push(make_version(10, Some("v4")));
+		assert_eq!(versions.inner.len(), 1);
+		assert_eq!(versions.fetch_version(10), Some(Bytes::from("v4".to_string())));
+	}
+
+	#[test]
+	fn test_push_fast_path_alternating_append_update() {
+		let mut versions = Versions::new();
+		// Append version 10
+		versions.push(make_version(10, Some("v1")));
+		// Append version 20
+		versions.push(make_version(20, Some("v2")));
+		// Update version 20
+		versions.push(make_version(20, Some("v2_updated")));
+		// Append version 30
+		versions.push(make_version(30, Some("v3")));
+		// Update version 30
+		versions.push(make_version(30, Some("v3_updated")));
+
+		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.fetch_version(10), Some(Bytes::from("v1".to_string())));
+		assert_eq!(versions.fetch_version(20), Some(Bytes::from("v2_updated".to_string())));
+		assert_eq!(versions.fetch_version(30), Some(Bytes::from("v3_updated".to_string())));
+	}
+
+	#[test]
+	fn test_push_slow_path_insert_middle() {
+		let mut versions = Versions::new();
+		versions.push(make_version(10, Some("v1")));
+		versions.push(make_version(30, Some("v3")));
+		// Slow path: insert in the middle (version < last.version)
+		versions.push(make_version(20, Some("v2")));
+
+		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.inner[0].version, 10);
+		assert_eq!(versions.inner[1].version, 20);
+		assert_eq!(versions.inner[2].version, 30);
+	}
+
+	#[test]
+	fn test_push_slow_path_insert_beginning() {
+		let mut versions = Versions::new();
+		versions.push(make_version(20, Some("v2")));
+		versions.push(make_version(30, Some("v3")));
+		// Slow path: insert at the beginning
+		versions.push(make_version(10, Some("v1")));
+
+		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.inner[0].version, 10);
+		assert_eq!(versions.inner[1].version, 20);
+		assert_eq!(versions.inner[2].version, 30);
+	}
+
+	#[test]
+	fn test_push_slow_path_update_middle() {
+		let mut versions = Versions::new();
+		versions.push(make_version(10, Some("v1")));
+		versions.push(make_version(20, Some("v2")));
+		versions.push(make_version(30, Some("v3")));
+		// Slow path: update a middle version
+		versions.push(make_version(20, Some("v2_updated")));
+
+		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.fetch_version(20), Some(Bytes::from("v2_updated".to_string())));
+	}
+
+	#[test]
+	fn test_push_with_delete_at_end() {
+		let mut versions = Versions::new();
+		versions.push(make_version(10, Some("v1")));
+		versions.push(make_version(20, Some("v2")));
+		// Fast path: append delete
+		versions.push(make_version(30, None));
+
+		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.exists_version(30), false);
+		assert_eq!(versions.fetch_version(30), None);
+	}
+
+	#[test]
+	fn test_push_delete_then_value_same_version() {
+		let mut versions = Versions::new();
+		versions.push(make_version(10, Some("v1")));
+		// Push delete
+		versions.push(make_version(20, None));
+		assert_eq!(versions.exists_version(20), false);
+		// Update same version with a value
+		versions.push(make_version(20, Some("v2")));
+		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.exists_version(20), true);
+		assert_eq!(versions.fetch_version(20), Some(Bytes::from("v2".to_string())));
+	}
+
+	#[test]
+	fn test_push_value_then_delete_same_version() {
+		let mut versions = Versions::new();
+		versions.push(make_version(10, Some("v1")));
+		versions.push(make_version(20, Some("v2")));
+		// Update last version to delete
+		versions.push(make_version(20, None));
+
+		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.exists_version(20), false);
+		assert_eq!(versions.fetch_version(20), None);
+	}
+
+	#[test]
+	fn test_push_consecutive_deletes() {
+		let mut versions = Versions::new();
+		versions.push(make_version(10, Some("v1")));
+		// Push delete at version 20
+		versions.push(make_version(20, None));
+		// Push another delete at version 30 (different from last value which is None)
+		versions.push(make_version(30, None));
+
+		// Should only have 2 entries - version 20 and 30 deletes should be separate
+		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.exists_version(20), false);
+		assert_eq!(versions.exists_version(30), false);
+	}
+
+	#[test]
+	fn test_push_stress_many_appends() {
+		let mut versions = Versions::new();
+		// Push many versions in order (all fast path appends)
+		for i in 0..100 {
+			let value = format!("v{}", i);
+			versions.push(make_version(i * 10, Some(&value)));
+		}
+		assert_eq!(versions.inner.len(), 100);
+		assert_eq!(versions.inner[0].version, 0);
+		assert_eq!(versions.inner[99].version, 990);
+	}
+
+	#[test]
+	fn test_push_stress_many_updates() {
+		let mut versions = Versions::new();
+		versions.push(make_version(10, Some("v1")));
+		// Update the same version many times (all fast path updates)
+		for i in 0..100 {
+			let value = format!("v{}", i);
+			versions.push(make_version(10, Some(&value)));
+		}
+		assert_eq!(versions.inner.len(), 1);
+		assert_eq!(versions.fetch_version(10), Some(Bytes::from("v99".to_string())));
+	}
+}
