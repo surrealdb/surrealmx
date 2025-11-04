@@ -485,6 +485,8 @@ impl TransactionInner {
 			// Return the value
 			(value, counter)
 		};
+		// Clear savepoint stack
+		self.savepoint_stack.clear();
 		// Clear or completely reset the allocated readset
 		let threshold = self.reset_threshold;
 		match self.readset.len() > threshold {
@@ -534,6 +536,8 @@ impl TransactionInner {
 		// Mark this transaction as done
 		self.done = true;
 		// Clear the transaction entries
+		self.scanset.clear();
+		self.readset.clear();
 		self.writeset.clear();
 		// Clear savepoint stack
 		self.savepoint_stack.clear();
@@ -3054,6 +3058,179 @@ mod tests {
 
 		// Should error when no more savepoints available
 		assert!(matches!(tx_stack.rollback_to_savepoint(), Err(Error::NoSavepoint)));
+	}
+
+	#[test]
+	fn test_savepoint_stack_cleared_on_transaction_reuse() {
+		// Verify that savepoint stacks are properly cleared when transactions
+		// are returned to the pool and reused for new operations.
+
+		let db = Database::new();
+
+		// Transaction 1: Create savepoints and commit
+		let mut tx1 = db.transaction(true);
+		tx1.set("key1", "value1").unwrap();
+		tx1.set_savepoint().unwrap();
+		tx1.set("key2", "value2").unwrap();
+		tx1.set_savepoint().unwrap();
+		tx1.set("key3", "value3").unwrap();
+
+		// Verify savepoints exist
+		assert!(!tx1.inner.as_ref().unwrap().savepoint_stack.is_empty());
+
+		// Commit the transaction (returns to pool)
+		tx1.commit().unwrap();
+
+		// Transaction 2: Get a new transaction (likely reuses tx1's pooled object)
+		let mut tx2 = db.transaction(true);
+
+		// CRITICAL: The savepoint stack should be empty for the new transaction
+		assert!(
+			tx2.inner.as_ref().unwrap().savepoint_stack.is_empty(),
+			"Savepoint stack should be cleared when transaction is reused from pool"
+		);
+
+		// Attempting to rollback should fail with NoSavepoint
+		let result = tx2.rollback_to_savepoint();
+		assert!(
+			matches!(result, Err(Error::NoSavepoint)),
+			"Should get NoSavepoint error on fresh transaction, got: {:?}",
+			result
+		);
+
+		tx2.cancel().unwrap();
+
+		// Transaction 3: Test with cancel instead of commit
+		let mut tx3 = db.transaction(true);
+		tx3.set("key4", "value4").unwrap();
+		tx3.set_savepoint().unwrap();
+		tx3.set_savepoint().unwrap();
+		tx3.set_savepoint().unwrap();
+
+		// Verify savepoints exist
+		assert_eq!(tx3.inner.as_ref().unwrap().savepoint_stack.len(), 3);
+
+		// Cancel the transaction (returns to pool)
+		tx3.cancel().unwrap();
+
+		// Transaction 4: Get another transaction
+		let mut tx4 = db.transaction(true);
+
+		// Savepoint stack should be empty
+		assert!(
+			tx4.inner.as_ref().unwrap().savepoint_stack.is_empty(),
+			"Savepoint stack should be cleared after cancel"
+		);
+
+		// Readset and scanset should also be cleared
+		assert!(
+			tx4.inner.as_ref().unwrap().readset.is_empty(),
+			"Readset should be cleared after cancel"
+		);
+		assert!(
+			tx4.inner.as_ref().unwrap().scanset.is_empty(),
+			"Scanset should be cleared after cancel"
+		);
+
+		tx4.cancel().unwrap();
+	}
+
+	#[test]
+	fn test_savepoints_with_scans_and_writes() {
+		// Verify that savepoints correctly interact with scans and subsequent writes.
+		// This pattern is common in SurrealDB queries with IF-ELSE, SELECT, and UPSERT.
+
+		let db = Database::new();
+
+		// Setup initial data
+		let mut tx_setup = db.transaction(true);
+		tx_setup.set("person:test", "initial").unwrap();
+		tx_setup.set("person:other", "other_value").unwrap();
+		tx_setup.commit().unwrap();
+
+		// Transaction that scans, sets savepoint, then writes
+		let mut tx1 = db.transaction(true);
+
+		// Scan first (like SELECT count() - scans the whole range)
+		let result = tx1.scan("person:".."person;", None, None).unwrap();
+		assert_eq!(result.len(), 2);
+
+		// Set savepoint (SurrealDB might use these internally)
+		tx1.set_savepoint().unwrap();
+
+		// Concurrent transaction modifies data in scanned range
+		// but a DIFFERENT key than what tx1 will write
+		let mut tx2 = db.transaction(true);
+		tx2.set("person:other", "modified").unwrap();
+		tx2.commit().unwrap();
+
+		// Now write to a different key (like UPSERT based on the scan result)
+		tx1.set("person:test", "updated").unwrap();
+
+		// Commit should detect the SCAN conflict (tx2 wrote to a key tx1 scanned)
+		let result = tx1.commit();
+		assert!(
+			matches!(result, Err(Error::KeyReadConflict)),
+			"Should detect scan conflict even with savepoint, got: {:?}",
+			result
+		);
+	}
+
+	#[test]
+	fn test_savepoint_rollback_preserves_earlier_scans() {
+		// Verify that rolling back a savepoint doesn't lose scans from before the savepoint
+
+		let db = Database::new();
+
+		// Setup
+		let mut tx_setup = db.transaction(true);
+		tx_setup.set("key1", "value1").unwrap();
+		tx_setup.set("key2", "value2").unwrap();
+		tx_setup.commit().unwrap();
+
+		let mut tx = db.transaction(true);
+
+		// Scan before savepoint
+		let _ = tx.scan("key0".."key5", None, None).unwrap();
+
+		// Verify scanset is populated
+		assert!(!tx.inner.as_ref().unwrap().scanset.is_empty());
+		let scanset_before = tx.inner.as_ref().unwrap().scanset.clone();
+
+		// Set savepoint
+		tx.set_savepoint().unwrap();
+
+		// Another scan after savepoint
+		let _ = tx.scan("key5".."key9", None, None).unwrap();
+
+		// Scanset should now have both ranges
+		assert!(tx.inner.as_ref().unwrap().scanset.len() >= scanset_before.len());
+
+		// Rollback to savepoint
+		tx.rollback_to_savepoint().unwrap();
+
+		// First scan should still be there
+		assert_eq!(
+			tx.inner.as_ref().unwrap().scanset,
+			scanset_before,
+			"Scanset should be restored to state before savepoint"
+		);
+
+		// Add a write
+		tx.set("key1", "updated").unwrap();
+
+		// Concurrent write in the original scan range
+		let mut tx2 = db.transaction(true);
+		tx2.set("key2", "concurrent").unwrap();
+		tx2.commit().unwrap();
+
+		// Should still detect conflict from the preserved scan
+		let result = tx.commit();
+		assert!(
+			matches!(result, Err(Error::KeyReadConflict)),
+			"Should detect conflict from scan before savepoint, got: {:?}",
+			result
+		);
 	}
 
 	#[test]
