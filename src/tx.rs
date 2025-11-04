@@ -535,7 +535,7 @@ impl TransactionInner {
 		}
 		// Mark this transaction as done
 		self.done = true;
-		// Clear the transaction entries
+		// Clear the transaction state
 		self.scanset.clear();
 		self.readset.clear();
 		self.writeset.clear();
@@ -597,6 +597,12 @@ impl TransactionInner {
 		self.done = true;
 		// Return immediately if no modifications
 		if self.writeset.is_empty() {
+			// Clear the transaction state
+			self.scanset.clear();
+			self.readset.clear();
+			// Clear savepoint stack
+			self.savepoint_stack.clear();
+			// Continue
 			return Ok(());
 		}
 		// Take ownership over the local modifications
@@ -614,6 +620,12 @@ impl TransactionInner {
 				if !tx.value().is_disjoint_writeset(&entry) {
 					// Remove the transaction from the commit queue
 					self.database.transaction_commit_queue.remove(&version);
+					// Clear the transaction state
+					self.scanset.clear();
+					self.readset.clear();
+					self.writeset.clear();
+					// Clear savepoint stack
+					self.savepoint_stack.clear();
 					// Return the error for this transaction
 					return Err(Error::KeyWriteConflict);
 				}
@@ -623,6 +635,12 @@ impl TransactionInner {
 					if !tx.value().is_disjoint_readset(&self.readset) {
 						// Remove the transaction from the commit queue
 						self.database.transaction_commit_queue.remove(&version);
+						// Clear the transaction state
+						self.scanset.clear();
+						self.readset.clear();
+						self.writeset.clear();
+						// Clear savepoint stack
+						self.savepoint_stack.clear();
 						// Return the error for this transaction
 						return Err(Error::KeyReadConflict);
 					}
@@ -634,6 +652,12 @@ impl TransactionInner {
 							if range.1 > k {
 								// Remove the transaction from the commit queue
 								self.database.transaction_commit_queue.remove(&version);
+								// Clear the transaction state
+								self.scanset.clear();
+								self.readset.clear();
+								self.writeset.clear();
+								// Clear savepoint stack
+								self.savepoint_stack.clear();
 								// Return the error for this transaction
 								return Err(Error::KeyReadConflict);
 							}
@@ -695,12 +719,24 @@ impl TransactionInner {
 			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
 				// Remove this transaction from the merge queue
 				self.database.transaction_merge_queue.remove(&version);
+				// Clear the transaction state
+				self.scanset.clear();
+				self.readset.clear();
+				self.writeset.clear();
+				// Clear savepoint stack
+				self.savepoint_stack.clear();
 				// Return a persistence error
 				return Err(Error::TxCommitNotPersisted(e));
 			}
 		}
 		// Remove this transaction from the merge queue
 		self.database.transaction_merge_queue.remove(&version);
+		// Clear the transaction state
+		self.scanset.clear();
+		self.readset.clear();
+		self.writeset.clear();
+		// Clear savepoint stack
+		self.savepoint_stack.clear();
 		// Continue
 		Ok(())
 	}
