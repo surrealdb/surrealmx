@@ -1218,7 +1218,7 @@ impl TransactionInner {
 		}
 		// Prepare result vector
 		let mut res = match limit {
-			Some(l) => Vec::with_capacity(l),
+			Some(l) => Vec::with_capacity(l.min(10_000)),
 			None => Vec::new(),
 		};
 		// Compute the range
@@ -1283,7 +1283,7 @@ impl TransactionInner {
 		}
 		// Prepare result vector
 		let mut res = match limit {
-			Some(l) => Vec::with_capacity(l),
+			Some(l) => Vec::with_capacity(l.min(10_000)),
 			None => Vec::new(),
 		};
 		// Compute the range
