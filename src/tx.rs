@@ -883,6 +883,8 @@ impl TransactionInner {
 		K: IntoBytes,
 		V: IntoBytes,
 	{
+		// Get the key reference
+		let lookup = key.as_slice();
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -892,9 +894,16 @@ impl TransactionInner {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
-		match self.exists_in_datastore(key.as_slice(), self.version) {
-			false => self.writeset.insert(key.into_bytes(), Some(val.into_bytes())),
-			_ => return Err(Error::KeyAlreadyExists),
+		match self.writeset.get(lookup) {
+			// The key exists in the writeset
+			Some(_) => return Err(Error::KeyAlreadyExists),
+			// Check for the key in the tree
+			None => match self.exists_in_datastore(lookup, self.version) {
+				// The key does not exist in the datastore
+				false => self.writeset.insert(key.into_bytes(), Some(val.into_bytes())),
+				// The key exists in the datastore
+				true => return Err(Error::KeyAlreadyExists),
+			},
 		};
 		// Return result
 		Ok(())
@@ -907,6 +916,8 @@ impl TransactionInner {
 		V: IntoBytes,
 		C: IntoBytes,
 	{
+		// Get the key reference
+		let lookup = key.as_slice();
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -916,9 +927,26 @@ impl TransactionInner {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
-		match self.equals_in_datastore(key.as_slice(), chk, self.version) {
-			true => self.writeset.insert(key.into_bytes(), Some(val.into_bytes())),
-			_ => return Err(Error::ValNotExpectedValue),
+		match (chk.as_ref(), self.writeset.get(lookup)) {
+			// The key exists in the writeset, check if it matches
+			(Some(x), Some(Some(y))) if x.as_slice() == y.as_slice() => {
+				self.writeset.insert(key.into_bytes(), Some(val.into_bytes()));
+			}
+			// The key does not exist in the writeset, check if it matches
+			(None, Some(None)) => {
+				self.writeset.insert(key.into_bytes(), Some(val.into_bytes()));
+			}
+			// The key exists in the writeset, but does not match
+			(_, Some(_)) => return Err(Error::ValNotExpectedValue),
+			// Check for the key in the tree
+			_ => match self.equals_in_datastore(lookup, chk, self.version) {
+				// The key does not exist in the datastore
+				true => {
+					self.writeset.insert(key.into_bytes(), Some(val.into_bytes()));
+				}
+				// The key exists in the datastore
+				_ => return Err(Error::ValNotExpectedValue),
+			},
 		};
 		// Return result
 		Ok(())
@@ -949,6 +977,8 @@ impl TransactionInner {
 		K: IntoBytes,
 		C: IntoBytes,
 	{
+		// Get the key reference
+		let lookup = key.as_slice();
 		// Check to see if transaction is closed
 		if self.done == true {
 			return Err(Error::TxClosed);
@@ -958,9 +988,26 @@ impl TransactionInner {
 			return Err(Error::TxNotWritable);
 		}
 		// Remove the key
-		match self.equals_in_datastore(key.as_slice(), chk, self.version) {
-			true => self.writeset.insert(key.into_bytes(), None),
-			_ => return Err(Error::ValNotExpectedValue),
+		match (chk.as_ref(), self.writeset.get(lookup)) {
+			// The key exists in the writeset, check if it matches
+			(Some(x), Some(Some(y))) if x.as_slice() == y.as_slice() => {
+				self.writeset.insert(key.into_bytes(), None);
+			}
+			// The key does not exist in the writeset, check if it matches
+			(None, Some(None)) => {
+				self.writeset.insert(key.into_bytes(), None);
+			}
+			// The key exists in the writeset, but does not match
+			(_, Some(_)) => return Err(Error::ValNotExpectedValue),
+			// Check for the key in the tree
+			_ => match self.equals_in_datastore(lookup, chk, self.version) {
+				// The key does not exist in the datastore
+				true => {
+					self.writeset.insert(key.into_bytes(), None);
+				}
+				// The key exists in the datastore
+				_ => return Err(Error::ValNotExpectedValue),
+			},
 		};
 		// Return result
 		Ok(())
@@ -3533,6 +3580,162 @@ mod tests {
 					op_id
 				);
 			}
+		}
+	}
+
+	#[test]
+	fn test_writeset_checked_before_datastore() {
+		// Test that put, putc, and delc correctly check the writeset
+		// before checking the datastore
+		let db = Database::new();
+
+		// === Test 1: put() checks writeset ===
+		{
+			let mut tx = db.transaction(true);
+
+			// Set a key in the writeset (not yet committed)
+			tx.set("key1", "value1").unwrap();
+
+			// Try to put the same key - should fail even though it's not in datastore yet
+			let result = tx.put("key1", "value2");
+			assert!(
+				matches!(result, Err(Error::KeyAlreadyExists)),
+				"put() should check writeset and fail when key exists there"
+			);
+
+			tx.cancel().unwrap();
+		}
+
+		// === Test 2: put() allows insert when key only exists in datastore ===
+		{
+			let mut tx1 = db.transaction(true);
+			tx1.put("key2", "initial").unwrap();
+			tx1.commit().unwrap();
+
+			let mut tx2 = db.transaction(true);
+			let result = tx2.put("key2", "should_fail");
+			assert!(
+				matches!(result, Err(Error::KeyAlreadyExists)),
+				"put() should fail when key exists in datastore"
+			);
+		}
+
+		// === Test 3: putc() checks writeset with matching value ===
+		{
+			let mut tx = db.transaction(true);
+
+			// Set a key in the writeset
+			tx.set("key3", "value3").unwrap();
+
+			// putc with matching value should succeed
+			tx.putc("key3", "new_value", Some("value3")).unwrap();
+			assert_eq!(tx.get("key3").unwrap().as_deref(), Some(b"new_value" as &[u8]));
+
+			tx.cancel().unwrap();
+		}
+
+		// === Test 4: putc() checks writeset with non-matching value ===
+		{
+			let mut tx = db.transaction(true);
+
+			// Set a key in the writeset
+			tx.set("key4", "value4").unwrap();
+
+			// putc with non-matching value should fail
+			let result = tx.putc("key4", "new_value", Some("wrong_value"));
+			assert!(
+				matches!(result, Err(Error::ValNotExpectedValue)),
+				"putc() should check writeset and fail when value doesn't match"
+			);
+
+			tx.cancel().unwrap();
+		}
+
+		// === Test 5: putc() with None checks writeset for deleted key ===
+		{
+			let mut tx = db.transaction(true);
+
+			// Delete a key in the writeset
+			tx.del("key5").unwrap();
+
+			// putc with None (expecting non-existent) should succeed on deleted key
+			tx.putc("key5", "resurrected", None::<&str>).unwrap();
+			assert_eq!(tx.get("key5").unwrap().as_deref(), Some(b"resurrected" as &[u8]));
+
+			tx.cancel().unwrap();
+		}
+
+		// === Test 6: delc() checks writeset with matching value ===
+		{
+			let mut tx = db.transaction(true);
+
+			// Set a key in the writeset
+			tx.set("key6", "value6").unwrap();
+
+			// delc with matching value should succeed
+			tx.delc("key6", Some("value6")).unwrap();
+			assert_eq!(tx.get("key6").unwrap(), None);
+
+			tx.cancel().unwrap();
+		}
+
+		// === Test 7: delc() checks writeset with non-matching value ===
+		{
+			let mut tx = db.transaction(true);
+
+			// Set a key in the writeset
+			tx.set("key7", "value7").unwrap();
+
+			// delc with non-matching value should fail
+			let result = tx.delc("key7", Some("wrong_value"));
+			assert!(
+				matches!(result, Err(Error::ValNotExpectedValue)),
+				"delc() should check writeset and fail when value doesn't match"
+			);
+
+			tx.cancel().unwrap();
+		}
+
+		// === Test 8: delc() with None checks writeset for non-existent key ===
+		{
+			let mut tx = db.transaction(true);
+
+			// Delete a key in the writeset (making it non-existent)
+			tx.del("key8").unwrap();
+
+			// delc with None (expecting non-existent) should succeed
+			tx.delc("key8", None::<&str>).unwrap();
+			assert_eq!(tx.get("key8").unwrap(), None);
+
+			tx.cancel().unwrap();
+		}
+
+		// === Test 9: Complex scenario with multiple operations ===
+		{
+			let mut tx = db.transaction(true);
+
+			// Set a key
+			tx.set("complex", "v1").unwrap();
+
+			// Update it
+			tx.set("complex", "v2").unwrap();
+
+			// Try to put (should fail - key exists in writeset)
+			assert!(matches!(tx.put("complex", "v3"), Err(Error::KeyAlreadyExists)));
+
+			// putc with correct value should work
+			tx.putc("complex", "v3", Some("v2")).unwrap();
+			assert_eq!(tx.get("complex").unwrap().as_deref(), Some(b"v3" as &[u8]));
+
+			// delc with correct value should work
+			tx.delc("complex", Some("v3")).unwrap();
+			assert_eq!(tx.get("complex").unwrap(), None);
+
+			// Now putc with None should work (key deleted)
+			tx.putc("complex", "v4", None::<&str>).unwrap();
+			assert_eq!(tx.get("complex").unwrap().as_deref(), Some(b"v4" as &[u8]));
+
+			tx.cancel().unwrap();
 		}
 	}
 }
