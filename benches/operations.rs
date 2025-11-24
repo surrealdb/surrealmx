@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use std::hint::black_box;
 use std::sync::Arc;
 use surrealmx::{Database, DatabaseOptions};
 
