@@ -33,6 +33,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use arc_swap::ArcSwap;
 
 /// The isolation level of a database transaction
 #[derive(PartialEq, PartialOrd)]
@@ -377,7 +378,7 @@ struct SavepointState {
 	/// The readset at the time of the savepoint
 	readset: HashSet<Bytes>,
 	/// The scanset at the time of the savepoint
-	scanset: SkipMap<Bytes, Bytes>,
+	scanset: SkipMap<Bytes, ArcSwap<Bytes>>,
 	/// The writeset at the time of the savepoint
 	writeset: BTreeMap<Bytes, Option<Bytes>>,
 }
@@ -401,7 +402,7 @@ pub(crate) struct TransactionInner {
 	/// The local set of key reads
 	pub(crate) readset: HashSet<Bytes>,
 	/// The local set of key scans
-	pub(crate) scanset: SkipMap<Bytes, Bytes>,
+	pub(crate) scanset: SkipMap<Bytes, ArcSwap<Bytes>>,
 	/// The local set of updates and deletes
 	pub(crate) writeset: BTreeMap<Bytes, Option<Bytes>>,
 	/// The parent database for this transaction
@@ -585,7 +586,9 @@ impl TransactionInner {
 		let scanset = SkipMap::new();
 		// Clone the scanset for the savepoint
 		for entry in self.scanset.iter() {
-			scanset.insert(entry.key().clone(), entry.value().clone());
+			// Load the Arc from ArcSwap and clone it for the new savepoint
+			let value = Arc::clone(&entry.value().load());
+			scanset.insert(entry.key().clone(), ArcSwap::new(value));
 		}
 		// Create the savepoint state
 		self.savepoint_stack.push(SavepointState {
@@ -620,9 +623,11 @@ impl TransactionInner {
 		}
 		// Restore the scanset to the savepoint
 		self.scanset.clear();
-		// Clone the scanset for the savepoint
+		// Clone the scanset from the savepoint
 		for entry in savepoint.scanset.iter() {
-			self.scanset.insert(entry.key().clone(), entry.value().clone());
+			// Load the Arc from ArcSwap and clone it for the restored scanset
+			let value = Arc::clone(&entry.value().load());
+			self.scanset.insert(entry.key().clone(), ArcSwap::new(value));
 		}
 		// Restore the other transaction state
 		self.writeset = savepoint.writeset;
@@ -691,8 +696,8 @@ impl TransactionInner {
 					for k in tx.value().writeset.keys() {
 						// Check if this key may be within a scan range
 						if let Some(entry) = self.scanset.range::<Bytes, _>(..=k).next_back() {
-							// Check if the range includes this key
-							if entry.value() > k {
+							// Check if the range includes this key (load from ArcSwap)
+							if **entry.value().load() > *k {
 								// Remove the transaction from the commit queue
 								self.database.transaction_commit_queue.remove(&version);
 								// Clear the transaction state
@@ -1299,16 +1304,15 @@ impl TransactionInner {
 		match self.scanset.range::<Bytes, _>(..=beg).next_back() {
 			// There is no entry for this range scan
 			None => {
-				self.scanset.insert(beg.clone(), end.clone());
+				self.scanset.insert(beg.clone(), ArcSwap::from_pointee(end.clone()));
 			}
 			// The saved scan stops before this range
-			Some(entry) if entry.value() < beg => {
-				self.scanset.insert(beg.clone(), end.clone());
+			Some(entry) if **entry.value().load() < *beg => {
+				self.scanset.insert(beg.clone(), ArcSwap::from_pointee(end.clone()));
 			}
-			// The saved scan does not extend far enough
-			Some(entry) if entry.value() < end => {
-				self.scanset.remove(beg);
-				self.scanset.insert(beg.clone(), end.clone());
+			// The saved scan does not extend far enough - atomically update the end
+			Some(entry) if **entry.value().load() < *end => {
+				entry.value().store(Arc::new(end.clone()));
 			}
 			// This range scan is already covered
 			_ => (),
