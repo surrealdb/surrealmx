@@ -618,8 +618,7 @@ impl TransactionInner {
 		// Clear the readset
 		readset.clear();
 		// Clone the readset from the savepoint
-		let savepoint_readset = savepoint.readset.pin();
-		for key in savepoint_readset.iter() {
+		for key in savepoint.readset.pin().iter() {
 			readset.insert(key.clone());
 		}
 		// Restore the scanset to the savepoint
