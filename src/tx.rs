@@ -23,8 +23,8 @@ use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::versions::Versions;
-use ahash::AHashSet;
 use bytes::Bytes;
+use papaya::HashSet;
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -120,11 +120,11 @@ impl Transaction {
 	}
 
 	/// Check if a key exists in the database
-	pub fn exists<K>(&mut self, key: K) -> Result<bool, Error>
+	pub fn exists<K>(&self, key: K) -> Result<bool, Error>
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().exists(key)
+		self.inner.as_ref().unwrap().exists(key)
 	}
 
 	/// Check if a key exists in the database at a specific version
@@ -136,11 +136,11 @@ impl Transaction {
 	}
 
 	/// Fetch a key from the database
-	pub fn get<K>(&mut self, key: K) -> Result<Option<Bytes>, Error>
+	pub fn get<K>(&self, key: K) -> Result<Option<Bytes>, Error>
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().get(key)
+		self.inner.as_ref().unwrap().get(key)
 	}
 
 	/// Fetch a key from the database at a specific version
@@ -352,10 +352,9 @@ impl Transaction {
 // --------------------------------------------------
 
 /// A savepoint state capturing transaction state at a specific point
-#[derive(Clone)]
 struct SavepointState {
 	/// The readset at the time of the savepoint
-	readset: AHashSet<Bytes>,
+	readset: HashSet<Bytes>,
 	/// The scanset at the time of the savepoint
 	scanset: BTreeMap<Bytes, Bytes>,
 	/// The writeset at the time of the savepoint
@@ -379,7 +378,7 @@ pub(crate) struct TransactionInner {
 	/// The version at which this transaction started
 	pub(crate) version: u64,
 	/// The local set of key reads
-	pub(crate) readset: AHashSet<Bytes>,
+	pub(crate) readset: HashSet<Bytes>,
 	/// The local set of key scans
 	pub(crate) scanset: BTreeMap<Bytes, Bytes>,
 	/// The local set of updates and deletes
@@ -436,7 +435,7 @@ impl TransactionInner {
 			write,
 			commit,
 			version,
-			readset: AHashSet::new(),
+			readset: HashSet::new(),
 			scanset: BTreeMap::new(),
 			writeset: BTreeMap::new(),
 			database: db,
@@ -489,10 +488,8 @@ impl TransactionInner {
 		self.savepoint_stack.clear();
 		// Clear or completely reset the allocated readset
 		let threshold = self.reset_threshold;
-		match self.readset.len() > threshold {
-			true => self.readset = AHashSet::new(),
-			false => self.readset.clear(),
-		};
+		// Clear the transaction readset
+		self.readset.pin().clear();
 		// Clear or completely reset the allocated scanset
 		match self.scanset.len() > threshold {
 			true => self.scanset = BTreeMap::new(),
@@ -536,8 +533,8 @@ impl TransactionInner {
 		// Mark this transaction as done
 		self.done = true;
 		// Clear the transaction state
+		self.readset.pin().clear();
 		self.scanset.clear();
-		self.readset.clear();
 		self.writeset.clear();
 		// Clear savepoint stack
 		self.savepoint_stack.clear();
@@ -556,9 +553,20 @@ impl TransactionInner {
 		if self.write == false {
 			return Err(Error::TxNotWritable);
 		}
-		// Push current transaction state onto savepoint stack
+		// Create a new readset for the savepoint
+		let readset = HashSet::new();
+		// Store the readset for the savepoint
+		{
+			// Pin the readset for access
+			let pin = readset.pin();
+			// Clone the readset for the savepoint
+			for key in self.readset.pin().iter() {
+				pin.insert(key.clone());
+			}
+		};
+		// Create the savepoint state
 		self.savepoint_stack.push(SavepointState {
-			readset: self.readset.clone(),
+			readset,
 			scanset: self.scanset.clone(),
 			writeset: self.writeset.clone(),
 		});
@@ -579,8 +587,13 @@ impl TransactionInner {
 		}
 		// Pop the most recent savepoint from the stack
 		let savepoint = self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
-		// Restore the transaction state to the savepoint
-		self.readset = savepoint.readset;
+		// Restore the readset to the savepoint
+		self.readset.pin().clear();
+		// Clone the readset for the savepoint
+		for key in savepoint.readset.pin().iter() {
+			self.readset.pin().insert(key.clone());
+		}
+		// Restore the other transaction state
 		self.scanset = savepoint.scanset;
 		self.writeset = savepoint.writeset;
 		// Continue
@@ -599,7 +612,7 @@ impl TransactionInner {
 		if self.writeset.is_empty() {
 			// Clear the transaction state
 			self.scanset.clear();
-			self.readset.clear();
+			self.readset.pin().clear();
 			// Clear savepoint stack
 			self.savepoint_stack.clear();
 			// Continue
@@ -622,7 +635,7 @@ impl TransactionInner {
 					self.database.transaction_commit_queue.remove(&version);
 					// Clear the transaction state
 					self.scanset.clear();
-					self.readset.clear();
+					self.readset.pin().clear();
 					self.writeset.clear();
 					// Clear savepoint stack
 					self.savepoint_stack.clear();
@@ -637,7 +650,7 @@ impl TransactionInner {
 						self.database.transaction_commit_queue.remove(&version);
 						// Clear the transaction state
 						self.scanset.clear();
-						self.readset.clear();
+						self.readset.pin().clear();
 						self.writeset.clear();
 						// Clear savepoint stack
 						self.savepoint_stack.clear();
@@ -654,7 +667,7 @@ impl TransactionInner {
 								self.database.transaction_commit_queue.remove(&version);
 								// Clear the transaction state
 								self.scanset.clear();
-								self.readset.clear();
+								self.readset.pin().clear();
 								self.writeset.clear();
 								// Clear savepoint stack
 								self.savepoint_stack.clear();
@@ -721,7 +734,7 @@ impl TransactionInner {
 				self.database.transaction_merge_queue.remove(&version);
 				// Clear the transaction state
 				self.scanset.clear();
-				self.readset.clear();
+				self.readset.pin().clear();
 				self.writeset.clear();
 				// Clear savepoint stack
 				self.savepoint_stack.clear();
@@ -733,7 +746,7 @@ impl TransactionInner {
 		self.database.transaction_merge_queue.remove(&version);
 		// Clear the transaction state
 		self.scanset.clear();
-		self.readset.clear();
+		self.readset.pin().clear();
 		self.writeset.clear();
 		// Clear savepoint stack
 		self.savepoint_stack.clear();
@@ -742,7 +755,7 @@ impl TransactionInner {
 	}
 
 	/// Check if a key exists in the database
-	pub fn exists<K>(&mut self, key: K) -> Result<bool, Error>
+	pub fn exists<K>(&self, key: K) -> Result<bool, Error>
 	where
 		K: IntoBytes,
 	{
@@ -764,7 +777,7 @@ impl TransactionInner {
 					let res = self.exists_in_datastore(lookup, self.version);
 					// Check whether we should track key reads
 					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-						self.readset.insert(key.into_bytes());
+						self.readset.pin().insert(key.into_bytes());
 					}
 					// Return the result
 					res
@@ -799,7 +812,7 @@ impl TransactionInner {
 	}
 
 	/// Fetch a key from the database
-	pub fn get<K>(&mut self, key: K) -> Result<Option<Bytes>, Error>
+	pub fn get<K>(&self, key: K) -> Result<Option<Bytes>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -821,9 +834,9 @@ impl TransactionInner {
 					let res = self.fetch_in_datastore(lookup, self.version);
 					// Check whether we should track key reads
 					if self.mode >= IsolationLevel::SerializableSnapshotIsolation
-						&& !self.readset.contains(lookup)
+						&& !self.readset.pin().contains(lookup)
 					{
-						self.readset.insert(key.into_bytes());
+						self.readset.pin().insert(key.into_bytes());
 					}
 					// Return the result
 					res
@@ -2040,7 +2053,7 @@ mod tests {
 		}
 
 		{
-			let mut txn3 = db.transaction(true);
+			let txn3 = db.transaction(true);
 			let val1 = txn3.get(key1).unwrap().unwrap();
 			assert_eq!(val1, value3);
 			let val2 = txn3.get(key2).unwrap().unwrap();
@@ -2081,7 +2094,7 @@ mod tests {
 		}
 
 		{
-			let mut txn3 = db.transaction(true);
+			let txn3 = db.transaction(true);
 			let val1 = txn3.get(key1).unwrap().unwrap();
 			assert_eq!(val1, value1);
 			let val2 = txn3.get(key2).unwrap().unwrap();
@@ -2913,7 +2926,7 @@ mod tests {
 		tx.commit().unwrap();
 
 		// === VERIFY FINAL STATE ===
-		let mut tx_verify = db.transaction(false);
+		let tx_verify = db.transaction(false);
 		// From basic test
 		assert_eq!(
 			tx_verify.get("initial_key").unwrap().as_deref(),
@@ -3207,7 +3220,7 @@ mod tests {
 
 		// Readset and scanset should also be cleared
 		assert!(
-			tx4.inner.as_ref().unwrap().readset.is_empty(),
+			tx4.inner.as_ref().unwrap().readset.pin().is_empty(),
 			"Readset should be cleared after cancel"
 		);
 		assert!(
