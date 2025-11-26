@@ -24,6 +24,7 @@ use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::versions::Versions;
 use bytes::Bytes;
+use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
@@ -198,7 +199,7 @@ impl Transaction {
 
 	/// Retrieve a count of keys from the database
 	pub fn total<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -206,12 +207,12 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().total(rng, skip, limit)
+		self.inner.as_ref().unwrap().total(rng, skip, limit)
 	}
 
 	/// Retrieve a count of keys from the database at a specific version
 	pub fn total_at_version<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -220,12 +221,12 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().total_at_version(rng, skip, limit, version)
+		self.inner.as_ref().unwrap().total_at_version(rng, skip, limit, version)
 	}
 
 	/// Retrieve a range of keys from the database
 	pub fn keys<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -233,12 +234,12 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().keys(rng, skip, limit)
+		self.inner.as_ref().unwrap().keys(rng, skip, limit)
 	}
 
 	/// Retrieve a range of keys from the database, in reverse order
 	pub fn keys_reverse<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -246,12 +247,12 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().keys_reverse(rng, skip, limit)
+		self.inner.as_ref().unwrap().keys_reverse(rng, skip, limit)
 	}
 
 	/// Retrieve a range of keys from the database at a specific version
 	pub fn keys_at_version<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -260,12 +261,12 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().keys_at_version(rng, skip, limit, version)
+		self.inner.as_ref().unwrap().keys_at_version(rng, skip, limit, version)
 	}
 
 	/// Retrieve a range of keys from the database at a specific version, in reverse order
 	pub fn keys_at_version_reverse<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -274,12 +275,12 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().keys_at_version_reverse(rng, skip, limit, version)
+		self.inner.as_ref().unwrap().keys_at_version_reverse(rng, skip, limit, version)
 	}
 
 	/// Retrieve a range of keys and values from the database
 	pub fn scan<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -287,12 +288,12 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().scan(rng, skip, limit)
+		self.inner.as_ref().unwrap().scan(rng, skip, limit)
 	}
 
 	/// Retrieve a range of keys and values from the database in reverse order
 	pub fn scan_reverse<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -300,12 +301,12 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().scan_reverse(rng, skip, limit)
+		self.inner.as_ref().unwrap().scan_reverse(rng, skip, limit)
 	}
 
 	/// Retrieve a range of keys and values from the database at a specific version
 	pub fn scan_at_version<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -314,12 +315,12 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().scan_at_version(rng, skip, limit, version)
+		self.inner.as_ref().unwrap().scan_at_version(rng, skip, limit, version)
 	}
 
 	/// Retrieve a range of keys and values from the database at a specific version, in reverse order
 	pub fn scan_at_version_reverse<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -328,14 +329,14 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().scan_at_version_reverse(rng, skip, limit, version)
+		self.inner.as_ref().unwrap().scan_at_version_reverse(rng, skip, limit, version)
 	}
 
 	/// Retrieve all versions of keys within a range from the database
 	/// Returns tuples of (key, version, value) for all historical versions
 	/// The skip and limit parameters apply to the number of keys, not the number of versions
 	pub fn scan_all_versions<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -343,7 +344,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().scan_all_versions(rng, skip, limit)
+		self.inner.as_ref().unwrap().scan_all_versions(rng, skip, limit)
 	}
 }
 
@@ -356,7 +357,7 @@ struct SavepointState {
 	/// The readset at the time of the savepoint
 	readset: HashSet<Bytes>,
 	/// The scanset at the time of the savepoint
-	scanset: BTreeMap<Bytes, Bytes>,
+	scanset: SkipMap<Bytes, Bytes>,
 	/// The writeset at the time of the savepoint
 	writeset: BTreeMap<Bytes, Option<Bytes>>,
 }
@@ -380,7 +381,7 @@ pub(crate) struct TransactionInner {
 	/// The local set of key reads
 	pub(crate) readset: HashSet<Bytes>,
 	/// The local set of key scans
-	pub(crate) scanset: BTreeMap<Bytes, Bytes>,
+	pub(crate) scanset: SkipMap<Bytes, Bytes>,
 	/// The local set of updates and deletes
 	pub(crate) writeset: BTreeMap<Bytes, Option<Bytes>>,
 	/// The parent database for this transaction
@@ -436,7 +437,7 @@ impl TransactionInner {
 			commit,
 			version,
 			readset: HashSet::new(),
-			scanset: BTreeMap::new(),
+			scanset: SkipMap::new(),
 			writeset: BTreeMap::new(),
 			database: db,
 			counter_commit,
@@ -488,13 +489,10 @@ impl TransactionInner {
 		self.savepoint_stack.clear();
 		// Clear or completely reset the allocated readset
 		let threshold = self.reset_threshold;
+		// Clear the transaction scanset
+		self.scanset.clear();
 		// Clear the transaction readset
 		self.readset.pin().clear();
-		// Clear or completely reset the allocated scanset
-		match self.scanset.len() > threshold {
-			true => self.scanset = BTreeMap::new(),
-			false => self.scanset.clear(),
-		};
 		// Clear or completely reset the allocated writeset
 		match self.writeset.len() > threshold {
 			true => self.writeset = BTreeMap::new(),
@@ -564,10 +562,16 @@ impl TransactionInner {
 				pin.insert(key.clone());
 			}
 		};
+		// Create a new scanset for the savepoint
+		let scanset = SkipMap::new();
+		// Clone the scanset for the savepoint
+		for entry in self.scanset.iter() {
+			scanset.insert(entry.key().clone(), entry.value().clone());
+		}
 		// Create the savepoint state
 		self.savepoint_stack.push(SavepointState {
 			readset,
-			scanset: self.scanset.clone(),
+			scanset,
 			writeset: self.writeset.clone(),
 		});
 		// Continue
@@ -593,8 +597,13 @@ impl TransactionInner {
 		for key in savepoint.readset.pin().iter() {
 			self.readset.pin().insert(key.clone());
 		}
+		// Restore the scanset to the savepoint
+		self.scanset.clear();
+		// Clone the scanset for the savepoint
+		for entry in savepoint.scanset.iter() {
+			self.scanset.insert(entry.key().clone(), entry.value().clone());
+		}
 		// Restore the other transaction state
-		self.scanset = savepoint.scanset;
 		self.writeset = savepoint.writeset;
 		// Continue
 		Ok(())
@@ -660,14 +669,14 @@ impl TransactionInner {
 					// A previous transaction has conflicts against scans
 					for k in tx.value().writeset.keys() {
 						// Check if this key may be within a scan range
-						if let Some(range) = self.scanset.range::<Bytes, _>(..=k).next_back() {
+						if let Some(entry) = self.scanset.range::<Bytes, _>(..=k).next_back() {
 							// Check if the range includes this key
-							if range.1 > k {
+							if entry.value() > k {
 								// Remove the transaction from the commit queue
 								self.database.transaction_commit_queue.remove(&version);
 								// Clear the transaction state
-								self.scanset.clear();
 								self.readset.pin().clear();
+								self.scanset.clear();
 								self.writeset.clear();
 								// Clear savepoint stack
 								self.savepoint_stack.clear();
@@ -1028,7 +1037,7 @@ impl TransactionInner {
 
 	/// Retrieve a count of keys from the database
 	pub fn total<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1041,7 +1050,7 @@ impl TransactionInner {
 
 	/// Retrieve a count of keys from the database at a specific version
 	pub fn total_at_version<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1055,7 +1064,7 @@ impl TransactionInner {
 
 	/// Retrieve a range of keys from the database
 	pub fn keys<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1068,7 +1077,7 @@ impl TransactionInner {
 
 	/// Retrieve a range of keys from the database, in reverse order
 	pub fn keys_reverse<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1081,7 +1090,7 @@ impl TransactionInner {
 
 	/// Retrieve a range of keys from the database at a specific version
 	pub fn keys_at_version<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1095,7 +1104,7 @@ impl TransactionInner {
 
 	/// Retrieve a range of keys from the database at a specific version, in reverse order
 	pub fn keys_at_version_reverse<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1109,7 +1118,7 @@ impl TransactionInner {
 
 	/// Retrieve a range of keys and values from the database
 	pub fn scan<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1122,7 +1131,7 @@ impl TransactionInner {
 
 	/// Retrieve a range of keys and values from the database in reverse order
 	pub fn scan_reverse<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1135,7 +1144,7 @@ impl TransactionInner {
 
 	/// Retrieve a range of keys and values from the database at a specific version
 	pub fn scan_at_version<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1149,7 +1158,7 @@ impl TransactionInner {
 
 	/// Retrieve a range of keys and values from the database at a specific version, in reverse order
 	pub fn scan_at_version_reverse<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1165,7 +1174,7 @@ impl TransactionInner {
 	/// Returns tuples of (key, version, value) for all historical versions
 	/// The skip and limit parameters apply to the number of keys, not the number of versions
 	pub fn scan_all_versions<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1178,20 +1187,21 @@ impl TransactionInner {
 
 	/// Helper to track a scan range in the scanset (optimized to minimize clones)
 	#[inline(always)]
-	fn track_scan_range(&mut self, beg: &Bytes, end: &Bytes) {
+	fn track_scan_range(&self, beg: &Bytes, end: &Bytes) {
 		// Add this range scan entry to the saved scans
-		match self.scanset.range_mut::<Bytes, _>(..=beg).next_back() {
+		match self.scanset.range::<Bytes, _>(..=beg).next_back() {
 			// There is no entry for this range scan
 			None => {
 				self.scanset.insert(beg.clone(), end.clone());
 			}
 			// The saved scan stops before this range
-			Some(range) if *range.1 < beg => {
+			Some(entry) if entry.value() < beg => {
 				self.scanset.insert(beg.clone(), end.clone());
 			}
 			// The saved scan does not extend far enough
-			Some(range) if *range.1 < end => {
-				*range.1 = end.clone();
+			Some(entry) if entry.value() < end => {
+				self.scanset.remove(beg);
+				self.scanset.insert(beg.clone(), end.clone());
 			}
 			// This range scan is already covered
 			_ => (),
@@ -1200,7 +1210,7 @@ impl TransactionInner {
 
 	/// Retrieve a count of keys from the database
 	fn total_any<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1262,7 +1272,7 @@ impl TransactionInner {
 
 	/// Retrieve a range of keys from the database
 	fn keys_any<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1327,7 +1337,7 @@ impl TransactionInner {
 
 	/// Retrieve a range of keys and values from the database
 	fn scan_any<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -1394,7 +1404,7 @@ impl TransactionInner {
 
 	/// Retrieve all versions of keys within a range from the database
 	fn scan_all_versions_any<K>(
-		&mut self,
+		&self,
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
@@ -2146,7 +2156,7 @@ mod tests {
 		let value2 = "v2";
 		let value3 = "v3";
 
-		let mut txn1 = db.transaction(true);
+		let txn1 = db.transaction(true);
 		let mut txn2 = db.transaction(true);
 
 		// k3 should not be visible to txn1
@@ -2454,7 +2464,7 @@ mod tests {
 		txn1.commit().unwrap();
 
 		// Transaction 2: Should see committed data even if not merged yet
-		let mut txn2 = db.transaction(false);
+		let txn2 = db.transaction(false);
 
 		// Test exclusive range
 		let res = txn2.scan("b".."d", None, None).unwrap();
@@ -2550,7 +2560,7 @@ mod tests {
 		txn2.commit().unwrap();
 
 		// New transaction should not see deleted items
-		let mut txn3 = db.transaction(false);
+		let txn3 = db.transaction(false);
 		let res = txn3.scan("a".."e", None, None).unwrap();
 		assert_eq!(res.len(), 2);
 		assert_eq!(res[0].0.as_ref(), b"a");
@@ -2576,7 +2586,7 @@ mod tests {
 		txn2.commit().unwrap();
 
 		// New transaction should see updated values
-		let mut txn3 = db.transaction(false);
+		let txn3 = db.transaction(false);
 		let res = txn3.scan("a".."d", None, None).unwrap();
 		assert_eq!(res.len(), 3);
 		assert_eq!(res[0].0.as_ref(), b"a"); // Updated value
@@ -2599,7 +2609,7 @@ mod tests {
 		txn1.set("ba", "5").unwrap();
 		txn1.commit().unwrap();
 
-		let mut txn2 = db.transaction(false);
+		let txn2 = db.transaction(false);
 
 		// Range starting exactly at a key
 		let res = txn2.scan("aa".."b", None, None).unwrap();
@@ -2662,7 +2672,7 @@ mod tests {
 		txn1.set("c", "3").unwrap();
 		txn1.commit().unwrap();
 
-		let mut txn2 = db.transaction(false);
+		let txn2 = db.transaction(false);
 		let keys = txn2.keys("a".."d", None, None).unwrap();
 		assert_eq!(keys.len(), 3);
 		assert_eq!(keys, vec!["a", "b", "c"]);
@@ -2691,7 +2701,7 @@ mod tests {
 		txn1.set("key09", "val9").unwrap();
 		txn1.commit().unwrap();
 
-		let mut txn2 = db.transaction(false);
+		let txn2 = db.transaction(false);
 
 		// Count all
 		let count = txn2.total("key00".."key99", None, None).unwrap();
@@ -2764,7 +2774,7 @@ mod tests {
 		// Verify the database maintains consistency under high concurrency
 		// We can't directly access inner fields, but we can verify overall consistency
 		// by checking that the database is still functional
-		let mut tx = db.transaction(false);
+		let tx = db.transaction(false);
 		let mut count = 0;
 		for _ in tx.scan("key_0".to_string().."key_999".to_string(), None, None).unwrap() {
 			count += 1;
@@ -2827,7 +2837,7 @@ mod tests {
 		}
 
 		// Verify database is in a consistent state
-		let mut tx = db.transaction(false);
+		let tx = db.transaction(false);
 		let mut count = 0;
 		// Use a very wide range to scan all keys
 		for _ in tx.scan("".to_string().."~".to_string(), None, None).unwrap() {
@@ -2975,7 +2985,7 @@ mod tests {
 		tx3.commit().unwrap();
 
 		// Transaction 4: Read all versions
-		let mut tx4 = db.transaction(false);
+		let tx4 = db.transaction(false);
 		let results = tx4.scan_all_versions("key0".."key9", None, None).unwrap();
 
 		// Verify we have all versions:
@@ -3007,7 +3017,7 @@ mod tests {
 		assert_eq!(key3_versions[1].2, None); // Deleted
 
 		// Test with skip: skip first key (key1)
-		let mut tx5 = db.transaction(false);
+		let tx5 = db.transaction(false);
 		let results = tx5.scan_all_versions("key0".."key9", Some(1), None).unwrap();
 
 		// Should have key2 and key3 only
@@ -3024,7 +3034,7 @@ mod tests {
 		assert_eq!(key2_versions.len(), 2, "key2 should still have all 2 versions");
 
 		// Test with limit: limit to first 2 keys (key1 and key2)
-		let mut tx6 = db.transaction(false);
+		let tx6 = db.transaction(false);
 		let results = tx6.scan_all_versions("key0".."key9", None, Some(2)).unwrap();
 
 		// Should have key1 and key2 only (all their versions)
@@ -3041,7 +3051,7 @@ mod tests {
 		assert_eq!(key1_versions.len(), 3, "key1 should still have all 3 versions");
 
 		// Test with skip and limit: skip 1, limit 1 (should get only key2)
-		let mut tx7 = db.transaction(false);
+		let tx7 = db.transaction(false);
 		let results = tx7.scan_all_versions("key0".."key9", Some(1), Some(1)).unwrap();
 
 		let has_key1 = results.iter().any(|(k, _, _)| k.as_ref() == b"key1");
@@ -3105,7 +3115,7 @@ mod tests {
 		tx3.cancel().unwrap();
 
 		// Transaction 4: Read-only transaction should not see tx3's writeset
-		let mut tx4 = db.transaction(false);
+		let tx4 = db.transaction(false);
 		let results = tx4.scan_all_versions("key0".."key9", None, None).unwrap();
 
 		let key1_versions: Vec<_> =
@@ -3291,7 +3301,7 @@ mod tests {
 
 		// Verify scanset is populated
 		assert!(!tx.inner.as_ref().unwrap().scanset.is_empty());
-		let scanset_before = tx.inner.as_ref().unwrap().scanset.clone();
+		let scanset_before_len = tx.inner.as_ref().unwrap().scanset.len();
 
 		// Set savepoint
 		tx.set_savepoint().unwrap();
@@ -3300,15 +3310,15 @@ mod tests {
 		let _ = tx.scan("key5".."key9", None, None).unwrap();
 
 		// Scanset should now have both ranges
-		assert!(tx.inner.as_ref().unwrap().scanset.len() >= scanset_before.len());
+		assert!(tx.inner.as_ref().unwrap().scanset.len() >= scanset_before_len);
 
 		// Rollback to savepoint
 		tx.rollback_to_savepoint().unwrap();
 
-		// First scan should still be there
+		// First scan should still be there (check length matches)
 		assert_eq!(
-			tx.inner.as_ref().unwrap().scanset,
-			scanset_before,
+			tx.inner.as_ref().unwrap().scanset.len(),
+			scanset_before_len,
 			"Scanset should be restored to state before savepoint"
 		);
 
