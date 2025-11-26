@@ -152,6 +152,26 @@ impl Transaction {
 		self.inner.as_ref().unwrap().get_at_version(key, version)
 	}
 
+	/// Fetch multiple keys from the database
+	pub fn getm<K>(&self, keys: Vec<K>) -> Result<Vec<Option<Bytes>>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().getm(keys)
+	}
+
+	/// Fetch multiple keys from the database at a specific version
+	pub fn getm_at_version<K>(
+		&self,
+		keys: Vec<K>,
+		version: u64,
+	) -> Result<Vec<Option<Bytes>>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().getm_at_version(keys, version)
+	}
+
 	/// Insert or update a key in the database
 	pub fn set<K, V>(&mut self, key: K, val: V) -> Result<(), Error>
 	where
@@ -877,6 +897,91 @@ impl TransactionInner {
 		let res = self.fetch_in_datastore(lookup, version);
 		// Return result
 		Ok(res)
+	}
+
+	/// Fetch multiple keys from the database
+	pub fn getm<K>(&self, keys: Vec<K>) -> Result<Vec<Option<Bytes>>, Error>
+	where
+		K: IntoBytes,
+	{
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Prepare result vector with the same capacity
+		let mut results = Vec::with_capacity(keys.len());
+		// Check the transaction type
+		match self.write {
+			// This is a writeable transaction
+			true => {
+				for key in keys {
+					// Get the key reference
+					let lookup = key.as_slice();
+					// Check the writeset first
+					let res = match self.writeset.get(lookup) {
+						// The key exists in the writeset
+						Some(v) => v.clone(),
+						// Check for the key in the tree
+						None => {
+							// Fetch for the key from the datastore
+							let res = self.fetch_in_datastore(lookup, self.version);
+							// Check whether we should track key reads
+							if self.mode >= IsolationLevel::SerializableSnapshotIsolation
+								&& !self.readset.pin().contains(lookup)
+							{
+								self.readset.pin().insert(key.into_bytes());
+							}
+							// Return the result
+							res
+						}
+					};
+					results.push(res);
+				}
+			}
+			// This is a readonly transaction
+			false => {
+				for key in keys {
+					// Get the key reference
+					let lookup = key.as_slice();
+					// Fetch from datastore
+					let res = self.fetch_in_datastore(lookup, self.version);
+					results.push(res);
+				}
+			}
+		}
+		// Return results
+		Ok(results)
+	}
+
+	/// Fetch multiple keys from the database at a specific version
+	pub fn getm_at_version<K>(
+		&self,
+		keys: Vec<K>,
+		version: u64,
+	) -> Result<Vec<Option<Bytes>>, Error>
+	where
+		K: IntoBytes,
+	{
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Check the specified key version
+		if self.version <= version {
+			return Err(Error::VersionInFuture);
+		}
+		// Prepare result vector with the same capacity
+		let mut results = Vec::with_capacity(keys.len());
+		// Fetch all keys at the specified version
+		for key in keys {
+			// Get the key reference
+			let lookup = key.as_slice();
+			// Get the key at the specified version
+			let res = self.fetch_in_datastore(lookup, version);
+			results.push(res);
+		}
+		// Return results
+		Ok(results)
 	}
 
 	/// Insert or update a key in the database
@@ -3759,6 +3864,316 @@ mod tests {
 			assert_eq!(tx.get("complex").unwrap().as_deref(), Some(b"v4" as &[u8]));
 
 			tx.cancel().unwrap();
+		}
+	}
+
+	#[test]
+	fn test_getm_basic() {
+		let db = Database::new();
+		// Set up some initial data
+		let mut tx = db.transaction(true);
+		tx.set("key1", "value1").unwrap();
+		tx.set("key2", "value2").unwrap();
+		tx.set("key3", "value3").unwrap();
+		tx.commit().unwrap();
+
+		// Test getm with all existing keys
+		let tx = db.transaction(false);
+		let keys = vec!["key1", "key2", "key3"];
+		let results = tx.getm(keys).unwrap();
+		assert_eq!(results.len(), 3);
+		assert_eq!(results[0].as_deref(), Some(b"value1" as &[u8]));
+		assert_eq!(results[1].as_deref(), Some(b"value2" as &[u8]));
+		assert_eq!(results[2].as_deref(), Some(b"value3" as &[u8]));
+	}
+
+	#[test]
+	fn test_getm_with_missing_keys() {
+		let db = Database::new();
+		// Set up some initial data
+		let mut tx = db.transaction(true);
+		tx.set("key1", "value1").unwrap();
+		tx.set("key3", "value3").unwrap();
+		tx.commit().unwrap();
+
+		// Test getm with some missing keys
+		let tx = db.transaction(false);
+		let keys = vec!["key1", "key2", "key3", "key4"];
+		let results = tx.getm(keys).unwrap();
+		assert_eq!(results.len(), 4);
+		assert_eq!(results[0].as_deref(), Some(b"value1" as &[u8]));
+		assert_eq!(results[1], None); // key2 doesn't exist
+		assert_eq!(results[2].as_deref(), Some(b"value3" as &[u8]));
+		assert_eq!(results[3], None); // key4 doesn't exist
+	}
+
+	#[test]
+	fn test_getm_empty_vector() {
+		let db = Database::new();
+		let tx = db.transaction(false);
+		let keys: Vec<&str> = vec![];
+		let results = tx.getm(keys).unwrap();
+		assert_eq!(results.len(), 0);
+	}
+
+	#[test]
+	fn test_getm_with_writeset() {
+		let db = Database::new();
+		// Set up some initial data
+		let mut tx = db.transaction(true);
+		tx.set("key1", "value1").unwrap();
+		tx.set("key2", "value2").unwrap();
+		tx.commit().unwrap();
+
+		// Test getm with writeset modifications
+		let mut tx = db.transaction(true);
+		tx.set("key2", "updated2").unwrap(); // Update existing
+		tx.set("key3", "value3").unwrap(); // New key
+		tx.del("key1").unwrap(); // Delete existing
+
+		let keys = vec!["key1", "key2", "key3", "key4"];
+		let results = tx.getm(keys).unwrap();
+		assert_eq!(results.len(), 4);
+		assert_eq!(results[0], None); // key1 was deleted
+		assert_eq!(results[1].as_deref(), Some(b"updated2" as &[u8])); // key2 was updated
+		assert_eq!(results[2].as_deref(), Some(b"value3" as &[u8])); // key3 is new
+		assert_eq!(results[3], None); // key4 doesn't exist
+	}
+
+	#[test]
+	fn test_getm_maintains_order() {
+		let db = Database::new();
+		let mut tx = db.transaction(true);
+		tx.set("a", "1").unwrap();
+		tx.set("b", "2").unwrap();
+		tx.set("c", "3").unwrap();
+		tx.commit().unwrap();
+
+		// Test that results maintain the order of input keys
+		let tx = db.transaction(false);
+		let keys = vec!["c", "a", "b"];
+		let results = tx.getm(keys).unwrap();
+		assert_eq!(results[0].as_deref(), Some(b"3" as &[u8])); // c
+		assert_eq!(results[1].as_deref(), Some(b"1" as &[u8])); // a
+		assert_eq!(results[2].as_deref(), Some(b"2" as &[u8])); // b
+	}
+
+	#[test]
+	fn test_getm_duplicate_keys() {
+		let db = Database::new();
+		let mut tx = db.transaction(true);
+		tx.set("key1", "value1").unwrap();
+		tx.commit().unwrap();
+
+		// Test with duplicate keys in input
+		let tx = db.transaction(false);
+		let keys = vec!["key1", "key1", "key1"];
+		let results = tx.getm(keys).unwrap();
+		assert_eq!(results.len(), 3);
+		assert_eq!(results[0].as_deref(), Some(b"value1" as &[u8]));
+		assert_eq!(results[1].as_deref(), Some(b"value1" as &[u8]));
+		assert_eq!(results[2].as_deref(), Some(b"value1" as &[u8]));
+	}
+
+	#[test]
+	fn test_getm_closed_transaction() {
+		let db = Database::new();
+		let mut tx = db.transaction(false);
+		tx.cancel().unwrap();
+
+		let keys = vec!["key1"];
+		let result = tx.getm(keys);
+		assert!(matches!(result, Err(Error::TxClosed)));
+	}
+
+	#[test]
+	fn test_getm_ssi_read_tracking() {
+		let db = Database::new();
+
+		// Test that getm tracks reads for SSI
+		let mut tx1 = db.transaction(true).with_serializable_snapshot_isolation();
+		let mut tx2 = db.transaction(true).with_serializable_snapshot_isolation();
+
+		// tx1 reads keys using getm (both don't exist yet)
+		let keys = vec!["key1", "key2"];
+		let results = tx1.getm(keys).unwrap();
+		assert_eq!(results[0], None);
+		assert_eq!(results[1], None);
+
+		// tx1 writes to one of the keys it read
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+
+		// tx2 reads the same key (sees None due to snapshot isolation)
+		assert!(tx2.get("key1").unwrap().is_none());
+		// tx2 writes to a different key
+		tx2.set("key2", "value2").unwrap();
+		// tx2 should fail to commit due to read-write conflict on key1
+		assert!(tx2.commit().is_err());
+	}
+
+	#[test]
+	fn test_getm_at_version_basic() {
+		let db = Database::new();
+
+		// Version 1: Set initial values
+		let mut tx = db.transaction(true);
+		tx.set("key1", "v1_value1").unwrap();
+		tx.set("key2", "v1_value2").unwrap();
+		tx.commit().unwrap();
+		let version1 = db.oracle.current_timestamp();
+
+		// Wait to ensure different timestamps
+		thread::sleep(std::time::Duration::from_millis(1));
+
+		// Version 2: Update values
+		let mut tx = db.transaction(true);
+		tx.set("key1", "v2_value1").unwrap();
+		tx.set("key2", "v2_value2").unwrap();
+		tx.set("key3", "v2_value3").unwrap();
+		tx.commit().unwrap();
+
+		// Read at version 1
+		let tx = db.transaction(false);
+		let keys = vec!["key1", "key2", "key3"];
+		let results = tx.getm_at_version(keys, version1).unwrap();
+		assert_eq!(results.len(), 3);
+		assert_eq!(results[0].as_deref(), Some(b"v1_value1" as &[u8]));
+		assert_eq!(results[1].as_deref(), Some(b"v1_value2" as &[u8]));
+		assert_eq!(results[2], None); // key3 didn't exist at version1
+	}
+
+	#[test]
+	fn test_getm_at_version_with_deletes() {
+		let db = Database::new();
+
+		// Version 1: Set values
+		let mut tx = db.transaction(true);
+		tx.set("key1", "value1").unwrap();
+		tx.set("key2", "value2").unwrap();
+		tx.commit().unwrap();
+		let version1 = db.oracle.current_timestamp();
+
+		// Wait to ensure different timestamps
+		thread::sleep(std::time::Duration::from_millis(1));
+
+		// Version 2: Delete key1
+		let mut tx = db.transaction(true);
+		tx.del("key1").unwrap();
+		tx.commit().unwrap();
+
+		// Read at version 1 (before delete)
+		let tx = db.transaction(false);
+		let keys = vec!["key1", "key2"];
+		let results = tx.getm_at_version(keys.clone(), version1).unwrap();
+		assert_eq!(results[0].as_deref(), Some(b"value1" as &[u8]));
+		assert_eq!(results[1].as_deref(), Some(b"value2" as &[u8]));
+
+		// Read at current version (after delete)
+		let results = tx.getm(keys).unwrap();
+		assert_eq!(results[0], None); // key1 is deleted
+		assert_eq!(results[1].as_deref(), Some(b"value2" as &[u8]));
+	}
+
+	#[test]
+	fn test_getm_at_version_future_version() {
+		let db = Database::new();
+		let tx = db.transaction(false);
+		let future_version = tx.version() + 1000;
+
+		let keys = vec!["key1"];
+		let result = tx.getm_at_version(keys, future_version);
+		assert!(matches!(result, Err(Error::VersionInFuture)));
+	}
+
+	#[test]
+	fn test_getm_at_version_closed_transaction() {
+		let db = Database::new();
+		let mut tx = db.transaction(false);
+		let version = tx.version();
+		tx.cancel().unwrap();
+
+		let keys = vec!["key1"];
+		let result = tx.getm_at_version(keys, version);
+		assert!(matches!(result, Err(Error::TxClosed)));
+	}
+
+	#[test]
+	fn test_getm_at_version_multiple_versions() {
+		let db = Database::new();
+
+		// Create multiple versions
+		let mut tx = db.transaction(true);
+		tx.set("key", "v1").unwrap();
+		tx.commit().unwrap();
+		let version1 = db.oracle.current_timestamp();
+
+		// Wait to ensure different timestamps
+		thread::sleep(std::time::Duration::from_millis(1));
+
+		let mut tx = db.transaction(true);
+		tx.set("key", "v2").unwrap();
+		tx.commit().unwrap();
+		let version2 = db.oracle.current_timestamp();
+
+		// Wait to ensure different timestamps
+		thread::sleep(std::time::Duration::from_millis(1));
+
+		let mut tx = db.transaction(true);
+		tx.set("key", "v3").unwrap();
+		tx.commit().unwrap();
+
+		// Test reading at different versions
+		let tx = db.transaction(false);
+		let keys = vec!["key"];
+
+		let results = tx.getm_at_version(keys.clone(), version1).unwrap();
+		assert_eq!(results[0].as_deref(), Some(b"v1" as &[u8]));
+
+		let results = tx.getm_at_version(keys.clone(), version2).unwrap();
+		assert_eq!(results[0].as_deref(), Some(b"v2" as &[u8]));
+
+		let results = tx.getm(keys).unwrap();
+		assert_eq!(results[0].as_deref(), Some(b"v3" as &[u8]));
+	}
+
+	#[test]
+	fn test_getm_concurrent_reads() {
+		let db = Arc::new(Database::new());
+
+		// Set up initial data
+		let mut tx = db.transaction(true);
+		for i in 0..100 {
+			tx.set(format!("key{}", i), format!("value{}", i)).unwrap();
+		}
+		tx.commit().unwrap();
+
+		// Spawn multiple threads doing concurrent getm operations
+		let mut handles = vec![];
+		for thread_id in 0..10 {
+			let db_clone = Arc::clone(&db);
+			let handle = thread::spawn(move || {
+				let tx = db_clone.transaction(false);
+				let keys: Vec<String> = (0..100).map(|i| format!("key{}", i)).collect();
+				let results = tx.getm(keys).unwrap();
+
+				// Verify all results
+				for (i, result) in results.iter().enumerate() {
+					assert_eq!(
+						result.as_deref(),
+						Some(format!("value{}", i).as_bytes()),
+						"Thread {} failed at index {}",
+						thread_id,
+						i
+					);
+				}
+			});
+			handles.push(handle);
+		}
+
+		// Wait for all threads to complete
+		for handle in handles {
+			handle.join().unwrap();
 		}
 	}
 }
