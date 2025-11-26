@@ -23,6 +23,7 @@ use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::versions::Versions;
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
@@ -33,7 +34,6 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use arc_swap::ArcSwap;
 
 /// The isolation level of a database transaction
 #[derive(PartialEq, PartialOrd)]
@@ -617,8 +617,9 @@ impl TransactionInner {
 		let readset = self.readset.pin();
 		// Clear the readset
 		readset.clear();
-		// Clone the readset for the savepoint
-		for key in savepoint.readset.iter() {
+		// Clone the readset from the savepoint
+		let savepoint_readset = savepoint.readset.pin();
+		for key in savepoint_readset.iter() {
 			readset.insert(key.clone());
 		}
 		// Restore the scanset to the savepoint
