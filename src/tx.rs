@@ -518,11 +518,10 @@ impl TransactionInner {
 			true => self.writeset = BTreeMap::new(),
 			false => self.writeset.clear(),
 		};
-		// Clear or completely reset the allocated writeset
-		match self.savepoint_stack.len() > threshold {
-			true => self.savepoint_stack = Vec::new(),
-			false => self.savepoint_stack.clear(),
-		};
+		// Clear or completely reset the allocated savepoints
+		if self.savepoint_stack.len() > threshold {
+			self.savepoint_stack = Vec::new();
+		}
 		// Reset the transaction
 		self.done = false;
 		self.write = write;
@@ -611,11 +610,13 @@ impl TransactionInner {
 		}
 		// Pop the most recent savepoint from the stack
 		let savepoint = self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
-		// Restore the readset to the savepoint
-		self.readset.pin().clear();
+		// Pin the readset for access
+		let readset = self.readset.pin();
+		// Clear the readset
+		readset.clear();
 		// Clone the readset for the savepoint
-		for key in savepoint.readset.pin().iter() {
-			self.readset.pin().insert(key.clone());
+		for key in savepoint.readset.iter() {
+			readset.insert(key.clone());
 		}
 		// Restore the scanset to the savepoint
 		self.scanset.clear();
@@ -862,10 +863,11 @@ impl TransactionInner {
 					// Fetch for the key from the datastore
 					let res = self.fetch_in_datastore(lookup, self.version);
 					// Check whether we should track key reads
-					if self.mode >= IsolationLevel::SerializableSnapshotIsolation
-						&& !self.readset.pin().contains(lookup)
-					{
-						self.readset.pin().insert(key.into_bytes());
+					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+						let guard = self.readset.pin();
+						if !guard.contains(lookup) {
+							guard.insert(key.into_bytes());
+						}
 					}
 					// Return the result
 					res
