@@ -14,8 +14,8 @@
 
 //! This module stores the transaction commit and merge queues.
 
-use ahash::AHashSet;
 use bytes::Bytes;
+use papaya::HashSet;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -37,7 +37,9 @@ pub struct Merge {
 
 impl Commit {
 	/// Returns true if self has no elements in common with other
-	pub fn is_disjoint_readset(&self, other: &AHashSet<Bytes>) -> bool {
+	pub fn is_disjoint_readset(&self, other: &HashSet<Bytes>) -> bool {
+		// Pin the readset for access
+		let other = other.pin();
 		// Check if the readset is not empty
 		if !other.is_empty() {
 			// Choose iteration direction based on size to minimize iterations
