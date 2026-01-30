@@ -801,4 +801,349 @@ mod tests {
 		let res = tx.cancel();
 		assert!(res.is_ok());
 	}
+
+	// --------------------------------------------------
+	// Cursor and Iterator Tests
+	// --------------------------------------------------
+
+	#[test]
+	fn cursor_forward_iteration() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let mut cursor = tx.cursor("a".."z").unwrap();
+		cursor.seek_to_first();
+		// Check first entry
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"a");
+		assert_eq!(cursor.value().unwrap().as_ref(), b"1");
+		// Move forward
+		cursor.next();
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"b");
+		// Continue to end
+		cursor.next(); // c
+		cursor.next(); // d
+		cursor.next(); // e
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"e");
+		cursor.next();
+		assert!(!cursor.valid());
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn cursor_reverse_iteration() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let mut cursor = tx.cursor("a".."z").unwrap();
+		cursor.seek_to_last();
+		// Check last entry
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"e");
+		assert_eq!(cursor.value().unwrap().as_ref(), b"5");
+		// Move backward
+		cursor.prev();
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"d");
+		// Continue to beginning
+		cursor.prev(); // c
+		cursor.prev(); // b
+		cursor.prev(); // a
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"a");
+		cursor.prev();
+		assert!(!cursor.valid());
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn cursor_seek_operations() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("e", "5").unwrap();
+		tx.put("g", "7").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let mut cursor = tx.cursor("a".."z").unwrap();
+		// Seek to exact key
+		cursor.seek("c");
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"c");
+		// Seek to non-existent key (should land on next)
+		cursor.seek("d");
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"e");
+		// Seek for prev to exact key
+		cursor.seek_for_prev("e");
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"c");
+		// Seek beyond range
+		cursor.seek("z");
+		assert!(!cursor.valid());
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn cursor_bidirectional_switch() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let mut cursor = tx.cursor("a".."z").unwrap();
+		// Start forward
+		cursor.seek_to_first();
+		assert_eq!(cursor.key().unwrap().as_ref(), b"a");
+		cursor.next();
+		assert_eq!(cursor.key().unwrap().as_ref(), b"b");
+		cursor.next();
+		assert_eq!(cursor.key().unwrap().as_ref(), b"c");
+		// Switch to reverse
+		cursor.prev();
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"b");
+		// Switch back to forward
+		cursor.next();
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"c");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn keys_iterator_forward() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let keys: Vec<_> = tx.keys_iter("b".."e").unwrap().collect();
+		assert_eq!(keys.len(), 3);
+		assert_eq!(keys[0].as_ref(), b"b");
+		assert_eq!(keys[1].as_ref(), b"c");
+		assert_eq!(keys[2].as_ref(), b"d");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn keys_iterator_reverse() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let keys: Vec<_> = tx.keys_iter_reverse("b".."e").unwrap().collect();
+		assert_eq!(keys.len(), 3);
+		assert_eq!(keys[0].as_ref(), b"d");
+		assert_eq!(keys[1].as_ref(), b"c");
+		assert_eq!(keys[2].as_ref(), b"b");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn keys_iterator_with_take() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		tx.put("f", "6").unwrap();
+		tx.put("g", "7").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let keys: Vec<_> = tx.keys_iter("a".."z").unwrap().take(3).collect();
+		assert_eq!(keys.len(), 3);
+		assert_eq!(keys[0].as_ref(), b"a");
+		assert_eq!(keys[1].as_ref(), b"b");
+		assert_eq!(keys[2].as_ref(), b"c");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn keys_iterator_with_skip() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let keys: Vec<_> = tx.keys_iter("a".."z").unwrap().skip(2).collect();
+		assert_eq!(keys.len(), 3);
+		assert_eq!(keys[0].as_ref(), b"c");
+		assert_eq!(keys[1].as_ref(), b"d");
+		assert_eq!(keys[2].as_ref(), b"e");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn scan_iterator_forward() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let pairs: Vec<_> = tx.scan_iter("a".."z").unwrap().collect();
+		assert_eq!(pairs.len(), 3);
+		assert_eq!(pairs[0].0.as_ref(), b"a");
+		assert_eq!(pairs[0].1.as_ref(), b"1");
+		assert_eq!(pairs[1].0.as_ref(), b"b");
+		assert_eq!(pairs[1].1.as_ref(), b"2");
+		assert_eq!(pairs[2].0.as_ref(), b"c");
+		assert_eq!(pairs[2].1.as_ref(), b"3");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn scan_iterator_reverse() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let pairs: Vec<_> = tx.scan_iter_reverse("a".."z").unwrap().collect();
+		assert_eq!(pairs.len(), 3);
+		assert_eq!(pairs[0].0.as_ref(), b"c");
+		assert_eq!(pairs[0].1.as_ref(), b"3");
+		assert_eq!(pairs[1].0.as_ref(), b"b");
+		assert_eq!(pairs[1].1.as_ref(), b"2");
+		assert_eq!(pairs[2].0.as_ref(), b"a");
+		assert_eq!(pairs[2].1.as_ref(), b"1");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn scan_iterator_with_take() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let pairs: Vec<_> = tx.scan_iter("a".."z").unwrap().take(2).collect();
+		assert_eq!(pairs.len(), 2);
+		assert_eq!(pairs[0].0.as_ref(), b"a");
+		assert_eq!(pairs[1].0.as_ref(), b"b");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn iterator_sees_uncommitted_writes() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		// Before commit, iterator should see uncommitted writes
+		let keys: Vec<_> = tx.keys_iter("a".."z").unwrap().collect();
+		assert_eq!(keys.len(), 2);
+		assert_eq!(keys[0].as_ref(), b"a");
+		assert_eq!(keys[1].as_ref(), b"b");
+		let res = tx.commit();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn cursor_handles_deleted_entries() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.del("b").unwrap();
+		// Iterator should skip deleted entry
+		let keys: Vec<_> = tx.keys_iter("a".."z").unwrap().collect();
+		assert_eq!(keys.len(), 2);
+		assert_eq!(keys[0].as_ref(), b"a");
+		assert_eq!(keys[1].as_ref(), b"c");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
 }
