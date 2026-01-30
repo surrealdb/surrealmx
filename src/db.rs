@@ -229,9 +229,27 @@ impl Database {
 
 	/// Shutdown the datastore, waiting for background threads to exit
 	fn shutdown(&self) {
-		// Disable background workers
+		// First, disable Persistence background workers if present
+		if let Some(ref persistence) = self.persistence {
+			// Disable the persistence background workers
+			persistence.background_threads_enabled.store(false, Ordering::Release);
+			// Wait for persistence threads to exit
+			if let Some(handle) = persistence.fsync_handle.write().take() {
+				handle.thread().unpark();
+				let _ = handle.join();
+			}
+			if let Some(handle) = persistence.snapshot_handle.write().take() {
+				handle.thread().unpark();
+				let _ = handle.join();
+			}
+			if let Some(handle) = persistence.appender_handle.write().take() {
+				handle.thread().unpark();
+				let _ = handle.join();
+			}
+		}
+		// Then disable Database background workers
 		self.background_threads_enabled.store(false, Ordering::Relaxed);
-		// Wait for the garbage collector thread to exit
+		// Wait for the transaction cleanup thread to exit
 		if let Some(handle) = self.transaction_cleanup_handle.write().take() {
 			handle.thread().unpark();
 			let _ = handle.join();
