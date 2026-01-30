@@ -15,6 +15,7 @@
 #![allow(clippy::bool_comparison)]
 
 mod compression;
+mod cursor;
 mod db;
 mod direction;
 mod err;
@@ -36,7 +37,11 @@ pub use bytes::Bytes;
 #[doc(inline)]
 pub use self::compression::*;
 #[doc(inline)]
+pub use self::cursor::*;
+#[doc(inline)]
 pub use self::db::*;
+#[doc(inline)]
+pub use self::direction::*;
 #[doc(inline)]
 pub use self::err::*;
 #[doc(inline)]

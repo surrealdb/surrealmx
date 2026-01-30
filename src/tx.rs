@@ -14,6 +14,7 @@
 
 //! This module stores the database transaction logic.
 
+use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
 use crate::inner::Inner;
@@ -366,6 +367,143 @@ impl Transaction {
 		K: IntoBytes,
 	{
 		self.inner.as_ref().unwrap().scan_all_versions(rng, skip, limit)
+	}
+
+	// --------------------------------------------------
+	// Cursor and Iterator API
+	// --------------------------------------------------
+
+	/// Create a cursor over a range of keys.
+	///
+	/// The cursor provides low-level bidirectional iteration with seek support.
+	/// Use this when you need fine-grained control over iteration direction
+	/// and position.
+	///
+	/// # Example
+	///
+	/// ```ignore
+	/// let mut cursor = tx.cursor("a".."z")?;
+	/// cursor.seek_to_first();
+	/// while cursor.valid() {
+	///     println!("Key: {:?}", cursor.key());
+	///     cursor.next();
+	/// }
+	/// ```
+	pub fn cursor<K>(&self, rng: Range<K>) -> Result<Cursor<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().cursor(rng)
+	}
+
+	/// Create a cursor over a range of keys at a specific version.
+	pub fn cursor_at_version<K>(&self, rng: Range<K>, version: u64) -> Result<Cursor<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().cursor_at_version(rng, version)
+	}
+
+	/// Iterate over keys in a range.
+	///
+	/// Returns an iterator that yields keys in forward order.
+	/// Use `.take(n)` to limit results and `.skip(n)` to skip entries.
+	///
+	/// # Example
+	///
+	/// ```ignore
+	/// for key in tx.keys_iter("a".."z")?.take(10) {
+	///     println!("Key: {:?}", key);
+	/// }
+	/// ```
+	pub fn keys_iter<K>(&self, rng: Range<K>) -> Result<KeyIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().keys_iter(rng)
+	}
+
+	/// Iterate over keys in a range, in reverse order.
+	pub fn keys_iter_reverse<K>(&self, rng: Range<K>) -> Result<KeyIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().keys_iter_reverse(rng)
+	}
+
+	/// Iterate over keys in a range at a specific version.
+	pub fn keys_iter_at_version<K>(
+		&self,
+		rng: Range<K>,
+		version: u64,
+	) -> Result<KeyIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().keys_iter_at_version(rng, version)
+	}
+
+	/// Iterate over keys in a range at a specific version, in reverse order.
+	pub fn keys_iter_at_version_reverse<K>(
+		&self,
+		rng: Range<K>,
+		version: u64,
+	) -> Result<KeyIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().keys_iter_at_version_reverse(rng, version)
+	}
+
+	/// Iterate over key-value pairs in a range.
+	///
+	/// Returns an iterator that yields (key, value) pairs in forward order.
+	/// Use `.take(n)` to limit results and `.skip(n)` to skip entries.
+	///
+	/// # Example
+	///
+	/// ```ignore
+	/// for (key, value) in tx.scan_iter("a".."z")?.take(10) {
+	///     println!("Key: {:?}, Value: {:?}", key, value);
+	/// }
+	/// ```
+	pub fn scan_iter<K>(&self, rng: Range<K>) -> Result<ScanIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().scan_iter(rng)
+	}
+
+	/// Iterate over key-value pairs in a range, in reverse order.
+	pub fn scan_iter_reverse<K>(&self, rng: Range<K>) -> Result<ScanIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().scan_iter_reverse(rng)
+	}
+
+	/// Iterate over key-value pairs in a range at a specific version.
+	pub fn scan_iter_at_version<K>(
+		&self,
+		rng: Range<K>,
+		version: u64,
+	) -> Result<ScanIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().scan_iter_at_version(rng, version)
+	}
+
+	/// Iterate over key-value pairs in a range at a specific version, in reverse order.
+	pub fn scan_iter_at_version_reverse<K>(
+		&self,
+		rng: Range<K>,
+		version: u64,
+	) -> Result<ScanIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().scan_iter_at_version_reverse(rng, version)
 	}
 }
 
@@ -1597,6 +1735,133 @@ impl TransactionInner {
 		// Return result
 		Ok(res)
 	}
+
+	// --------------------------------------------------
+	// Cursor and Iterator API
+	// --------------------------------------------------
+
+	/// Create a cursor over a range of keys.
+	pub fn cursor<K>(&self, rng: Range<K>) -> Result<Cursor<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.cursor_at_version(rng, self.version)
+	}
+
+	/// Create a cursor over a range of keys at a specific version.
+	pub fn cursor_at_version<K>(&self, rng: Range<K>, version: u64) -> Result<Cursor<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Compute the range
+		let beg = rng.start.into_bytes();
+		let end = rng.end.into_bytes();
+		// Check whether we should track range scan reads
+		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			// Track scans if scanning the latest version
+			if version == self.version {
+				self.track_scan_range(&beg, &end);
+			}
+		}
+		// Create and return the cursor
+		Ok(Cursor::new(&self.database, &self.writeset, beg, end, version))
+	}
+
+	/// Iterate over keys in a range.
+	pub fn keys_iter<K>(&self, rng: Range<K>) -> Result<KeyIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		let cursor = self.cursor(rng)?;
+		Ok(KeyIterator::new(cursor))
+	}
+
+	/// Iterate over keys in a range, in reverse order.
+	pub fn keys_iter_reverse<K>(&self, rng: Range<K>) -> Result<KeyIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		let cursor = self.cursor(rng)?;
+		Ok(KeyIterator::new_reverse(cursor))
+	}
+
+	/// Iterate over keys in a range at a specific version.
+	pub fn keys_iter_at_version<K>(
+		&self,
+		rng: Range<K>,
+		version: u64,
+	) -> Result<KeyIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		let cursor = self.cursor_at_version(rng, version)?;
+		Ok(KeyIterator::new(cursor))
+	}
+
+	/// Iterate over keys in a range at a specific version, in reverse order.
+	pub fn keys_iter_at_version_reverse<K>(
+		&self,
+		rng: Range<K>,
+		version: u64,
+	) -> Result<KeyIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		let cursor = self.cursor_at_version(rng, version)?;
+		Ok(KeyIterator::new_reverse(cursor))
+	}
+
+	/// Iterate over key-value pairs in a range.
+	pub fn scan_iter<K>(&self, rng: Range<K>) -> Result<ScanIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		let cursor = self.cursor(rng)?;
+		Ok(ScanIterator::new(cursor))
+	}
+
+	/// Iterate over key-value pairs in a range, in reverse order.
+	pub fn scan_iter_reverse<K>(&self, rng: Range<K>) -> Result<ScanIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		let cursor = self.cursor(rng)?;
+		Ok(ScanIterator::new_reverse(cursor))
+	}
+
+	/// Iterate over key-value pairs in a range at a specific version.
+	pub fn scan_iter_at_version<K>(
+		&self,
+		rng: Range<K>,
+		version: u64,
+	) -> Result<ScanIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		let cursor = self.cursor_at_version(rng, version)?;
+		Ok(ScanIterator::new(cursor))
+	}
+
+	/// Iterate over key-value pairs in a range at a specific version, in reverse order.
+	pub fn scan_iter_at_version_reverse<K>(
+		&self,
+		rng: Range<K>,
+		version: u64,
+	) -> Result<ScanIterator<'_>, Error>
+	where
+		K: IntoBytes,
+	{
+		let cursor = self.cursor_at_version(rng, version)?;
+		Ok(ScanIterator::new_reverse(cursor))
+	}
+
+	// --------------------------------------------------
+	// Datastore helpers
+	// --------------------------------------------------
 
 	/// Fetch a key if it exists in the datastore only
 	#[inline(always)]
