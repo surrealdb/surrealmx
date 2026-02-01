@@ -114,7 +114,7 @@ fn main() -> std::io::Result<()> {
     let db = Database::new_with_persistence(db_opts, persistence_opts)?;
     
     let mut tx = db.transaction(true);
-    tx.put("key".to_string(), "value".to_string())?;
+    tx.put("key", "value")?;
     tx.commit()?; // Changes immediately written to AOL
     
     Ok(())
@@ -138,7 +138,7 @@ fn main() -> std::io::Result<()> {
     let db = Database::new_with_persistence(db_opts, persistence_opts)?;
     
     let mut tx = db.transaction(true);
-    tx.put("key".to_string(), "value".to_string())?;
+    tx.put("key", "value")?;
     tx.commit()?; // Changes only persisted during snapshots
     
     Ok(())
@@ -182,7 +182,7 @@ fn main() -> std::io::Result<()> {
     let db = Database::new_with_persistence(db_opts, persistence_opts)?;
     
     let mut tx = db.transaction(true);
-    tx.put("key".to_string(), "value".to_string())?;
+    tx.put("key", "value")?;
     tx.commit()?; // Changes written asynchronously to AOL, fsync'd every second
     
     Ok(())
