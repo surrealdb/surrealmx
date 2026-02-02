@@ -133,11 +133,7 @@ fn max_byte_key() {
 
 	// Verify retrieval
 	let tx = db.transaction(false);
-	assert_eq!(
-		tx.get(&key_all_ff).unwrap(),
-		Some(Bytes::from("all_ff")),
-		"All 0xFF key"
-	);
+	assert_eq!(tx.get(&key_all_ff).unwrap(), Some(Bytes::from("all_ff")), "All 0xFF key");
 	assert_eq!(tx.get(&key_mixed).unwrap(), Some(Bytes::from("mixed")), "Mixed byte key");
 	assert_eq!(tx.get(&key_high).unwrap(), Some(Bytes::from("high")), "High byte key");
 }
@@ -180,13 +176,13 @@ fn unicode_keys() {
 	let mut tx = db.transaction(true);
 	// Various Unicode strings as keys
 	let keys = [
-		"hello",           // ASCII
-		"héllo",           // Latin extended
-		"こんにちは",      // Japanese
-		"🎉🎊",            // Emoji
-		"مرحبا",           // Arabic
-		"שלום",            // Hebrew
-		"中文",            // Chinese
+		"hello",      // ASCII
+		"héllo",      // Latin extended
+		"こんにちは", // Japanese
+		"🎉🎊",       // Emoji
+		"مرحبا",      // Arabic
+		"שלום",       // Hebrew
+		"中文",       // Chinese
 	];
 
 	for (i, key) in keys.iter().enumerate() {
@@ -198,12 +194,7 @@ fn unicode_keys() {
 	let tx = db.transaction(false);
 	for (i, key) in keys.iter().enumerate() {
 		let expected = format!("value_{}", i);
-		assert_eq!(
-			tx.get(*key).unwrap(),
-			Some(Bytes::from(expected)),
-			"Unicode key: {}",
-			key
-		);
+		assert_eq!(tx.get(*key).unwrap(), Some(Bytes::from(expected)), "Unicode key: {}", key);
 	}
 
 	// Verify we can retrieve all keys using a wide scan
@@ -279,9 +270,8 @@ fn key_prefix_edge_cases() {
 	// Scan for exact prefix match range
 	let prefix_start = b"prefix";
 	let prefix_end = b"prefix\xFF";
-	let prefix_results = tx
-		.scan(prefix_start.as_slice()..prefix_end.as_slice(), None, None)
-		.unwrap();
+	let prefix_results =
+		tx.scan(prefix_start.as_slice()..prefix_end.as_slice(), None, None).unwrap();
 	// Should include "prefix", "prefix_extended", "prefix_more" but NOT "pre"
 	assert!(prefix_results.len() >= 3, "Should have at least 3 prefix matches");
 
@@ -296,8 +286,6 @@ fn key_prefix_edge_cases() {
 	// Scan for shorter prefix
 	let pre_start = b"pre";
 	let pre_end = b"pre\xFF";
-	let pre_results = tx
-		.scan(pre_start.as_slice()..pre_end.as_slice(), None, None)
-		.unwrap();
+	let pre_results = tx.scan(pre_start.as_slice()..pre_end.as_slice(), None, None).unwrap();
 	assert!(pre_results.len() >= 4, "Should have at least 4 'pre' prefix matches");
 }

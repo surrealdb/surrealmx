@@ -399,11 +399,7 @@ fn savepoint_stress_many_savepoints() {
 
 	// First half should still exist
 	for i in 0..(num_savepoints / 2) {
-		assert!(
-			tx.get(format!("key_{}", i)).unwrap().is_some(),
-			"key_{} should exist",
-			i
-		);
+		assert!(tx.get(format!("key_{}", i)).unwrap().is_some(), "key_{} should exist", i);
 	}
 
 	// Second half should not exist

@@ -229,10 +229,6 @@ fn concurrent_iteration_same_range() {
 
 	// All threads should see the same count
 	for (thread_id, count) in &results {
-		assert_eq!(
-			*count, 20,
-			"Thread {} should see all 20 items, got {}",
-			thread_id, count
-		);
+		assert_eq!(*count, 20, "Thread {} should see all 20 items, got {}", thread_id, count);
 	}
 }

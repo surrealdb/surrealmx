@@ -63,10 +63,7 @@ fn double_commit_fails() {
 	tx.set("key", "value").unwrap();
 
 	assert!(tx.commit().is_ok(), "First commit should succeed");
-	assert!(
-		matches!(tx.commit(), Err(Error::TxClosed)),
-		"Second commit should fail with TxClosed"
-	);
+	assert!(matches!(tx.commit(), Err(Error::TxClosed)), "Second commit should fail with TxClosed");
 }
 
 #[test]
@@ -77,10 +74,7 @@ fn double_cancel_fails() {
 	tx.set("key", "value").unwrap();
 
 	assert!(tx.cancel().is_ok(), "First cancel should succeed");
-	assert!(
-		matches!(tx.cancel(), Err(Error::TxClosed)),
-		"Second cancel should fail with TxClosed"
-	);
+	assert!(matches!(tx.cancel(), Err(Error::TxClosed)), "Second cancel should fail with TxClosed");
 }
 
 #[test]
@@ -91,10 +85,7 @@ fn commit_after_cancel_fails() {
 	tx.set("key", "value").unwrap();
 	tx.cancel().unwrap();
 
-	assert!(
-		matches!(tx.commit(), Err(Error::TxClosed)),
-		"Commit after cancel should fail"
-	);
+	assert!(matches!(tx.commit(), Err(Error::TxClosed)), "Commit after cancel should fail");
 }
 
 #[test]
@@ -105,10 +96,7 @@ fn cancel_after_commit_fails() {
 	tx.set("key", "value").unwrap();
 	tx.commit().unwrap();
 
-	assert!(
-		matches!(tx.cancel(), Err(Error::TxClosed)),
-		"Cancel after commit should fail"
-	);
+	assert!(matches!(tx.cancel(), Err(Error::TxClosed)), "Cancel after commit should fail");
 }
 
 // =============================================================================
@@ -174,10 +162,7 @@ fn put_existing_key_fails() {
 	// Try to put (insert) same key
 	let mut tx = db.transaction(true);
 	let result = tx.put("key", "new_value");
-	assert!(
-		matches!(result, Err(Error::KeyAlreadyExists)),
-		"put existing key should fail"
-	);
+	assert!(matches!(result, Err(Error::KeyAlreadyExists)), "put existing key should fail");
 	tx.cancel().unwrap();
 }
 
@@ -189,10 +174,7 @@ fn put_key_in_same_transaction_fails() {
 	tx.set("key", "first").unwrap();
 
 	let result = tx.put("key", "second");
-	assert!(
-		matches!(result, Err(Error::KeyAlreadyExists)),
-		"put after set in same tx should fail"
-	);
+	assert!(matches!(result, Err(Error::KeyAlreadyExists)), "put after set in same tx should fail");
 	tx.cancel().unwrap();
 }
 
@@ -212,10 +194,7 @@ fn putc_wrong_check_value_fails() {
 	// Try putc with wrong check
 	let mut tx = db.transaction(true);
 	let result = tx.putc("key", "new_value", Some("wrong_check"));
-	assert!(
-		matches!(result, Err(Error::ValNotExpectedValue)),
-		"putc with wrong check should fail"
-	);
+	assert!(matches!(result, Err(Error::ValNotExpectedValue)), "putc with wrong check should fail");
 	tx.cancel().unwrap();
 }
 
@@ -231,10 +210,7 @@ fn delc_wrong_check_value_fails() {
 	// Try delc with wrong check
 	let mut tx = db.transaction(true);
 	let result = tx.delc("key", Some("wrong_check"));
-	assert!(
-		matches!(result, Err(Error::ValNotExpectedValue)),
-		"delc with wrong check should fail"
-	);
+	assert!(matches!(result, Err(Error::ValNotExpectedValue)), "delc with wrong check should fail");
 	tx.cancel().unwrap();
 }
 
@@ -288,10 +264,7 @@ fn rollback_without_savepoint_fails() {
 	tx.set("key", "value").unwrap();
 
 	let result = tx.rollback_to_savepoint();
-	assert!(
-		matches!(result, Err(Error::NoSavepoint)),
-		"rollback without savepoint should fail"
-	);
+	assert!(matches!(result, Err(Error::NoSavepoint)), "rollback without savepoint should fail");
 	tx.cancel().unwrap();
 }
 
@@ -310,10 +283,7 @@ fn rollback_after_all_savepoints_consumed_fails() {
 
 	// Second rollback should fail
 	let result = tx.rollback_to_savepoint();
-	assert!(
-		matches!(result, Err(Error::NoSavepoint)),
-		"second rollback should fail"
-	);
+	assert!(matches!(result, Err(Error::NoSavepoint)), "second rollback should fail");
 	tx.cancel().unwrap();
 }
 
@@ -365,10 +335,7 @@ fn read_conflict_error_ssi() {
 	tx1.set("other", "data").unwrap();
 	let result = tx1.commit();
 
-	assert!(
-		matches!(result, Err(Error::KeyReadConflict)),
-		"SSI should detect read conflict"
-	);
+	assert!(matches!(result, Err(Error::KeyReadConflict)), "SSI should detect read conflict");
 }
 
 // =============================================================================
@@ -392,10 +359,7 @@ fn get_at_future_version_fails() {
 	let future_version = current_version + 1_000_000_000; // Way in the future
 
 	let result = tx.get_at_version("key", future_version);
-	assert!(
-		matches!(result, Err(Error::VersionInFuture)),
-		"reading future version should fail"
-	);
+	assert!(matches!(result, Err(Error::VersionInFuture)), "reading future version should fail");
 }
 
 #[test]
@@ -410,10 +374,7 @@ fn exists_at_future_version_fails() {
 	let future_version = tx.version() + 1_000_000_000;
 
 	let result = tx.exists_at_version("key", future_version);
-	assert!(
-		matches!(result, Err(Error::VersionInFuture)),
-		"exists at future version should fail"
-	);
+	assert!(matches!(result, Err(Error::VersionInFuture)), "exists at future version should fail");
 }
 
 // =============================================================================

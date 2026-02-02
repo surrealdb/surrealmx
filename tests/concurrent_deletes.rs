@@ -109,10 +109,7 @@ fn delete_racing_with_update() {
 	let update_result = update_handle.join().unwrap();
 
 	// One should succeed, one should fail (or both might succeed in rare timing)
-	let successes = [&delete_result, &update_result]
-		.iter()
-		.filter(|r| r.is_ok())
-		.count();
+	let successes = [&delete_result, &update_result].iter().filter(|r| r.is_ok()).count();
 	assert!(successes >= 1, "At least one operation should succeed");
 
 	// Verify final state is consistent
@@ -273,7 +270,7 @@ fn delete_then_recreate_concurrent() {
 	assert!(value.is_some(), "Key should exist after recreation");
 	let value_bytes = value.unwrap();
 	assert!(
-		value_bytes == Bytes::from("recreated_by_1") || value_bytes == Bytes::from("recreated_by_2"),
+		value_bytes == "recreated_by_1" || value_bytes == "recreated_by_2",
 		"Key should have one of the recreated values"
 	);
 }
@@ -304,10 +301,7 @@ fn ssi_delete_read_conflict() {
 	let commit_result = tx1.commit();
 
 	// With SSI, tx1 should fail because it read a key that was deleted
-	assert!(
-		commit_result.is_err(),
-		"tx1 should fail due to read-write conflict (key was deleted)"
-	);
+	assert!(commit_result.is_err(), "tx1 should fail due to read-write conflict (key was deleted)");
 
 	// Verify key is deleted
 	let tx = db.transaction(false);

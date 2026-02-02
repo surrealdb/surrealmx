@@ -213,11 +213,7 @@ fn concurrent_range_scans() {
 
 	// All scanners should see the same count (consistent snapshot)
 	for (scanner_id, count) in &results {
-		assert_eq!(
-			*count, 20,
-			"Scanner {} should see all 20 keys, got {}",
-			scanner_id, count
-		);
+		assert_eq!(*count, 20, "Scanner {} should see all 20 keys, got {}", scanner_id, count);
 	}
 }
 
@@ -323,10 +319,7 @@ fn range_scan_consistency() {
 	assert_eq!(new_scan.len(), 10, "New transaction should see modified state");
 
 	// Verify specific changes
-	assert!(
-		new_tx.get("data_03").unwrap().is_none(),
-		"Deleted key should not exist"
-	);
+	assert!(new_tx.get("data_03").unwrap().is_none(), "Deleted key should not exist");
 	assert_eq!(
 		new_tx.get("data_05").unwrap(),
 		Some(Bytes::from("modified")),

@@ -71,13 +71,7 @@ fn large_value_handling() {
 	for (i, expected_size) in sizes.iter().enumerate() {
 		let key = format!("large_key_{}", i);
 		let value = tx.get(&key).unwrap().expect("Value should exist");
-		assert_eq!(
-			value.len(),
-			*expected_size,
-			"Value {} should be {} bytes",
-			i,
-			expected_size
-		);
+		assert_eq!(value.len(), *expected_size, "Value {} should be {} bytes", i, expected_size);
 		// Verify content
 		assert!(value.iter().all(|&b| b == b'x'), "All bytes should be 'x'");
 	}
@@ -170,12 +164,7 @@ fn memory_under_write_pressure() {
 	// Verify final state
 	let tx = db.transaction(false);
 	let results = tx.scan("pressure_key_".."pressure_key_z", None, None).unwrap();
-	assert_eq!(
-		results.len(),
-		keys_per_iteration,
-		"Should have {} unique keys",
-		keys_per_iteration
-	);
+	assert_eq!(results.len(), keys_per_iteration, "Should have {} unique keys", keys_per_iteration);
 
 	// Verify values have the content from the last iteration
 	let expected_byte = ((iterations - 1) % 256) as u8;

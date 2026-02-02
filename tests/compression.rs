@@ -59,15 +59,8 @@ fn lz4_snapshot_round_trip() {
 
 	let snapshot_bytes = std::fs::read(&snapshot_path).unwrap();
 	// LZ4 magic number: 0x04 0x22 0x4D 0x18 (little endian)
-	assert!(
-		snapshot_bytes.len() >= 4,
-		"Snapshot should have at least 4 bytes for magic number"
-	);
-	assert_eq!(
-		&snapshot_bytes[0..4],
-		&[0x04, 0x22, 0x4D, 0x18],
-		"Should have LZ4 magic bytes"
-	);
+	assert!(snapshot_bytes.len() >= 4, "Snapshot should have at least 4 bytes for magic number");
+	assert_eq!(&snapshot_bytes[0..4], &[0x04, 0x22, 0x4D, 0x18], "Should have LZ4 magic bytes");
 
 	// Recover and verify data
 	{
@@ -206,9 +199,7 @@ fn lz4_compression_with_random_data() {
 		.with_compression(CompressionMode::Lz4);
 
 	// Less compressible data (pseudo-random using a simple pattern)
-	let random_value: Vec<u8> = (0..1000)
-		.map(|i| ((i * 17 + 31) % 256) as u8)
-		.collect();
+	let random_value: Vec<u8> = (0..1000).map(|i| ((i * 17 + 31) % 256) as u8).collect();
 
 	// Create database
 	{

@@ -213,7 +213,7 @@ fn keys_iterator_double_ended_meets_in_middle() {
 
 	// Continue to collect remaining
 	let remaining: Vec<_> = iter.collect();
-	assert!(remaining.len() >= 1, "Should have remaining elements");
+	assert!(!remaining.is_empty(), "Should have remaining elements");
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn scan_iterator_double_ended() {
 
 	// Collect remaining
 	let remaining: Vec<_> = iter.collect();
-	assert!(remaining.len() >= 1, "Should have remaining elements");
+	assert!(!remaining.is_empty(), "Should have remaining elements");
 }
 
 // =============================================================================

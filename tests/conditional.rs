@@ -47,10 +47,7 @@ fn put_fails_for_existing_key() {
 	// Try to put (should fail)
 	let mut tx = db.transaction(true);
 	let result = tx.put("existing", "new_value");
-	assert!(
-		matches!(result, Err(Error::KeyAlreadyExists)),
-		"put should fail for existing key"
-	);
+	assert!(matches!(result, Err(Error::KeyAlreadyExists)), "put should fail for existing key");
 
 	// Verify original value unchanged
 	assert_eq!(tx.get("existing").unwrap(), Some(Bytes::from("original")));

@@ -18,9 +18,7 @@
 
 use bytes::Bytes;
 use std::time::Duration;
-use surrealmx::{
-	AolMode, Database, DatabaseOptions, FsyncMode, PersistenceOptions, SnapshotMode,
-};
+use surrealmx::{AolMode, Database, DatabaseOptions, FsyncMode, PersistenceOptions, SnapshotMode};
 use tempfile::TempDir;
 
 // =============================================================================
@@ -39,7 +37,8 @@ fn recovery_with_empty_aol() {
 
 	// Create database but don't add any data
 	{
-		let _db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
+		let _db =
+			Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 		// No operations - AOL file might be empty or not exist
 	}
 
@@ -412,10 +411,7 @@ fn custom_aol_and_snapshot_paths() {
 
 	// Verify custom paths used
 	assert!(custom_aol_dir.join("my.aol").exists(), "Custom AOL path should be used");
-	assert!(
-		custom_snap_dir.join("my.snap").exists(),
-		"Custom snapshot path should be used"
-	);
+	assert!(custom_snap_dir.join("my.snap").exists(), "Custom snapshot path should be used");
 
 	// Verify recovery works from custom paths
 	{
