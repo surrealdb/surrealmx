@@ -28,9 +28,7 @@ use arc_swap::ArcSwap;
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
-use parking_lot::RwLock;
 use std::collections::BTreeMap;
-use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -865,22 +863,22 @@ impl TransactionInner {
 		let history = version.saturating_sub(history as u64);
 		// Use the earlier of history or earliest transaction
 		let cleanup_ts = history.min(earliest);
+		// Get a mutable iterator for updates
+		let mut iter = self.database.datastore.raw_iter_mut();
 		// Loop over the updates in the writeset
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
 			// Check if this key already exists
-			if let Some(entry) = self.database.datastore.get(key) {
-				// Get a mutable reference to the versions list
-				let mut versions = entry.value().write();
+			if iter.seek_exact(key) {
+				// We know the key exists, so we can unwrap
+				let (_, versions) = iter.next().unwrap();
 				// Clean up unnecessary older versions
 				let len = versions.gc_older_versions(cleanup_ts);
 				// If no versions remain and the value is none, remove the entry fully
 				if len == 0 && value.is_none() {
-					// Drop the version reference
-					drop(versions);
-					// Remove the entry from the datastore
-					self.database.datastore.remove(key);
+					// Remove the entry we just yielded
+					iter.remove_here();
 				}
 				// If a value is set, add the new version entry
 				else {
@@ -891,12 +889,13 @@ impl TransactionInner {
 					});
 				}
 			} else {
-				self.database.datastore.insert(
+				// Otherwise insert a new entry into the tree
+				iter.insert_here(
 					key.clone(),
-					RwLock::new(Versions::from(Version {
+					Versions::from(Version {
 						version,
 						value,
-					})),
+					}),
 				);
 			}
 		}
@@ -1497,7 +1496,9 @@ impl TransactionInner {
 		}
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			&self.database.datastore,
+			beg,
+			end,
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -1562,7 +1563,9 @@ impl TransactionInner {
 		}
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			&self.database.datastore,
+			beg,
+			end,
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -1627,7 +1630,9 @@ impl TransactionInner {
 		}
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			&self.database.datastore,
+			beg,
+			end,
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -1690,7 +1695,9 @@ impl TransactionInner {
 		}
 		// Create the 3-way merge iterator to iterate over keys
 		let iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(beg), Bound::Excluded(end))),
+			&self.database.datastore,
+			beg,
+			end,
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -1704,9 +1711,8 @@ impl TransactionInner {
 			// Use a BTreeMap to collect and merge versions by version number
 			let mut all_versions: BTreeMap<u64, Option<Bytes>> = BTreeMap::new();
 			// Collect all versions from the datastore
-			if let Some(entry) = self.database.datastore.get(&key) {
-				let versions = entry.value().read();
-				for (ver, val) in versions.all_versions() {
+			if let Some(versions) = self.database.datastore.lookup(&key, |v| v.all_versions()) {
+				for (ver, val) in versions {
 					if ver <= version {
 						all_versions.insert(ver, val);
 					}
@@ -1884,10 +1890,7 @@ impl TransactionInner {
 			}
 		}
 		// Check the key in the datastore
-		self.database.datastore.get(key).and_then(|e| match e.value().try_read() {
-			Some(guard) => guard.fetch_version(version),
-			None => e.value().read().fetch_version(version),
-		})
+		self.database.datastore.lookup(key, |v| v.fetch_version(version)).flatten()
 	}
 
 	/// Check if a key exists in the datastore only
@@ -1911,14 +1914,7 @@ impl TransactionInner {
 			}
 		}
 		// Check the key in the datastore
-		self.database
-			.datastore
-			.get(key)
-			.map(|e| match e.value().try_read() {
-				Some(guard) => guard.exists_version(version),
-				None => e.value().read().exists_version(version),
-			})
-			.is_some_and(|v| v)
+		self.database.datastore.lookup(key, |v| v.exists_version(version)).is_some_and(|v| v)
 	}
 
 	/// Check if a key equals a value in the datastore only
@@ -1947,17 +1943,9 @@ impl TransactionInner {
 			}
 		}
 		// Check the key in the datastore
-		match (
-			chk.as_ref(),
-			self.database
-				.datastore
-				.get(key)
-				.and_then(|e| match e.value().try_read() {
-					Some(guard) => guard.fetch_version(version),
-					None => e.value().read().fetch_version(version),
-				})
-				.as_ref(),
-		) {
+		let datastore_value =
+			self.database.datastore.lookup(key, |v| v.fetch_version(version)).flatten();
+		match (chk.as_ref(), datastore_value.as_ref()) {
 			(Some(x), Some(y)) => x.as_slice() == y,
 			(None, None) => true,
 			_ => false,

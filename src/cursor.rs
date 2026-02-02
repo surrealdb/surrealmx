@@ -19,7 +19,6 @@ use crate::inner::Inner;
 use crate::iter::MergeIterator;
 use bytes::Bytes;
 use std::collections::BTreeMap;
-use std::ops::Bound;
 use std::sync::Arc;
 
 // --------------------------------------------------
@@ -233,7 +232,9 @@ impl<'a> Cursor<'a> {
 	fn seek_internal(&mut self, seek_key: &Bytes) {
 		// Create a new merge iterator starting from seek_key
 		let mut iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(seek_key), Bound::Excluded(&self.end))),
+			&self.database.datastore,
+			seek_key,
+			&self.end,
 			self.combined_writeset
 				.range::<Bytes, _>(seek_key..&self.end)
 				.map(|(k, v)| (k.clone(), v.clone()))
@@ -252,7 +253,9 @@ impl<'a> Cursor<'a> {
 	fn seek_for_prev_internal(&mut self, seek_key: &Bytes) {
 		// Create a new merge iterator for reverse iteration ending at seek_key
 		let mut iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(&self.beg), Bound::Excluded(seek_key))),
+			&self.database.datastore,
+			&self.beg,
+			seek_key,
 			self.combined_writeset
 				.range::<Bytes, _>(&self.beg..seek_key)
 				.map(|(k, v)| (k.clone(), v.clone()))
@@ -278,9 +281,9 @@ impl<'a> Cursor<'a> {
 		}
 
 		let mut iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(&next_start), Bound::Excluded(&self.end))),
+			&self.database.datastore,
+			&next_start,
+			&self.end,
 			self.combined_writeset
 				.range::<Bytes, _>(&next_start..&self.end)
 				.map(|(k, v)| (k.clone(), v.clone()))
@@ -303,7 +306,9 @@ impl<'a> Cursor<'a> {
 		}
 
 		let mut iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(&self.beg), Bound::Excluded(from_key))),
+			&self.database.datastore,
+			&self.beg,
+			from_key,
 			self.combined_writeset
 				.range::<Bytes, _>(&self.beg..from_key)
 				.map(|(k, v)| (k.clone(), v.clone()))

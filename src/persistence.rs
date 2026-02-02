@@ -310,17 +310,21 @@ impl Persistence {
 				0
 			};
 			// Stream write each key-value pair to reduce memory usage
-			for entry in self.inner.datastore.iter() {
-				// Get all versions for this key
-				let versions = entry.value().read().all_versions();
-				// Ensure that there are version entries
-				if !versions.is_empty() {
-					// Serialize and write this single entry
-					bincode::serde::encode_into_std_write(
-						&(entry.key().clone(), versions),
-						&mut writer,
-						config::standard(),
-					)?;
+			{
+				let mut iter = self.inner.datastore.raw_iter();
+				iter.seek_to_first();
+				while let Some((key, versions)) = iter.next() {
+					// Get all versions for this key
+					let all_versions = versions.all_versions();
+					// Ensure that there are version entries
+					if !all_versions.is_empty() {
+						// Serialize and write this single entry
+						bincode::serde::encode_into_std_write(
+							&(key.clone(), all_versions),
+							&mut writer,
+							config::standard(),
+						)?;
+					}
 				}
 			}
 			// Flush the compressed writer
@@ -392,7 +396,7 @@ impl Persistence {
 									});
 								}
 								// Insert the entry into the datastore
-								self.inner.datastore.insert(k, RwLock::new(entries));
+								self.inner.datastore.insert(k, entries);
 							}
 						}
 						Err(e) => match e {
@@ -435,21 +439,29 @@ impl Persistence {
 					// Detech any end of file errors
 					match result {
 						Ok((k, version, val)) => {
-							// Check if the key already exists
-							if let Some(entry) = self.inner.datastore.get(&k) {
-								// Update existing key with stored version
-								entry.value().write().push(Version {
-									version,
-									value: val,
-								});
-							} else {
+							// Check if the key already exists using raw_iter_mut
+							let mut found = false;
+							{
+								let mut iter = self.inner.datastore.raw_iter_mut();
+								if iter.seek_exact(&k) {
+									if let Some((_, versions)) = iter.next() {
+										// Update existing key with stored version
+										versions.push(Version {
+											version,
+											value: val.clone(),
+										});
+										found = true;
+									}
+								}
+							}
+							if !found {
 								// Insert new key with stored version
 								self.inner.datastore.insert(
 									k.clone(),
-									RwLock::new(Versions::from(Version {
+									Versions::from(Version {
 										version,
 										value: val,
-									})),
+									}),
 								);
 							}
 						}
@@ -630,17 +642,21 @@ impl Persistence {
 							0
 						};
 						// Stream write each entry to reduce memory usage
-						for entry in db.datastore.iter() {
-							// Get all versions for this key
-							let versions = entry.value().read().all_versions();
-							// Ensure that there are version entries
-							if !versions.is_empty() {
-								// Serialize and write this single entry
-								bincode::serde::encode_into_std_write(
-									&(entry.key().clone(), versions),
-									&mut writer,
-									config::standard(),
-								)?;
+						{
+							let mut iter = db.datastore.raw_iter();
+							iter.seek_to_first();
+							while let Some((key, versions)) = iter.next() {
+								// Get all versions for this key
+								let all_versions = versions.all_versions();
+								// Ensure that there are version entries
+								if !all_versions.is_empty() {
+									// Serialize and write this single entry
+									bincode::serde::encode_into_std_write(
+										&(key.clone(), all_versions),
+										&mut writer,
+										config::standard(),
+									)?;
+								}
 							}
 						}
 						// Flush the compressed writer

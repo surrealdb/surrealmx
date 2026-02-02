@@ -20,6 +20,7 @@ use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
 use crate::tx::Transaction;
+use bytes::Bytes;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -211,19 +212,23 @@ impl Database {
 		let earliest_tx = self.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(now);
 		// Use the earlier of history cutoff or earliest transaction to protect active transactions
 		let cleanup_ts = history_cutoff.min(earliest_tx);
-		// Iterate over the entire tree
-		for entry in self.datastore.iter() {
-			// Fetch the entry value
-			let versions = entry.value();
-			// Modify the version entries
-			let mut versions = versions.write();
-			// Clean up unnecessary older versions
-			if versions.gc_older_versions(cleanup_ts) == 0 {
-				// Drop the version reference
-				drop(versions);
-				// Remove the entry from the datastore
-				self.datastore.remove(entry.key());
+		// Collect keys to remove
+		let mut keys_to_remove: Vec<Bytes> = Vec::new();
+		// Iterate over the entire tree with mutable access
+		{
+			let mut iter = self.datastore.raw_iter_mut();
+			iter.seek_to_first();
+			while let Some((key, versions)) = iter.next() {
+				// Clean up unnecessary older versions
+				if versions.gc_older_versions(cleanup_ts) == 0 {
+					// Mark for removal after iterator is released
+					keys_to_remove.push(key.clone());
+				}
 			}
+		}
+		// Remove entries outside of iterator scope
+		for key in keys_to_remove {
+			self.datastore.remove(&key);
 		}
 	}
 
@@ -324,19 +329,23 @@ impl Database {
 					let earliest_tx = db.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(now);
 					// Use the earlier of history cutoff or earliest transaction to protect active transactions
 					let cleanup_ts = history_cutoff.min(earliest_tx);
-					// Iterate over the entire tree
-					for entry in db.datastore.iter() {
-						// Fetch the entry value
-						let versions = entry.value();
-						// Modify the version entries
-						let mut versions = versions.write();
-						// Clean up unnecessary older versions
-						if versions.gc_older_versions(cleanup_ts) == 0 {
-							// Drop the version reference
-							drop(versions);
-							// Remove the entry from the datastore
-							db.datastore.remove(entry.key());
+					// Collect keys to remove
+					let mut keys_to_remove: Vec<Bytes> = Vec::new();
+					// Iterate over the entire tree with mutable access
+					{
+						let mut iter = db.datastore.raw_iter_mut();
+						iter.seek_to_first();
+						while let Some((key, versions)) = iter.next() {
+							// Clean up unnecessary older versions
+							if versions.gc_older_versions(cleanup_ts) == 0 {
+								// Mark for removal after iterator is released
+								keys_to_remove.push(key.clone());
+							}
 						}
+					}
+					// Remove entries outside of iterator scope
+					for key in keys_to_remove {
+						db.datastore.remove(&key);
 					}
 				}
 			});

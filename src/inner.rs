@@ -21,6 +21,7 @@ use crate::versions::Versions;
 use crate::DatabaseOptions;
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
+use ferntree::Tree;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
@@ -31,8 +32,8 @@ use std::time::Duration;
 pub struct Inner {
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
-	/// The underlying lock-free Skip Map datastructure
-	pub(crate) datastore: SkipMap<Bytes, RwLock<Versions>>,
+	/// The underlying lock-free B+tree datastructure
+	pub(crate) datastore: Tree<Bytes, Versions>,
 	/// A count of total transactions grouped by oracle version
 	pub(crate) counter_by_oracle: SkipMap<u64, Arc<AtomicU64>>,
 	/// A count of total transactions grouped by commit id
@@ -66,7 +67,7 @@ impl Inner {
 	pub fn new(opts: &DatabaseOptions) -> Self {
 		Self {
 			oracle: Oracle::new(opts.resync_interval),
-			datastore: SkipMap::new(),
+			datastore: Tree::new(),
 			counter_by_oracle: SkipMap::new(),
 			counter_by_commit: SkipMap::new(),
 			transaction_queue_id: AtomicU64::new(0),

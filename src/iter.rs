@@ -17,26 +17,31 @@
 use crate::direction::Direction;
 use crate::versions::Versions;
 use bytes::Bytes;
-use crossbeam_skiplist::map::Entry;
-use crossbeam_skiplist::map::Range as SkipRange;
-use parking_lot::RwLock;
+use ferntree::iter::Range as FernRange;
+use ferntree::iter::RangeRev;
+use ferntree::GenericTree;
 use std::collections::btree_map::Range as TreeRange;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 
-type RangeBounds<'a> = (Bound<&'a Bytes>, Bound<&'a Bytes>);
+/// Enum to handle forward/reverse iteration with different iterator types
+pub(crate) enum TreeIterState<'a> {
+	/// Forward iteration using the Range iterator with peek()
+	Forward(FernRange<'a, Bytes, Versions, 64, 64>),
+	/// Reverse iteration using RangeRev with peek()
+	Reverse(RangeRev<'a, Bytes, Versions, 64, 64>),
+}
 
 /// Three-way merge iterator over tree, merge queue, and current transaction writesets
 pub struct MergeIterator<'a> {
-	// Source iterators
-	pub(crate) tree_iter: SkipRange<'a, Bytes, RangeBounds<'a>, Bytes, RwLock<Versions>>,
+	// Source iterator (forward or reverse)
+	pub(crate) tree_iter: TreeIterState<'a>,
 	pub(crate) self_iter: TreeRange<'a, Bytes, Option<Bytes>>,
 
 	// Join iterator and its storage
 	pub(crate) join_storage: BTreeMap<Bytes, Option<Bytes>>,
 
-	// Current buffered entries from each source
-	pub(crate) tree_next: Option<Entry<'a, Bytes, RwLock<Versions>>>,
+	// Current buffered entries from join and self sources
 	pub(crate) join_next: Option<(Bytes, Option<Bytes>)>,
 	pub(crate) self_next: Option<(&'a Bytes, &'a Option<Bytes>)>,
 
@@ -59,17 +64,23 @@ enum KeySource {
 
 impl<'a> MergeIterator<'a> {
 	pub fn new(
-		mut tree_iter: SkipRange<'a, Bytes, RangeBounds<'a>, Bytes, RwLock<Versions>>,
+		tree: &'a GenericTree<Bytes, Versions, 64, 64>,
+		beg: &Bytes,
+		end: &Bytes,
 		join_storage: BTreeMap<Bytes, Option<Bytes>>,
 		mut self_iter: TreeRange<'a, Bytes, Option<Bytes>>,
 		direction: Direction,
 		version: u64,
 		skip: usize,
 	) -> Self {
-		// Get initial entries based on direction
-		let tree_next = match direction {
-			Direction::Forward => tree_iter.next(),
-			Direction::Reverse => tree_iter.next_back(),
+		// Create the appropriate iterator based on direction
+		let tree_iter = match direction {
+			Direction::Forward => {
+				TreeIterState::Forward(tree.range(Bound::Included(beg), Bound::Excluded(end)))
+			}
+			Direction::Reverse => {
+				TreeIterState::Reverse(tree.range_rev(Bound::Included(beg), Bound::Excluded(end)))
+			}
 		};
 
 		let self_next = match direction {
@@ -89,7 +100,6 @@ impl<'a> MergeIterator<'a> {
 			tree_iter,
 			self_iter,
 			join_storage,
-			tree_next,
 			join_next,
 			self_next,
 			direction,
@@ -117,53 +127,110 @@ impl<'a> MergeIterator<'a> {
 		}
 	}
 
+	/// Peek at the next tree entry without advancing, returning cloned key for comparison
+	fn peek_tree_key(&mut self) -> Option<Bytes> {
+		match &mut self.tree_iter {
+			TreeIterState::Forward(range) => range.peek().map(|(k, _)| k.clone()),
+			TreeIterState::Reverse(range) => range.peek().map(|(k, _)| k.clone()),
+		}
+	}
+
+	/// Check if tree entry exists at current version (for use after determining source)
+	fn tree_exists_version(&mut self) -> bool {
+		match &mut self.tree_iter {
+			TreeIterState::Forward(range) => {
+				range.peek().is_some_and(|(_, v)| v.exists_version(self.version))
+			}
+			TreeIterState::Reverse(range) => {
+				range.peek().is_some_and(|(_, v)| v.exists_version(self.version))
+			}
+		}
+	}
+
+	/// Fetch value from tree at current version
+	fn tree_fetch_version(&mut self) -> Option<Bytes> {
+		match &mut self.tree_iter {
+			TreeIterState::Forward(range) => {
+				range.peek().and_then(|(_, v)| v.fetch_version(self.version))
+			}
+			TreeIterState::Reverse(range) => {
+				range.peek().and_then(|(_, v)| v.fetch_version(self.version))
+			}
+		}
+	}
+
+	/// Advance the tree iterator
+	fn advance_tree(&mut self) {
+		match &mut self.tree_iter {
+			TreeIterState::Forward(range) => {
+				range.next();
+			}
+			TreeIterState::Reverse(range) => {
+				range.next();
+			}
+		}
+	}
+
+	/// Determine which source has the next key to process
+	fn determine_next_source(
+		&mut self,
+	) -> (KeySource, Option<Bytes>, Option<Bytes>, Option<Bytes>) {
+		// Gather keys from all sources (cloning to avoid borrow issues)
+		let self_key = self.self_next.map(|(k, _)| k.clone());
+		let join_key = self.join_next.as_ref().map(|(k, _)| k.clone());
+		let tree_key = self.peek_tree_key();
+
+		let mut next_key: Option<&Bytes> = None;
+		let mut next_source = KeySource::None;
+
+		// Check self iterator (highest priority)
+		if let Some(ref sk) = self_key {
+			next_key = Some(sk);
+			next_source = KeySource::Transaction;
+		}
+
+		// Check join iterator (merge queue)
+		if let Some(ref jk) = join_key {
+			let should_use = match (next_key, &self.direction) {
+				(None, _) => true,
+				(Some(k), Direction::Forward) => jk < k,
+				(Some(k), Direction::Reverse) => jk > k,
+			};
+			if should_use {
+				next_key = Some(jk);
+				next_source = KeySource::Committed;
+			} else if next_key == Some(jk) {
+				// Same key in both self and join - self wins
+				next_source = KeySource::Transaction;
+			}
+		}
+
+		// Check tree iterator
+		if let Some(ref tk) = tree_key {
+			let should_use = match (next_key, &self.direction) {
+				(None, _) => true,
+				(Some(k), Direction::Forward) => tk < k,
+				(Some(k), Direction::Reverse) => tk > k,
+			};
+			if should_use {
+				next_source = KeySource::Datastore;
+			}
+		}
+
+		(next_source, self_key, join_key, tree_key)
+	}
+
 	/// Get next entry existence only (no key or value cloning) - optimized for counting
 	pub fn next_count(&mut self) -> Option<bool> {
 		loop {
-			// Find the next key to process (smallest for Forward, largest for Reverse)
-			let mut next_key: Option<&Bytes> = None;
-			let mut next_source = KeySource::None;
-
-			// Check self iterator (highest priority)
-			if let Some((sk, _)) = self.self_next {
-				next_key = Some(sk);
-				next_source = KeySource::Transaction;
-			}
-
-			// Check join iterator (merge queue)
-			if let Some((jk, _)) = &self.join_next {
-				let should_use = match (next_key, &self.direction) {
-					(None, _) => true,
-					(Some(k), Direction::Forward) => jk < k,
-					(Some(k), Direction::Reverse) => jk > k,
-				};
-				if should_use {
-					next_key = Some(jk);
-					next_source = KeySource::Committed;
-				} else if next_key == Some(jk) {
-					// Same key in both self and join - self wins
-					next_source = KeySource::Transaction;
-				}
-			}
-
-			// Check tree iterator
-			if let Some(t_entry) = &self.tree_next {
-				let tk = t_entry.key();
-				let should_use = match (next_key, &self.direction) {
-					(None, _) => true,
-					(Some(k), Direction::Forward) => tk < k,
-					(Some(k), Direction::Reverse) => tk > k,
-				};
-				if should_use {
-					next_source = KeySource::Datastore;
-				}
-			}
+			let (next_source, self_key, join_key, tree_key) = self.determine_next_source();
 
 			// Process the selected source
 			let exists = match next_source {
 				KeySource::Transaction => {
-					let (sk, sv) = self.self_next.unwrap();
+					let (_, sv) = self.self_next.unwrap();
 					let exists = sv.is_some();
+					let sk = self_key.unwrap();
 
 					// Advance self iterator
 					self.self_next = match self.direction {
@@ -172,63 +239,38 @@ impl<'a> MergeIterator<'a> {
 					};
 
 					// Skip same key in other iterators
-					if let Some((jk, _)) = &self.join_next {
-						if jk == sk {
-							self.advance_join();
-						}
+					if join_key.as_ref() == Some(&sk) {
+						self.advance_join();
 					}
-					if let Some(t_entry) = &self.tree_next {
-						if t_entry.key() == sk {
-							self.tree_next = match self.direction {
-								Direction::Forward => self.tree_iter.next(),
-								Direction::Reverse => self.tree_iter.next_back(),
-							};
-						}
+					if tree_key.as_ref() == Some(&sk) {
+						self.advance_tree();
 					}
 
 					exists
 				}
 				KeySource::Committed => {
-					let exists = self.join_next.as_ref().unwrap().1.is_some();
+					let (_, jv) = self.join_next.as_ref().unwrap();
+					let exists = jv.is_some();
+					let jk = join_key.unwrap();
 
 					// Check if we need to skip same key in tree before advancing join
-					let should_skip_tree = if let Some(t_entry) = &self.tree_next {
-						if let Some((jk, _)) = &self.join_next {
-							t_entry.key() == jk
-						} else {
-							false
-						}
-					} else {
-						false
-					};
+					let should_skip_tree = tree_key.as_ref() == Some(&jk);
 
 					// Advance join iterator
 					self.advance_join();
 
 					// Skip same key in tree iterator if needed
 					if should_skip_tree {
-						self.tree_next = match self.direction {
-							Direction::Forward => self.tree_iter.next(),
-							Direction::Reverse => self.tree_iter.next_back(),
-						};
+						self.advance_tree();
 					}
 
 					exists
 				}
 				KeySource::Datastore => {
-					let t_entry = self.tree_next.as_ref().unwrap();
-					let tv = match t_entry.value().try_read() {
-						Some(guard) => guard,
-						None => t_entry.value().read(),
-					};
-					let exists = tv.exists_version(self.version);
-					drop(tv);
+					let exists = self.tree_exists_version();
 
 					// Advance tree iterator
-					self.tree_next = match self.direction {
-						Direction::Forward => self.tree_iter.next(),
-						Direction::Reverse => self.tree_iter.next_back(),
-					};
+					self.advance_tree();
 
 					exists
 				}
@@ -248,53 +290,14 @@ impl<'a> MergeIterator<'a> {
 	/// Get next entry with key (no value cloning) - optimized for key iteration
 	pub fn next_key(&mut self) -> Option<(Bytes, bool)> {
 		loop {
-			// Find the next key to process (smallest for Forward, largest for Reverse)
-			let mut next_key: Option<&Bytes> = None;
-			let mut next_source = KeySource::None;
+			let (next_source, self_key, join_key, tree_key) = self.determine_next_source();
 
-			// Check self iterator (highest priority)
-			if let Some((sk, _)) = self.self_next {
-				next_key = Some(sk);
-				next_source = KeySource::Transaction;
-			}
-
-			// Check join iterator (merge queue)
-			if let Some((jk, _)) = &self.join_next {
-				let should_use = match (next_key, &self.direction) {
-					(None, _) => true,
-					(Some(k), Direction::Forward) => jk < k,
-					(Some(k), Direction::Reverse) => jk > k,
-				};
-				if should_use {
-					next_key = Some(jk);
-					next_source = KeySource::Committed;
-				} else if next_key == Some(jk) {
-					// Same key in both self and join - self wins
-					next_source = KeySource::Transaction;
-				}
-			}
-
-			// Check tree iterator
-			if let Some(t_entry) = &self.tree_next {
-				let tk = t_entry.key();
-				let should_use = match (next_key, &self.direction) {
-					(None, _) => true,
-					(Some(k), Direction::Forward) => tk < k,
-					(Some(k), Direction::Reverse) => tk > k,
-				};
-				if should_use {
-					next_source = KeySource::Datastore;
-				}
-			}
-
-			// Process the selected source - first determine if entry exists
+			// Process the selected source
 			match next_source {
 				KeySource::Transaction => {
-					let (sk, sv) = self.self_next.unwrap();
+					let (_, sv) = self.self_next.unwrap();
 					let exists = sv.is_some();
-
-					// Store key reference for later cloning if needed
-					let key_ref = sk;
+					let sk = self_key.unwrap();
 
 					// Advance self iterator
 					self.self_next = match self.direction {
@@ -303,103 +306,67 @@ impl<'a> MergeIterator<'a> {
 					};
 
 					// Skip same key in other iterators
-					if let Some((jk, _)) = &self.join_next {
-						if jk == key_ref {
-							self.advance_join();
-						}
+					if join_key.as_ref() == Some(&sk) {
+						self.advance_join();
 					}
-					if let Some(t_entry) = &self.tree_next {
-						if t_entry.key() == key_ref {
-							self.tree_next = match self.direction {
-								Direction::Forward => self.tree_iter.next(),
-								Direction::Reverse => self.tree_iter.next_back(),
-							};
-						}
+					if tree_key.as_ref() == Some(&sk) {
+						self.advance_tree();
 					}
 
-					// Handle skipping BEFORE cloning
+					// Handle skipping
 					if exists && self.skip_remaining > 0 {
 						self.skip_remaining -= 1;
 						continue;
 					}
 
-					// Only clone if we're returning it
-					return Some((key_ref.clone(), exists));
+					return Some((sk, exists));
 				}
 				KeySource::Committed => {
-					let (jk, jv) = self.join_next.as_ref().unwrap();
+					let (_, jv) = self.join_next.as_ref().unwrap();
+					let exists = jv.is_some();
+					let jk = join_key.unwrap();
 
 					// Check if we should skip (only skip existing entries)
-					if jv.is_some() && self.skip_remaining > 0 {
+					if exists && self.skip_remaining > 0 {
 						// Check if we need to skip same key in tree before advancing join
-						let should_skip_tree = if let Some(t_entry) = &self.tree_next {
-							t_entry.key() == jk
-						} else {
-							false
-						};
+						let should_skip_tree = tree_key.as_ref() == Some(&jk);
 
 						// Advance join iterator
 						self.advance_join();
 
 						// Skip same key in tree iterator if needed
 						if should_skip_tree {
-							self.tree_next = match self.direction {
-								Direction::Forward => self.tree_iter.next(),
-								Direction::Reverse => self.tree_iter.next_back(),
-							};
+							self.advance_tree();
 						}
 
 						self.skip_remaining -= 1;
 						continue;
 					}
-
-					// Only clone key and value when returning
-					let key = jk.clone();
-					let value_opt = jv.clone();
 
 					// Advance join iterator
 					self.advance_join();
 
 					// Skip same key in tree iterator
-					if let Some(t_entry) = &self.tree_next {
-						if t_entry.key() == &key {
-							self.tree_next = match self.direction {
-								Direction::Forward => self.tree_iter.next(),
-								Direction::Reverse => self.tree_iter.next_back(),
-							};
-						}
+					if tree_key.as_ref() == Some(&jk) {
+						self.advance_tree();
 					}
 
-					return Some((key, value_opt.is_some()));
+					return Some((jk, exists));
 				}
 				KeySource::Datastore => {
-					let t_entry = self.tree_next.as_ref().unwrap();
-					let tv = match t_entry.value().try_read() {
-						Some(guard) => guard,
-						None => t_entry.value().read(),
-					};
-					let exists = tv.exists_version(self.version);
-					drop(tv);
+					let exists = self.tree_exists_version();
+					let tk = tree_key.unwrap();
 
-					// Handle skipping BEFORE cloning the key
+					// Handle skipping
 					if exists && self.skip_remaining > 0 {
 						// Advance tree iterator
-						self.tree_next = match self.direction {
-							Direction::Forward => self.tree_iter.next(),
-							Direction::Reverse => self.tree_iter.next_back(),
-						};
+						self.advance_tree();
 						self.skip_remaining -= 1;
 						continue;
 					}
 
-					// Only clone key if we're returning it
-					let tk = t_entry.key().clone();
-
 					// Advance tree iterator
-					self.tree_next = match self.direction {
-						Direction::Forward => self.tree_iter.next(),
-						Direction::Reverse => self.tree_iter.next_back(),
-					};
+					self.advance_tree();
 
 					return Some((tk, exists));
 				}
@@ -414,53 +381,15 @@ impl<'a> Iterator for MergeIterator<'a> {
 
 	fn next(&mut self) -> Option<Self::Item> {
 		loop {
-			// Find the next key to process (smallest for Forward, largest for Reverse)
-			let mut next_key: Option<&Bytes> = None;
-			let mut next_source = KeySource::None;
-
-			// Check self iterator (highest priority)
-			if let Some((sk, _)) = self.self_next {
-				next_key = Some(sk);
-				next_source = KeySource::Transaction;
-			}
-
-			// Check join iterator (merge queue)
-			if let Some((jk, _)) = &self.join_next {
-				let should_use = match (next_key, &self.direction) {
-					(None, _) => true,
-					(Some(k), Direction::Forward) => jk < k,
-					(Some(k), Direction::Reverse) => jk > k,
-				};
-				if should_use {
-					next_key = Some(jk);
-					next_source = KeySource::Committed;
-				} else if next_key == Some(jk) {
-					// Same key in both self and join - self wins
-					next_source = KeySource::Transaction;
-				}
-			}
-
-			// Check tree iterator
-			if let Some(t_entry) = &self.tree_next {
-				let tk = t_entry.key();
-				let should_use = match (next_key, &self.direction) {
-					(None, _) => true,
-					(Some(k), Direction::Forward) => tk < k,
-					(Some(k), Direction::Reverse) => tk > k,
-				};
-				if should_use {
-					next_source = KeySource::Datastore;
-				}
-			}
+			let (next_source, self_key, join_key, tree_key) = self.determine_next_source();
 
 			// Process the selected source
 			match next_source {
 				KeySource::Transaction => {
-					let (sk, sv) = self.self_next.unwrap();
+					let (_, sv) = self.self_next.unwrap();
 					let exists = sv.is_some();
-
-					// Store key reference for deferred cloning
-					let key_ref = sk;
+					let sk = self_key.unwrap();
+					let value = sv.clone();
 
 					// Advance self iterator
 					self.self_next = match self.direction {
@@ -469,106 +398,71 @@ impl<'a> Iterator for MergeIterator<'a> {
 					};
 
 					// Skip same key in other iterators
-					if let Some((jk, _)) = &self.join_next {
-						if jk == key_ref {
-							self.advance_join();
-						}
+					if join_key.as_ref() == Some(&sk) {
+						self.advance_join();
 					}
-					if let Some(t_entry) = &self.tree_next {
-						if t_entry.key() == key_ref {
-							self.tree_next = match self.direction {
-								Direction::Forward => self.tree_iter.next(),
-								Direction::Reverse => self.tree_iter.next_back(),
-							};
-						}
+					if tree_key.as_ref() == Some(&sk) {
+						self.advance_tree();
 					}
 
-					// Check if we should skip (only skip existing entries)
+					// Handle skipping
 					if exists && self.skip_remaining > 0 {
 						self.skip_remaining -= 1;
 						continue;
 					}
 
-					// Only clone key and value when returning
-					return Some((key_ref.clone(), sv.clone()));
+					return Some((sk, value));
 				}
 				KeySource::Committed => {
-					let (jk, jv) = self.join_next.as_ref().unwrap();
+					let (_, jv) = self.join_next.as_ref().unwrap();
+					let exists = jv.is_some();
+					let jk = join_key.unwrap();
+					let value = jv.clone();
 
 					// Check if we should skip (only skip existing entries)
-					if jv.is_some() && self.skip_remaining > 0 {
+					if exists && self.skip_remaining > 0 {
 						// Check if we need to skip same key in tree before advancing join
-						let should_skip_tree = if let Some(t_entry) = &self.tree_next {
-							t_entry.key() == jk
-						} else {
-							false
-						};
+						let should_skip_tree = tree_key.as_ref() == Some(&jk);
 
 						// Advance join iterator
 						self.advance_join();
 
 						// Skip same key in tree iterator if needed
 						if should_skip_tree {
-							self.tree_next = match self.direction {
-								Direction::Forward => self.tree_iter.next(),
-								Direction::Reverse => self.tree_iter.next_back(),
-							};
+							self.advance_tree();
 						}
 
 						self.skip_remaining -= 1;
 						continue;
 					}
-
-					// Only clone key and value when returning
-					let key = jk.clone();
-					let value_opt = jv.clone();
 
 					// Advance join iterator
 					self.advance_join();
 
 					// Skip same key in tree iterator
-					if let Some(t_entry) = &self.tree_next {
-						if t_entry.key() == &key {
-							self.tree_next = match self.direction {
-								Direction::Forward => self.tree_iter.next(),
-								Direction::Reverse => self.tree_iter.next_back(),
-							};
-						}
+					if tree_key.as_ref() == Some(&jk) {
+						self.advance_tree();
 					}
 
-					return Some((key, value_opt));
+					return Some((jk, value));
 				}
 				KeySource::Datastore => {
-					let t_entry = self.tree_next.as_ref().unwrap();
-					let tv = match t_entry.value().try_read() {
-						Some(guard) => guard,
-						None => t_entry.value().read(),
-					};
-					let value_opt = tv.fetch_version(self.version);
-					let exists = value_opt.is_some();
-					drop(tv);
+					let value = self.tree_fetch_version();
+					let exists = value.is_some();
+					let tk = tree_key.unwrap();
 
-					// Handle skipping BEFORE cloning the key
+					// Handle skipping
 					if exists && self.skip_remaining > 0 {
 						// Advance tree iterator
-						self.tree_next = match self.direction {
-							Direction::Forward => self.tree_iter.next(),
-							Direction::Reverse => self.tree_iter.next_back(),
-						};
+						self.advance_tree();
 						self.skip_remaining -= 1;
 						continue;
 					}
 
-					// Only clone key if we're returning it
-					let key_clone = t_entry.key().clone();
-
 					// Advance tree iterator
-					self.tree_next = match self.direction {
-						Direction::Forward => self.tree_iter.next(),
-						Direction::Reverse => self.tree_iter.next_back(),
-					};
+					self.advance_tree();
 
-					return Some((key_clone, value_opt));
+					return Some((tk, value));
 				}
 				KeySource::None => return None,
 			}
