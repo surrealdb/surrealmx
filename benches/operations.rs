@@ -232,7 +232,7 @@ fn bench_delete_operations(c: &mut Criterion) {
 fn bench_scan_operations(c: &mut Criterion) {
 	let mut group = c.benchmark_group("scan_operations");
 
-	for entry_count in [1000, 10_000, 100_000].iter() {
+	for entry_count in [1000, 10_000, 100_000, 1_000_000].iter() {
 		let db = setup_database_with_sequential_data(*entry_count, 100);
 
 		for scan_limit in [10, 100, 1000].iter() {
@@ -261,7 +261,7 @@ fn bench_scan_operations(c: &mut Criterion) {
 fn bench_keys_operations(c: &mut Criterion) {
 	let mut group = c.benchmark_group("keys_operations");
 
-	for entry_count in [1000, 10_000, 100_000].iter() {
+	for entry_count in [1000, 10_000, 100_000, 1_000_000].iter() {
 		let db = setup_database_with_sequential_data(*entry_count, 100);
 
 		for scan_limit in [10, 100, 1000].iter() {
@@ -290,7 +290,7 @@ fn bench_keys_operations(c: &mut Criterion) {
 fn bench_total_operations(c: &mut Criterion) {
 	let mut group = c.benchmark_group("total_operations");
 
-	for entry_count in [1000, 10_000, 100_000].iter() {
+	for entry_count in [1000, 10_000, 100_000, 1_000_000].iter() {
 		let db = setup_database_with_sequential_data(*entry_count, 100);
 
 		group.bench_with_input(
