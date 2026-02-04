@@ -29,7 +29,7 @@ use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
 use std::collections::BTreeMap;
-use std::ops::Range;
+use std::ops::{Bound, Range};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1456,6 +1456,174 @@ impl TransactionInner {
 		}
 	}
 
+	/// Fast-path: count entries directly from ferntree without merge overhead
+	/// Used when there are no pending writes in the range
+	fn total_direct(
+		&self,
+		beg: &Bytes,
+		end: &Bytes,
+		skip: usize,
+		limit: Option<usize>,
+		direction: Direction,
+		version: u64,
+	) -> Result<usize, Error> {
+		let mut count = 0;
+		let mut skipped = 0;
+		match direction {
+			Direction::Forward => {
+				let mut range =
+					self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end));
+				while let Some((_, versions)) = range.next() {
+					if versions.exists_version(version) {
+						if skipped < skip {
+							skipped += 1;
+							continue;
+						}
+						count += 1;
+						if let Some(l) = limit {
+							if count >= l {
+								break;
+							}
+						}
+					}
+				}
+			}
+			Direction::Reverse => {
+				let mut range =
+					self.database.datastore.range_rev(Bound::Included(beg), Bound::Excluded(end));
+				while let Some((_, versions)) = range.next() {
+					if versions.exists_version(version) {
+						if skipped < skip {
+							skipped += 1;
+							continue;
+						}
+						count += 1;
+						if let Some(l) = limit {
+							if count >= l {
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+		Ok(count)
+	}
+
+	/// Fast-path: retrieve keys directly from ferntree without merge overhead
+	/// Used when there are no pending writes in the range
+	fn keys_direct(
+		&self,
+		beg: &Bytes,
+		end: &Bytes,
+		skip: usize,
+		limit: Option<usize>,
+		direction: Direction,
+		version: u64,
+	) -> Result<Vec<Bytes>, Error> {
+		let mut res = match limit {
+			Some(l) => Vec::with_capacity(l.min(10_000)),
+			None => Vec::new(),
+		};
+		let mut skipped = 0;
+		match direction {
+			Direction::Forward => {
+				let mut range =
+					self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end));
+				while let Some((key, versions)) = range.next() {
+					if versions.exists_version(version) {
+						if skipped < skip {
+							skipped += 1;
+							continue;
+						}
+						res.push(key.clone());
+						if let Some(l) = limit {
+							if res.len() >= l {
+								break;
+							}
+						}
+					}
+				}
+			}
+			Direction::Reverse => {
+				let mut range =
+					self.database.datastore.range_rev(Bound::Included(beg), Bound::Excluded(end));
+				while let Some((key, versions)) = range.next() {
+					if versions.exists_version(version) {
+						if skipped < skip {
+							skipped += 1;
+							continue;
+						}
+						res.push(key.clone());
+						if let Some(l) = limit {
+							if res.len() >= l {
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+		Ok(res)
+	}
+
+	/// Fast-path: retrieve key-value pairs directly from ferntree without merge overhead
+	/// Used when there are no pending writes in the range
+	fn scan_direct(
+		&self,
+		beg: &Bytes,
+		end: &Bytes,
+		skip: usize,
+		limit: Option<usize>,
+		direction: Direction,
+		version: u64,
+	) -> Result<Vec<(Bytes, Bytes)>, Error> {
+		let mut res = match limit {
+			Some(l) => Vec::with_capacity(l.min(10_000)),
+			None => Vec::new(),
+		};
+		let mut skipped = 0;
+		match direction {
+			Direction::Forward => {
+				let mut range =
+					self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end));
+				while let Some((key, versions)) = range.next() {
+					if let Some(value) = versions.fetch_version(version) {
+						if skipped < skip {
+							skipped += 1;
+							continue;
+						}
+						res.push((key.clone(), value));
+						if let Some(l) = limit {
+							if res.len() >= l {
+								break;
+							}
+						}
+					}
+				}
+			}
+			Direction::Reverse => {
+				let mut range =
+					self.database.datastore.range_rev(Bound::Included(beg), Bound::Excluded(end));
+				while let Some((key, versions)) = range.next() {
+					if let Some(value) = versions.fetch_version(version) {
+						if skipped < skip {
+							skipped += 1;
+							continue;
+						}
+						res.push((key.clone(), value));
+						if let Some(l) = limit {
+							if res.len() >= l {
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+		Ok(res)
+	}
+
 	/// Retrieve a count of keys from the database
 	fn total_any<K>(
 		&self,
@@ -1472,8 +1640,6 @@ impl TransactionInner {
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
-		// Prepare result count
-		let mut res = 0;
 		// Compute the range
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
@@ -1494,7 +1660,15 @@ impl TransactionInner {
 				combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
 			}
 		}
-		// Create the 3-way merge iterator
+		// Check if we can use the fast-path (no pending writes in range)
+		let has_pending_writes = !combined_writeset.is_empty()
+			|| self.writeset.range::<Bytes, _>(beg..end).next().is_some();
+		// Fast path: iterate ferntree directly without merge overhead
+		if !has_pending_writes {
+			return self.total_direct(beg, end, skip, limit, direction, version);
+		}
+		// Slow path: use merge iterator
+		let mut res = 0;
 		let mut iter = MergeIterator::new(
 			&self.database.datastore,
 			beg,
@@ -1536,11 +1710,6 @@ impl TransactionInner {
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
-		// Prepare result vector
-		let mut res = match limit {
-			Some(l) => Vec::with_capacity(l.min(10_000)),
-			None => Vec::new(),
-		};
 		// Compute the range
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
@@ -1561,7 +1730,18 @@ impl TransactionInner {
 				combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
 			}
 		}
-		// Create the 3-way merge iterator
+		// Check if we can use the fast-path (no pending writes in range)
+		let has_pending_writes = !combined_writeset.is_empty()
+			|| self.writeset.range::<Bytes, _>(beg..end).next().is_some();
+		// Fast path: iterate ferntree directly without merge overhead
+		if !has_pending_writes {
+			return self.keys_direct(beg, end, skip, limit, direction, version);
+		}
+		// Slow path: use merge iterator
+		let mut res = match limit {
+			Some(l) => Vec::with_capacity(l.min(10_000)),
+			None => Vec::new(),
+		};
 		let mut iter = MergeIterator::new(
 			&self.database.datastore,
 			beg,
@@ -1603,11 +1783,6 @@ impl TransactionInner {
 		if self.done == true {
 			return Err(Error::TxClosed);
 		}
-		// Prepare result vector
-		let mut res = match limit {
-			Some(l) => Vec::with_capacity(l.min(10_000)),
-			None => Vec::new(),
-		};
 		// Compute the range
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
@@ -1628,7 +1803,18 @@ impl TransactionInner {
 				combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
 			}
 		}
-		// Create the 3-way merge iterator
+		// Check if we can use the fast-path (no pending writes in range)
+		let has_pending_writes = !combined_writeset.is_empty()
+			|| self.writeset.range::<Bytes, _>(beg..end).next().is_some();
+		// Fast path: iterate ferntree directly without merge overhead
+		if !has_pending_writes {
+			return self.scan_direct(beg, end, skip, limit, direction, version);
+		}
+		// Slow path: use merge iterator
+		let mut res = match limit {
+			Some(l) => Vec::with_capacity(l.min(10_000)),
+			None => Vec::new(),
+		};
 		let iter = MergeIterator::new(
 			&self.database.datastore,
 			beg,
