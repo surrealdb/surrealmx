@@ -16,10 +16,10 @@
 
 use bytes::Bytes;
 use papaya::HashSet;
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 /// A transaction entry in the transaction commit queue
+
 pub struct Commit {
 	/// The unique id of this commit attempt
 	pub(crate) id: u64,
@@ -28,6 +28,7 @@ pub struct Commit {
 }
 
 /// A transaction entry in the transaction merge queue
+
 pub struct Merge {
 	/// The unique id of this commit attempt
 	pub(crate) id: u64,
@@ -37,9 +38,11 @@ pub struct Merge {
 
 impl Commit {
 	/// Returns true if self has no elements in common with other
+
 	pub fn is_disjoint_readset(&self, other: &HashSet<Bytes>) -> bool {
 		// Pin the readset for access
 		let other = other.pin();
+
 		// Check if the readset is not empty
 		if !other.is_empty() {
 			// Choose iteration direction based on size to minimize iterations
@@ -59,17 +62,24 @@ impl Commit {
 				}
 			}
 		}
+
 		// No overlap was found
 		true
 	}
+
 	/// Returns true if self has no elements in common with other
+
 	pub fn is_disjoint_writeset(&self, other: &Arc<Commit>) -> bool {
 		// Create a key iterator for each writeset
 		let mut a = self.writeset.keys();
+
 		let mut b = other.writeset.keys();
+
 		// Move to the next value in each iterator
 		let mut next_a = a.next();
+
 		let mut next_b = b.next();
+
 		// Advance each iterator independently in order
 		while let (Some(ka), Some(kb)) = (next_a, next_b) {
 			match ka.cmp(kb) {
@@ -78,6 +88,7 @@ impl Commit {
 				std::cmp::Ordering::Equal => return false,
 			}
 		}
+
 		// No overlap was found
 		true
 	}

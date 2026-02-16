@@ -14,25 +14,32 @@
 
 //! This module stores the inner in-memory database type.
 
-use crate::oracle::Oracle;
-use crate::persistence::Persistence;
-use crate::queue::{Commit, Merge};
-use crate::versions::Versions;
-use crate::DatabaseOptions;
+use crate::{
+	oracle::Oracle,
+	persistence::Persistence,
+	queue::{Commit, Merge},
+	versions::VersionedEntry,
+	DatabaseOptions,
+};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::Arc;
-use std::thread::JoinHandle;
-use std::time::Duration;
+use std::{
+	sync::{
+		atomic::{AtomicBool, AtomicU64},
+		Arc,
+	},
+	thread::JoinHandle,
+	time::Duration,
+};
 
 /// The inner structure of the transactional in-memory database
+
 pub struct Inner {
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
 	/// The underlying lock-free Skip Map datastructure
-	pub(crate) datastore: SkipMap<Bytes, RwLock<Versions>>,
+	pub(crate) datastore: SkipMap<Bytes, VersionedEntry>,
 	/// A count of total transactions grouped by oracle version
 	pub(crate) counter_by_oracle: SkipMap<u64, Arc<AtomicU64>>,
 	/// A count of total transactions grouped by commit id
@@ -63,6 +70,7 @@ pub struct Inner {
 
 impl Inner {
 	/// Create a new [`Inner`] structure with the given oracle resync interval.
+
 	pub fn new(opts: &DatabaseOptions) -> Self {
 		Self {
 			oracle: Oracle::new(opts.resync_interval),

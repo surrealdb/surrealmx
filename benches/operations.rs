@@ -15,8 +15,7 @@
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::hint::black_box;
-use std::sync::Arc;
+use std::{hint::black_box, sync::Arc};
 use surrealmx::{Database, DatabaseOptions};
 
 const SEED: u64 = 42;
@@ -29,13 +28,17 @@ fn create_database() -> Database {
 // Helper functions for generating test data
 fn generate_key(rng: &mut StdRng, size: usize) -> Bytes {
 	let mut key = vec![0u8; size];
+
 	rng.fill(&mut key[..]);
+
 	Bytes::from(key)
 }
 
 fn generate_value(rng: &mut StdRng, size: usize) -> Bytes {
 	let mut val = vec![0u8; size];
+
 	rng.fill(&mut val[..]);
+
 	Bytes::from(val)
 }
 
@@ -45,22 +48,30 @@ fn generate_sequential_key(index: usize) -> Bytes {
 
 fn generate_sequential_value(index: usize, size: usize) -> Bytes {
 	let base = format!("value_{:08}", index);
+
 	let mut val = base.into_bytes();
+
 	val.resize(size, b'x');
+
 	Bytes::from(val)
 }
 
 fn setup_database_with_data(count: usize, key_size: usize, value_size: usize) -> Database {
 	let db = create_database();
+
 	let mut rng = StdRng::seed_from_u64(SEED);
 
 	{
 		let mut tx = db.transaction(true);
+
 		for _i in 0..count {
 			let key = generate_key(&mut rng, key_size);
+
 			let value = generate_value(&mut rng, value_size);
+
 			tx.put(key, value).unwrap();
 		}
+
 		tx.commit().unwrap();
 	}
 
@@ -72,11 +83,15 @@ fn setup_database_with_sequential_data(count: usize, value_size: usize) -> Datab
 
 	{
 		let mut tx = db.transaction(true);
+
 		for i in 0..count {
 			let key = generate_sequential_key(i);
+
 			let value = generate_sequential_value(i, value_size);
+
 			tx.put(key, value).unwrap();
 		}
+
 		tx.commit().unwrap();
 	}
 
@@ -90,6 +105,7 @@ fn bench_transaction_creation(c: &mut Criterion) {
 	c.bench_function("transaction_creation_read", |b| {
 		b.iter(|| {
 			let tx = db.transaction(false);
+
 			black_box(tx);
 		})
 	});
@@ -97,6 +113,7 @@ fn bench_transaction_creation(c: &mut Criterion) {
 	c.bench_function("transaction_creation_write", |b| {
 		b.iter(|| {
 			let tx = db.transaction(true);
+
 			black_box(tx);
 		})
 	});
@@ -115,6 +132,7 @@ fn bench_put_operations(c: &mut Criterion) {
 				.collect();
 
 			group.throughput(Throughput::Elements(*entry_count as u64));
+
 			group.bench_with_input(
 				BenchmarkId::new("put", format!("{}b_{}entries", data_size, entry_count)),
 				&test_data,
@@ -123,9 +141,11 @@ fn bench_put_operations(c: &mut Criterion) {
 						create_database,
 						|db: Database| {
 							let mut tx = db.transaction(true);
+
 							for (key, value) in data.iter() {
 								tx.put(key.clone(), value.clone()).unwrap();
 							}
+
 							tx.commit().unwrap();
 						},
 						criterion::BatchSize::LargeInput,
@@ -134,6 +154,7 @@ fn bench_put_operations(c: &mut Criterion) {
 			);
 		}
 	}
+
 	group.finish();
 }
 
@@ -143,27 +164,32 @@ fn bench_get_operations(c: &mut Criterion) {
 	for data_size in [1, 100, 1000, 10_000].iter() {
 		for entry_count in [100, 1000, 10_000].iter() {
 			let db = setup_database_with_data(*entry_count, 16, *data_size);
+
 			let mut rng = StdRng::seed_from_u64(SEED);
 
 			// Pre-generate keys for lookup
 			let lookup_keys: Vec<Bytes> = (0..100).map(|_| generate_key(&mut rng, 16)).collect();
 
 			group.throughput(Throughput::Elements(lookup_keys.len() as u64));
+
 			group.bench_with_input(
 				BenchmarkId::new("get", format!("{}b_{}entries", data_size, entry_count)),
 				&lookup_keys,
 				|b, keys| {
 					b.iter(|| {
 						let mut tx = db.transaction(false);
+
 						for key in keys {
 							black_box(tx.get(key.clone()).unwrap());
 						}
+
 						tx.cancel().unwrap();
 					})
 				},
 			);
 		}
 	}
+
 	group.finish();
 }
 
@@ -172,26 +198,31 @@ fn bench_exists_operations(c: &mut Criterion) {
 
 	for entry_count in [100, 1000, 10_000].iter() {
 		let db = setup_database_with_data(*entry_count, 16, 100);
+
 		let mut rng = StdRng::seed_from_u64(SEED);
 
 		// Pre-generate keys for lookup
 		let lookup_keys: Vec<Bytes> = (0..100).map(|_| generate_key(&mut rng, 16)).collect();
 
 		group.throughput(Throughput::Elements(lookup_keys.len() as u64));
+
 		group.bench_with_input(
 			BenchmarkId::new("exists", format!("{}entries", entry_count)),
 			&lookup_keys,
 			|b, keys| {
 				b.iter(|| {
 					let mut tx = db.transaction(false);
+
 					for key in keys {
 						black_box(tx.exists(key.clone()).unwrap());
 					}
+
 					tx.cancel().unwrap();
 				})
 			},
 		);
 	}
+
 	group.finish();
 }
 
@@ -207,6 +238,7 @@ fn bench_delete_operations(c: &mut Criterion) {
 			.collect();
 
 		group.throughput(Throughput::Elements(delete_keys.len() as u64));
+
 		group.bench_with_input(
 			BenchmarkId::new("del", format!("{}entries", entry_count)),
 			&delete_keys,
@@ -215,9 +247,11 @@ fn bench_delete_operations(c: &mut Criterion) {
 					|| setup_database_with_data(*entry_count, 16, 100),
 					|db| {
 						let mut tx = db.transaction(true);
+
 						for key in keys {
 							tx.del(key.clone()).unwrap();
 						}
+
 						tx.commit().unwrap();
 					},
 					criterion::BatchSize::LargeInput,
@@ -225,6 +259,7 @@ fn bench_delete_operations(c: &mut Criterion) {
 			},
 		);
 	}
+
 	group.finish();
 }
 
@@ -239,22 +274,29 @@ fn bench_scan_operations(c: &mut Criterion) {
 			let limit = std::cmp::min(*scan_limit, *entry_count);
 
 			group.throughput(Throughput::Elements(limit as u64));
+
 			group.bench_with_input(
 				BenchmarkId::new("scan", format!("{}entries_limit{}", entry_count, limit)),
 				&limit,
 				|b, &limit| {
 					b.iter(|| {
 						let mut tx = db.transaction(false);
+
 						let start_key = b"".to_vec();
+
 						let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
+
 						let result = tx.scan(start_key..end_key, None, Some(limit)).unwrap();
+
 						black_box(result);
+
 						tx.cancel().unwrap();
 					})
 				},
 			);
 		}
 	}
+
 	group.finish();
 }
 
@@ -268,22 +310,29 @@ fn bench_keys_operations(c: &mut Criterion) {
 			let limit = std::cmp::min(*scan_limit, *entry_count);
 
 			group.throughput(Throughput::Elements(limit as u64));
+
 			group.bench_with_input(
 				BenchmarkId::new("keys", format!("{}entries_limit{}", entry_count, limit)),
 				&limit,
 				|b, &limit| {
 					b.iter(|| {
 						let mut tx = db.transaction(false);
+
 						let start_key = b"".to_vec();
+
 						let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
+
 						let result = tx.keys(start_key..end_key, None, Some(limit)).unwrap();
+
 						black_box(result);
+
 						tx.cancel().unwrap();
 					})
 				},
 			);
 		}
 	}
+
 	group.finish();
 }
 
@@ -299,15 +348,21 @@ fn bench_total_operations(c: &mut Criterion) {
 			|b, _| {
 				b.iter(|| {
 					let mut tx = db.transaction(false);
+
 					let start_key = b"".to_vec();
+
 					let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
+
 					let result = tx.total(start_key..end_key, None, None).unwrap();
+
 					black_box(result);
+
 					tx.cancel().unwrap();
 				})
 			},
 		);
 	}
+
 	group.finish();
 }
 
@@ -317,18 +372,22 @@ fn bench_concurrent_readers(c: &mut Criterion) {
 
 	// Test with different thread counts: 1, 4, and CPU cores
 	let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+
 	let thread_counts = [1, 4, cpu_cores];
 
 	for entry_count in [1000, 10_000].iter() {
 		let db = Arc::new(setup_database_with_sequential_data(*entry_count, 100));
+
 		let mut rng = StdRng::seed_from_u64(SEED);
 
-		// Pre-generate keys for lookup (more keys for better distribution across threads)
+		// Pre-generate keys for lookup (more keys for better distribution across
+		// threads)
 		let lookup_keys: Vec<Bytes> =
 			(0..200).map(|_| generate_sequential_key(rng.random_range(0..*entry_count))).collect();
 
 		for &thread_count in thread_counts.iter() {
 			group.throughput(Throughput::Elements((lookup_keys.len() * thread_count) as u64));
+
 			group.bench_with_input(
 				BenchmarkId::new(
 					"concurrent_read",
@@ -340,14 +399,20 @@ fn bench_concurrent_readers(c: &mut Criterion) {
 						let handles: Vec<_> = (0..*num_threads)
 							.map(|_| {
 								let db: Arc<Database> = Arc::clone(&db);
+
 								let keys = keys.clone();
+
 								std::thread::spawn(move || {
 									let mut tx = db.transaction(false);
+
 									let mut results = Vec::new();
+
 									for key in keys {
 										results.push(tx.get(key.clone()).unwrap());
 									}
+
 									tx.cancel().unwrap();
+
 									results
 								})
 							})
@@ -355,12 +420,14 @@ fn bench_concurrent_readers(c: &mut Criterion) {
 
 						let results: Vec<_> =
 							handles.into_iter().map(|h| h.join().unwrap()).collect();
+
 						black_box(results);
 					})
 				},
 			);
 		}
 	}
+
 	group.finish();
 }
 
@@ -370,6 +437,7 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 
 	// Test with different thread counts: 1, 4, and CPU cores
 	let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+
 	let thread_counts = [1, 4, cpu_cores];
 
 	for entry_count in [1000, 10_000].iter() {
@@ -377,6 +445,7 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 			let operations_per_thread = 50; // Each thread performs 50 operations
 
 			group.throughput(Throughput::Elements((operations_per_thread * thread_count) as u64));
+
 			group.bench_with_input(
 				BenchmarkId::new(
 					"concurrent_inserts",
@@ -392,10 +461,12 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 
 							// Pre-generate operations for each thread to avoid RNG contention
 							let mut all_operations = Vec::new();
+
 							let mut rng = StdRng::seed_from_u64(SEED);
 
 							for thread_id in 0..num_threads {
 								let mut thread_ops = Vec::new();
+
 								for op_id in 0..ops_per_thread {
 									let operation_type = op_id % 3; // 0=insert, 1=update, 2=upsert
 									let base_key_id = thread_id * 1000 + op_id; // Avoid key conflicts between threads
@@ -407,14 +478,18 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 												format!("new_key_{}_{}", thread_id, op_id)
 													.into_bytes(),
 											);
+
 											let value = generate_value(&mut rng, 100);
+
 											thread_ops.push(("insert", key, value));
 										}
 										1 => {
 											// Update existing key
 											let key =
 												generate_sequential_key(base_key_id % *entry_count);
+
 											let value = generate_value(&mut rng, 100);
+
 											thread_ops.push(("update", key, value));
 										}
 										2 => {
@@ -427,12 +502,15 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 														.into_bytes(),
 												) // New key
 											};
+
 											let value = generate_value(&mut rng, 100);
+
 											thread_ops.push(("upsert", key, value));
 										}
 										_ => unreachable!(),
 									}
 								}
+
 								all_operations.push(thread_ops);
 							}
 
@@ -443,25 +521,32 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 								.into_iter()
 								.map(|thread_operations| {
 									let db: Arc<Database> = Arc::clone(&db);
+
 									std::thread::spawn(move || {
 										let mut tx = db.transaction(true);
+
 										let mut results = Vec::new();
 
 										for (op_type, key, value) in thread_operations {
 											match op_type {
 												"insert" => {
-													// For inserts, use putc to ensure we're creating new entries
+													// For inserts, use putc to ensure we're
+													// creating new entries
 													let result = tx.putc(key, value, None::<&[u8]>);
+
 													results.push(result.is_ok());
 												}
 												"update" => {
-													// For updates, we don't check if key exists (simpler)
+													// For updates, we don't check if key exists
+													// (simpler)
 													let result = tx.put(key, value);
+
 													results.push(result.is_ok());
 												}
 												"upsert" => {
 													// Standard put operation (insert or update)
 													let result = tx.put(key, value);
+
 													results.push(result.is_ok());
 												}
 												_ => unreachable!(),
@@ -469,6 +554,7 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 										}
 
 										tx.commit().unwrap();
+
 										results
 									})
 								})
@@ -476,6 +562,7 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 
 							let results: Vec<_> =
 								handles.into_iter().map(|h| h.join().unwrap()).collect();
+
 							black_box(results);
 						},
 						criterion::BatchSize::LargeInput,
@@ -484,6 +571,7 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 			);
 		}
 	}
+
 	group.finish();
 }
 
@@ -493,7 +581,9 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 
 	// Test with different thread configurations
 	let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+
 	let half_cores = (cpu_cores / 2).max(1);
+
 	let cpu_config_name = format!("{}r_{}w", half_cores, half_cores);
 
 	for entry_count in [1000, 10_000].iter() {
@@ -505,9 +595,11 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 
 		for (config_name, reader_threads, writer_threads) in configurations {
 			let operations_per_thread = 25;
+
 			let total_ops = (reader_threads + writer_threads) * operations_per_thread;
 
 			group.throughput(Throughput::Elements(total_ops as u64));
+
 			group.bench_with_input(
 				BenchmarkId::new("mixed", format!("{}entries_{}", entry_count, config_name)),
 				&(entry_count, reader_threads, writer_threads, operations_per_thread),
@@ -517,6 +609,7 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 							// Setup database and pre-generate operations
 							let db =
 								Arc::new(setup_database_with_sequential_data(*entry_count, 100));
+
 							let mut rng = StdRng::seed_from_u64(SEED);
 
 							// Generate read keys
@@ -529,7 +622,9 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 								.map(|i| {
 									let key =
 										Bytes::from(format!("mixed_write_{}", i).into_bytes());
+
 									let value = generate_value(&mut rng, 100);
+
 									(key, value)
 								})
 								.collect();
@@ -542,26 +637,37 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 							// Spawn reader threads
 							for _ in 0..num_readers {
 								let db: Arc<Database> = Arc::clone(&db);
+
 								let keys = read_keys.clone();
+
 								let handle = std::thread::spawn(move || {
 									let mut tx = db.transaction(false);
+
 									let mut results = Vec::new();
+
 									for key in keys {
 										results.push(tx.get(key).unwrap());
 									}
+
 									tx.cancel().unwrap();
+
 									results.len()
 								});
+
 								handles.push(handle);
 							}
 
 							// Spawn writer threads
 							for writer_id in 0..num_writers {
 								let db: Arc<Database> = Arc::clone(&db);
+
 								let ops = write_ops.clone();
+
 								let handle = std::thread::spawn(move || {
 									let mut tx = db.transaction(true);
+
 									let mut success_count = 0;
+
 									for (key, value) in &ops {
 										// Make keys unique per writer thread
 										let unique_key = Bytes::from(
@@ -572,18 +678,23 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 											)
 											.into_bytes(),
 										);
+
 										if tx.put(unique_key, value.clone()).is_ok() {
 											success_count += 1;
 										}
 									}
+
 									tx.commit().unwrap();
+
 									success_count
 								});
+
 								handles.push(handle);
 							}
 
 							let results: Vec<_> =
 								handles.into_iter().map(|h| h.join().unwrap()).collect();
+
 							black_box(results);
 						},
 						criterion::BatchSize::LargeInput,
@@ -592,6 +703,7 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 			);
 		}
 	}
+
 	group.finish();
 }
 
@@ -605,17 +717,21 @@ fn bench_mixed_workload(c: &mut Criterion) {
 		// Generate operations mix: 70% reads, 20% writes, 10% deletes
 		// Use existing keys for reads/deletes, new keys for writes
 		let mut operations = Vec::new();
+
 		for i in 0..70 {
 			operations.push(("read", generate_sequential_key(i % *entry_count)));
 		}
+
 		for _ in 0..20 {
 			operations.push(("write", generate_key(&mut rng, 16)));
 		}
+
 		for i in 0..10 {
 			operations.push(("delete", generate_sequential_key(i % *entry_count)));
 		}
 
 		group.throughput(Throughput::Elements(operations.len() as u64));
+
 		group.bench_with_input(
 			BenchmarkId::new("mixed_70r_20w_10d", format!("{}entries", entry_count)),
 			&operations,
@@ -624,6 +740,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
 					|| setup_database_with_sequential_data(*entry_count, 100),
 					|db| {
 						let mut tx = db.transaction(true);
+
 						for (op_type, key) in ops {
 							match *op_type {
 								"read" => {
@@ -632,6 +749,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
 								"write" => {
 									let value =
 										generate_value(&mut StdRng::seed_from_u64(SEED), 100);
+
 									tx.put(key.clone(), value).unwrap();
 								}
 								"delete" => {
@@ -640,6 +758,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
 								_ => unreachable!(),
 							}
 						}
+
 						tx.commit().unwrap();
 					},
 					criterion::BatchSize::LargeInput,
@@ -647,6 +766,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
 			},
 		);
 	}
+
 	group.finish();
 }
 
@@ -697,9 +817,11 @@ fn bench_database_options(c: &mut Criterion) {
 					|| Database::new_with_options(options.clone()),
 					|db: Database| {
 						let mut tx = db.transaction(true);
+
 						for (key, value) in data.iter() {
 							tx.put(key.clone(), value.clone()).unwrap();
 						}
+
 						tx.commit().unwrap();
 					},
 					criterion::BatchSize::LargeInput,
@@ -707,6 +829,7 @@ fn bench_database_options(c: &mut Criterion) {
 			},
 		);
 	}
+
 	group.finish();
 }
 

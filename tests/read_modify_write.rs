@@ -25,13 +25,16 @@ use surrealmx::Database;
 // =============================================================================
 
 #[test]
+
 fn increment_pattern_ssi() {
 	let db = Database::new();
 
 	// Initialize counter
 	{
 		let mut tx = db.transaction(true);
+
 		tx.set("counter", "0").unwrap();
+
 		tx.commit().unwrap();
 	}
 
@@ -41,19 +44,25 @@ fn increment_pattern_ssi() {
 
 		// Read current value
 		let current = tx.get("counter").unwrap().unwrap();
+
 		let current_val: i32 = std::str::from_utf8(&current).unwrap().parse().unwrap();
+
 		assert_eq!(current_val, expected_before, "Counter should be at expected value");
 
 		// Increment
 		let new_val = current_val + 1;
+
 		tx.set("counter", new_val.to_string()).unwrap();
+
 		tx.commit().unwrap();
 	}
 
 	// Verify final value
 	let tx = db.transaction(false);
+
 	let final_val: i32 =
 		std::str::from_utf8(&tx.get("counter").unwrap().unwrap()).unwrap().parse().unwrap();
+
 	assert_eq!(final_val, 5, "Counter should be 5 after 5 increments");
 }
 
@@ -62,41 +71,52 @@ fn increment_pattern_ssi() {
 // =============================================================================
 
 #[test]
+
 fn compare_and_swap_pattern() {
 	let db = Database::new();
 
 	// Initialize value
 	{
 		let mut tx = db.transaction(true);
+
 		tx.set("cas_key", "initial").unwrap();
+
 		tx.commit().unwrap();
 	}
 
 	// Successful CAS: expect "initial", set to "updated"
 	{
 		let mut tx = db.transaction(true);
+
 		let result = tx.putc("cas_key", "updated", Some::<&str>("initial"));
+
 		assert!(result.is_ok(), "CAS should succeed when expected value matches");
+
 		tx.commit().unwrap();
 	}
 
 	// Verify update
 	{
 		let tx = db.transaction(false);
+
 		assert_eq!(tx.get("cas_key").unwrap(), Some(Bytes::from("updated")));
 	}
 
 	// Failed CAS: expect "initial" (but it's now "updated")
 	{
 		let mut tx = db.transaction(true);
+
 		let result = tx.putc("cas_key", "should_not_be_set", Some::<&str>("initial"));
+
 		assert!(result.is_err(), "CAS should fail when expected value doesn't match");
+
 		tx.cancel().unwrap();
 	}
 
 	// Value should still be "updated"
 	{
 		let tx = db.transaction(false);
+
 		assert_eq!(tx.get("cas_key").unwrap(), Some(Bytes::from("updated")));
 	}
 }
@@ -106,13 +126,16 @@ fn compare_and_swap_pattern() {
 // =============================================================================
 
 #[test]
+
 fn conditional_update_chain() {
 	let db = Database::new();
 
 	// Initialize state machine value
 	{
 		let mut tx = db.transaction(true);
+
 		tx.set("state", "pending").unwrap();
+
 		tx.commit().unwrap();
 	}
 
@@ -121,21 +144,28 @@ fn conditional_update_chain() {
 
 	for (expected, new_state) in transitions {
 		let mut tx = db.transaction(true);
+
 		// Use putc to ensure atomic state transition
 		let result = tx.putc("state", new_state, Some::<&str>(expected));
+
 		assert!(result.is_ok(), "Transition from {} to {} should succeed", expected, new_state);
+
 		tx.commit().unwrap();
 	}
 
 	// Verify final state
 	let tx = db.transaction(false);
+
 	assert_eq!(tx.get("state").unwrap(), Some(Bytes::from("completed")));
 
 	// Attempting invalid transition should fail
 	{
 		let mut tx = db.transaction(true);
+
 		let result = tx.putc("state", "pending", Some::<&str>("processing"));
+
 		assert!(result.is_err(), "Invalid transition should fail");
+
 		tx.cancel().unwrap();
 	}
 }
@@ -145,14 +175,18 @@ fn conditional_update_chain() {
 // =============================================================================
 
 #[test]
+
 fn optimistic_locking_pattern() {
 	let db = Database::new();
 
 	// Initialize data with version
 	{
 		let mut tx = db.transaction(true);
+
 		tx.set("data", "initial_data").unwrap();
+
 		tx.set("data_version", "1").unwrap();
+
 		tx.commit().unwrap();
 	}
 
@@ -162,6 +196,7 @@ fn optimistic_locking_pattern() {
 
 		// Read current version
 		let version = tx.get("data_version").unwrap().unwrap();
+
 		let version_num: i32 = std::str::from_utf8(&version).unwrap().parse().unwrap();
 
 		// Read and modify data
@@ -169,6 +204,7 @@ fn optimistic_locking_pattern() {
 
 		// Update data and bump version
 		tx.set("data", "modified_data").unwrap();
+
 		tx.set("data_version", (version_num + 1).to_string()).unwrap();
 
 		tx.commit().unwrap();
@@ -176,7 +212,9 @@ fn optimistic_locking_pattern() {
 
 	// Verify update
 	let tx = db.transaction(false);
+
 	assert_eq!(tx.get("data").unwrap(), Some(Bytes::from("modified_data")));
+
 	assert_eq!(tx.get("data_version").unwrap(), Some(Bytes::from("2")));
 }
 
@@ -185,29 +223,36 @@ fn optimistic_locking_pattern() {
 // =============================================================================
 
 #[test]
+
 fn retry_on_conflict() {
 	let db = Database::new();
 
 	// Initialize counter
 	{
 		let mut tx = db.transaction(true);
+
 		tx.set("retry_counter", "0").unwrap();
+
 		tx.commit().unwrap();
 	}
 
 	// Verify initial value is set
 	{
 		let tx = db.transaction(false);
+
 		let val = tx.get("retry_counter").unwrap();
+
 		assert_eq!(val, Some(Bytes::from("0")), "Counter should be initialized to 0");
 	}
 
 	// Perform sequential increments with retry-on-conflict pattern
 	let num_increments = 5;
+
 	let mut total_retries = 0;
 
 	for _ in 0..num_increments {
 		let max_retries = 10;
+
 		let mut retries = 0;
 
 		loop {
@@ -215,6 +260,7 @@ fn retry_on_conflict() {
 
 			// Read current value
 			let current = tx.get("retry_counter").unwrap().expect("Counter should exist");
+
 			let current_val: i32 = std::str::from_utf8(&current).unwrap().parse().unwrap();
 
 			// Increment
@@ -225,7 +271,9 @@ fn retry_on_conflict() {
 				Ok(_) => break,
 				Err(_) => {
 					retries += 1;
+
 					total_retries += 1;
+
 					if retries >= max_retries {
 						panic!("Exceeded max retries");
 					}
@@ -236,6 +284,7 @@ fn retry_on_conflict() {
 
 	// Verify final value
 	let tx = db.transaction(false);
+
 	let final_val: i32 =
 		std::str::from_utf8(&tx.get("retry_counter").unwrap().unwrap()).unwrap().parse().unwrap();
 

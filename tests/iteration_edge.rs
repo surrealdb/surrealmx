@@ -15,11 +15,14 @@
 //! Iteration edge case tests for SurrealMX.
 //!
 //! Tests iterator and cursor behavior under edge conditions including
-//! modifications during iteration, transaction lifecycle, and concurrent access.
+//! modifications during iteration, transaction lifecycle, and concurrent
+//! access.
 
 use bytes::Bytes;
-use std::sync::{Arc, Barrier};
-use std::thread;
+use std::{
+	sync::{Arc, Barrier},
+	thread,
+};
 use surrealmx::Database;
 
 // =============================================================================
@@ -27,29 +30,39 @@ use surrealmx::Database;
 // =============================================================================
 
 #[test]
+
 fn cursor_after_transaction_cancel() {
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
+
 	tx.set("a", "1").unwrap();
+
 	tx.set("b", "2").unwrap();
+
 	tx.set("c", "3").unwrap();
+
 	tx.commit().unwrap();
 
 	let mut tx = db.transaction(false);
+
 	let mut cursor = tx.cursor("a".."z").unwrap();
 
 	// Use cursor before cancel
 	cursor.seek_to_first();
+
 	assert!(cursor.valid());
+
 	assert_eq!(cursor.key().unwrap().as_ref(), b"a");
 
-	// Cancel transaction
+	// Drop cursor before cancelling transaction
+	drop(cursor);
+
 	tx.cancel().unwrap();
 
-	// Cursor operations after cancel should fail gracefully or return invalid state
-	// The exact behavior depends on implementation - cursor may become invalid
-	// or operations may return errors
+	// Cursor operations after cancel should fail gracefully or return invalid
+	// state The exact behavior depends on implementation - cursor may become
+	// invalid or operations may return errors
 }
 
 // =============================================================================
@@ -57,14 +70,19 @@ fn cursor_after_transaction_cancel() {
 // =============================================================================
 
 #[test]
+
 fn modify_key_while_iterating() {
 	let db = Database::new();
 
 	// Create initial data
 	let mut tx = db.transaction(true);
+
 	tx.set("key_a", "value_a").unwrap();
+
 	tx.set("key_b", "value_b").unwrap();
+
 	tx.set("key_c", "value_c").unwrap();
+
 	tx.commit().unwrap();
 
 	// Start a write transaction and iterate
@@ -75,6 +93,7 @@ fn modify_key_while_iterating() {
 
 	// Read first element
 	let first = iter.next().unwrap();
+
 	assert_eq!(first.0.as_ref(), b"key_a");
 
 	// Drop iterator before modifying
@@ -85,25 +104,33 @@ fn modify_key_while_iterating() {
 
 	// Create a new iterator - should see the modification
 	let results: Vec<_> = tx.scan_iter("key_".."key_z").unwrap().collect();
+
 	assert_eq!(results.len(), 3);
 
 	// Find key_b and verify it has the modified value
 	let key_b = results.iter().find(|(k, _)| k.as_ref() == b"key_b").unwrap();
+
 	assert_eq!(key_b.1, Bytes::from("modified_b"));
 
 	tx.commit().unwrap();
 }
 
 #[test]
+
 fn delete_key_while_iterating() {
 	let db = Database::new();
 
 	// Create initial data
 	let mut tx = db.transaction(true);
+
 	tx.set("item_1", "v1").unwrap();
+
 	tx.set("item_2", "v2").unwrap();
+
 	tx.set("item_3", "v3").unwrap();
+
 	tx.set("item_4", "v4").unwrap();
+
 	tx.commit().unwrap();
 
 	// Start a write transaction
@@ -111,6 +138,7 @@ fn delete_key_while_iterating() {
 
 	// Get first scan result
 	let first_scan: Vec<_> = tx.scan_iter("item_".."item_z").unwrap().collect();
+
 	assert_eq!(first_scan.len(), 4);
 
 	// Delete a key
@@ -118,26 +146,35 @@ fn delete_key_while_iterating() {
 
 	// New iteration should not see the deleted key
 	let second_scan: Vec<_> = tx.scan_iter("item_".."item_z").unwrap().collect();
+
 	assert_eq!(second_scan.len(), 3);
+
 	assert!(!second_scan.iter().any(|(k, _)| k.as_ref() == b"item_2"));
 
 	tx.commit().unwrap();
 
 	// Verify deletion persisted
 	let tx = db.transaction(false);
+
 	let final_scan: Vec<_> = tx.scan_iter("item_".."item_z").unwrap().collect();
+
 	assert_eq!(final_scan.len(), 3);
 }
 
 #[test]
+
 fn seek_after_mutation() {
 	let db = Database::new();
 
 	// Create initial data
 	let mut tx = db.transaction(true);
+
 	tx.set("a", "1").unwrap();
+
 	tx.set("c", "3").unwrap();
+
 	tx.set("e", "5").unwrap();
+
 	tx.commit().unwrap();
 
 	// Start write transaction
@@ -145,7 +182,9 @@ fn seek_after_mutation() {
 
 	// Create cursor and seek
 	let mut cursor = tx.cursor("a".."z").unwrap();
+
 	cursor.seek_to_first();
+
 	assert_eq!(cursor.key().unwrap().as_ref(), b"a");
 
 	// Drop cursor before mutation
@@ -156,69 +195,94 @@ fn seek_after_mutation() {
 
 	// Create new cursor and verify it sees the new key
 	let mut cursor = tx.cursor("a".."z").unwrap();
+
 	cursor.seek("b");
+
 	assert!(cursor.valid());
+
 	assert_eq!(cursor.key().unwrap().as_ref(), b"b");
+
 	assert_eq!(cursor.value().unwrap().as_ref(), b"2");
+
+	drop(cursor);
 
 	tx.commit().unwrap();
 }
 
 #[test]
+
 fn iterator_exhaustion_and_reuse() {
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
+
 	tx.set("x", "1").unwrap();
+
 	tx.set("y", "2").unwrap();
+
 	tx.set("z", "3").unwrap();
+
 	tx.commit().unwrap();
 
 	let tx = db.transaction(false);
 
 	// Create iterator and exhaust it
 	let mut iter = tx.keys_iter("x".."zz").unwrap();
+
 	let first = iter.next();
+
 	assert_eq!(first, Some(Bytes::from("x")));
+
 	let second = iter.next();
+
 	assert_eq!(second, Some(Bytes::from("y")));
+
 	let third = iter.next();
+
 	assert_eq!(third, Some(Bytes::from("z")));
 
 	// Iterator should be exhausted
 	assert!(iter.next().is_none());
+
 	assert!(iter.next().is_none()); // Multiple calls should keep returning None
 
 	// Creating a new iterator should work fine
 	let mut new_iter = tx.keys_iter("x".."zz").unwrap();
+
 	assert_eq!(new_iter.next(), Some(Bytes::from("x")));
 }
 
 #[test]
+
 fn concurrent_iteration_same_range() {
 	let db = Arc::new(Database::new());
 
 	// Create initial data
 	{
 		let mut tx = db.transaction(true);
+
 		for i in 0..20 {
 			tx.set(format!("data_{:02}", i), format!("value_{}", i)).unwrap();
 		}
+
 		tx.commit().unwrap();
 	}
 
 	let barrier = Arc::new(Barrier::new(3));
+
 	let mut handles = vec![];
 
 	// Spawn multiple threads that iterate over the same range
 	for thread_id in 0..3 {
 		let db = Arc::clone(&db);
+
 		let barrier = Arc::clone(&barrier);
 
 		handles.push(thread::spawn(move || {
 			barrier.wait();
 
 			let tx = db.transaction(false);
+
 			let results: Vec<_> = tx.scan_iter("data_".."data_z").unwrap().collect();
 
 			(thread_id, results.len())

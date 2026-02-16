@@ -26,11 +26,14 @@ use tempfile::TempDir;
 // =============================================================================
 
 #[test]
+
 fn recovery_with_empty_aol() {
 	let temp_dir = TempDir::new().unwrap();
+
 	let temp_path = temp_dir.path();
 
 	let db_opts = DatabaseOptions::default();
+
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::SynchronousOnCommit)
 		.with_snapshot_mode(SnapshotMode::Never);
@@ -48,18 +51,24 @@ fn recovery_with_empty_aol() {
 
 		// Should work with empty/no AOL
 		let mut tx = db.transaction(false);
+
 		let keys = tx.keys("".."z", None, None).unwrap();
+
 		assert!(keys.is_empty(), "Should recover empty database");
+
 		tx.cancel().unwrap();
 	}
 }
 
 #[test]
+
 fn recovery_snapshot_only_no_aol() {
 	let temp_dir = TempDir::new().unwrap();
+
 	let temp_path = temp_dir.path();
 
 	let db_opts = DatabaseOptions::default();
+
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::Never)
 		.with_snapshot_mode(SnapshotMode::Never);
@@ -69,8 +78,11 @@ fn recovery_snapshot_only_no_aol() {
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
+
 		tx.set("key1", "value1").unwrap();
+
 		tx.set("key2", "value2").unwrap();
+
 		tx.commit().unwrap();
 
 		if let Some(persistence) = db.persistence() {
@@ -83,18 +95,24 @@ fn recovery_snapshot_only_no_aol() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
+
 		assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
+
 		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+
 		tx.cancel().unwrap();
 	}
 }
 
 #[test]
+
 fn recovery_aol_only_no_snapshot() {
 	let temp_dir = TempDir::new().unwrap();
+
 	let temp_path = temp_dir.path();
 
 	let db_opts = DatabaseOptions::default();
+
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::SynchronousOnCommit)
 		.with_snapshot_mode(SnapshotMode::Never)
@@ -105,11 +123,15 @@ fn recovery_aol_only_no_snapshot() {
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
+
 		tx.set("key1", "value1").unwrap();
+
 		tx.commit().unwrap();
 
 		let mut tx = db.transaction(true);
+
 		tx.set("key2", "value2").unwrap();
+
 		tx.commit().unwrap();
 
 		// No snapshot created
@@ -120,18 +142,24 @@ fn recovery_aol_only_no_snapshot() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
+
 		assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
+
 		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+
 		tx.cancel().unwrap();
 	}
 }
 
 #[test]
+
 fn recovery_combined_snapshot_and_aol() {
 	let temp_dir = TempDir::new().unwrap();
+
 	let temp_path = temp_dir.path();
 
 	let db_opts = DatabaseOptions::default();
+
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::SynchronousOnCommit)
 		.with_snapshot_mode(SnapshotMode::Never)
@@ -143,7 +171,9 @@ fn recovery_combined_snapshot_and_aol() {
 
 		// Data before snapshot
 		let mut tx = db.transaction(true);
+
 		tx.set("before_snap", "value1").unwrap();
+
 		tx.commit().unwrap();
 
 		// Create snapshot
@@ -153,7 +183,9 @@ fn recovery_combined_snapshot_and_aol() {
 
 		// Data after snapshot (goes to AOL)
 		let mut tx = db.transaction(true);
+
 		tx.set("after_snap", "value2").unwrap();
+
 		tx.commit().unwrap();
 	}
 
@@ -162,8 +194,11 @@ fn recovery_combined_snapshot_and_aol() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
+
 		assert_eq!(tx.get("before_snap").unwrap(), Some(Bytes::from("value1")));
+
 		assert_eq!(tx.get("after_snap").unwrap(), Some(Bytes::from("value2")));
+
 		tx.cancel().unwrap();
 	}
 }
@@ -173,11 +208,14 @@ fn recovery_combined_snapshot_and_aol() {
 // =============================================================================
 
 #[test]
+
 fn snapshot_during_read_transaction() {
 	let temp_dir = TempDir::new().unwrap();
+
 	let temp_path = temp_dir.path();
 
 	let db_opts = DatabaseOptions::default();
+
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::Never)
 		.with_snapshot_mode(SnapshotMode::Never);
@@ -186,7 +224,9 @@ fn snapshot_during_read_transaction() {
 
 	// Add data
 	let mut tx = db.transaction(true);
+
 	tx.set("key", "value").unwrap();
+
 	tx.commit().unwrap();
 
 	// Start read transaction
@@ -195,6 +235,7 @@ fn snapshot_during_read_transaction() {
 	// Create snapshot while read is active
 	if let Some(persistence) = db.persistence() {
 		let result = persistence.snapshot();
+
 		assert!(result.is_ok(), "Snapshot during read should succeed");
 	}
 
@@ -203,11 +244,14 @@ fn snapshot_during_read_transaction() {
 }
 
 #[test]
+
 fn snapshot_preserves_delete_state() {
 	let temp_dir = TempDir::new().unwrap();
+
 	let temp_path = temp_dir.path();
 
 	let db_opts = DatabaseOptions::default();
+
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::Never)
 		.with_snapshot_mode(SnapshotMode::Never);
@@ -217,12 +261,17 @@ fn snapshot_preserves_delete_state() {
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
+
 		tx.set("keep", "keeper").unwrap();
+
 		tx.set("delete_me", "deleted").unwrap();
+
 		tx.commit().unwrap();
 
 		let mut tx = db.transaction(true);
+
 		tx.del("delete_me").unwrap();
+
 		tx.commit().unwrap();
 
 		if let Some(persistence) = db.persistence() {
@@ -235,8 +284,11 @@ fn snapshot_preserves_delete_state() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
+
 		assert_eq!(tx.get("keep").unwrap(), Some(Bytes::from("keeper")));
+
 		assert!(tx.get("delete_me").unwrap().is_none(), "Deleted key should stay deleted");
+
 		tx.cancel().unwrap();
 	}
 }
@@ -246,11 +298,14 @@ fn snapshot_preserves_delete_state() {
 // =============================================================================
 
 #[test]
+
 fn interval_snapshot_triggers() {
 	let temp_dir = TempDir::new().unwrap();
+
 	let temp_path = temp_dir.path();
 
 	let db_opts = DatabaseOptions::default();
+
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::Never)
 		.with_snapshot_mode(SnapshotMode::Interval(Duration::from_millis(100)));
@@ -259,7 +314,9 @@ fn interval_snapshot_triggers() {
 
 	// Add data
 	let mut tx = db.transaction(true);
+
 	tx.set("key", "value").unwrap();
+
 	tx.commit().unwrap();
 
 	// Wait for interval snapshot
@@ -267,6 +324,7 @@ fn interval_snapshot_triggers() {
 
 	// Snapshot should exist
 	let snapshot_path = temp_path.join("snapshot.bin");
+
 	assert!(snapshot_path.exists(), "Interval snapshot should be created");
 }
 
@@ -275,11 +333,14 @@ fn interval_snapshot_triggers() {
 // =============================================================================
 
 #[test]
+
 fn async_aol_eventual_persistence() {
 	let temp_dir = TempDir::new().unwrap();
+
 	let temp_path = temp_dir.path();
 
 	let db_opts = DatabaseOptions::default();
+
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::AsynchronousAfterCommit)
 		.with_snapshot_mode(SnapshotMode::Never);
@@ -289,7 +350,9 @@ fn async_aol_eventual_persistence() {
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
+
 		tx.set("async_key", "async_value").unwrap();
+
 		tx.commit().unwrap();
 
 		// Wait for async write
@@ -298,9 +361,11 @@ fn async_aol_eventual_persistence() {
 
 	// Verify AOL file has content
 	let aol_path = temp_path.join("aol.bin");
+
 	assert!(aol_path.exists(), "AOL file should exist");
 
 	let aol_size = std::fs::metadata(&aol_path).unwrap().len();
+
 	assert!(aol_size > 0, "AOL should have content");
 
 	// Recovery should work
@@ -308,7 +373,9 @@ fn async_aol_eventual_persistence() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
+
 		assert_eq!(tx.get("async_key").unwrap(), Some(Bytes::from("async_value")));
+
 		tx.cancel().unwrap();
 	}
 }
@@ -318,11 +385,14 @@ fn async_aol_eventual_persistence() {
 // =============================================================================
 
 #[test]
+
 fn fsync_interval_mode() {
 	let temp_dir = TempDir::new().unwrap();
+
 	let temp_path = temp_dir.path();
 
 	let db_opts = DatabaseOptions::default();
+
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::SynchronousOnCommit)
 		.with_snapshot_mode(SnapshotMode::Never)
@@ -333,7 +403,9 @@ fn fsync_interval_mode() {
 	// Write multiple transactions
 	for i in 0..5 {
 		let mut tx = db.transaction(true);
+
 		tx.set(format!("key_{}", i), format!("value_{}", i)).unwrap();
+
 		tx.commit().unwrap();
 	}
 
@@ -342,15 +414,19 @@ fn fsync_interval_mode() {
 
 	// Data should be persisted
 	let aol_path = temp_path.join("aol.bin");
+
 	assert!(aol_path.exists());
 }
 
 #[test]
+
 fn fsync_never_mode() {
 	let temp_dir = TempDir::new().unwrap();
+
 	let temp_path = temp_dir.path();
 
 	let db_opts = DatabaseOptions::default();
+
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::SynchronousOnCommit)
 		.with_snapshot_mode(SnapshotMode::Never)
@@ -360,7 +436,9 @@ fn fsync_never_mode() {
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
+
 		tx.set("key", "value").unwrap();
+
 		tx.commit().unwrap();
 	}
 
@@ -369,7 +447,9 @@ fn fsync_never_mode() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
+
 		assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("value")));
+
 		tx.cancel().unwrap();
 	}
 }
@@ -379,17 +459,23 @@ fn fsync_never_mode() {
 // =============================================================================
 
 #[test]
+
 fn custom_aol_and_snapshot_paths() {
 	let temp_dir = TempDir::new().unwrap();
+
 	let temp_path = temp_dir.path();
 
 	// Create custom directories
 	let custom_aol_dir = temp_path.join("custom_logs");
+
 	let custom_snap_dir = temp_path.join("custom_snaps");
+
 	std::fs::create_dir_all(&custom_aol_dir).unwrap();
+
 	std::fs::create_dir_all(&custom_snap_dir).unwrap();
 
 	let db_opts = DatabaseOptions::default();
+
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::SynchronousOnCommit)
 		.with_snapshot_mode(SnapshotMode::Never)
@@ -401,7 +487,9 @@ fn custom_aol_and_snapshot_paths() {
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
+
 		tx.set("custom_key", "custom_value").unwrap();
+
 		tx.commit().unwrap();
 
 		if let Some(persistence) = db.persistence() {
@@ -411,6 +499,7 @@ fn custom_aol_and_snapshot_paths() {
 
 	// Verify custom paths used
 	assert!(custom_aol_dir.join("my.aol").exists(), "Custom AOL path should be used");
+
 	assert!(custom_snap_dir.join("my.snap").exists(), "Custom snapshot path should be used");
 
 	// Verify recovery works from custom paths
@@ -418,7 +507,9 @@ fn custom_aol_and_snapshot_paths() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
+
 		assert_eq!(tx.get("custom_key").unwrap(), Some(Bytes::from("custom_value")));
+
 		tx.cancel().unwrap();
 	}
 }
@@ -428,11 +519,14 @@ fn custom_aol_and_snapshot_paths() {
 // =============================================================================
 
 #[test]
+
 fn multiple_restarts_accumulate_data() {
 	let temp_dir = TempDir::new().unwrap();
+
 	let temp_path = temp_dir.path();
 
 	let db_opts = DatabaseOptions::default();
+
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::SynchronousOnCommit)
 		.with_snapshot_mode(SnapshotMode::Never)
@@ -443,7 +537,9 @@ fn multiple_restarts_accumulate_data() {
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
+
 		tx.set("key1", "value1").unwrap();
+
 		tx.commit().unwrap();
 	}
 
@@ -453,11 +549,14 @@ fn multiple_restarts_accumulate_data() {
 
 		// Should see key1
 		let tx = db.transaction(false);
+
 		assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
 
 		// Add key2
 		let mut tx = db.transaction(true);
+
 		tx.set("key2", "value2").unwrap();
+
 		tx.commit().unwrap();
 	}
 
@@ -467,12 +566,16 @@ fn multiple_restarts_accumulate_data() {
 
 		// Should see both keys
 		let tx = db.transaction(false);
+
 		assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
+
 		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
 
 		// Add key3
 		let mut tx = db.transaction(true);
+
 		tx.set("key3", "value3").unwrap();
+
 		tx.commit().unwrap();
 	}
 
@@ -481,19 +584,26 @@ fn multiple_restarts_accumulate_data() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
+
 		assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
+
 		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+
 		assert_eq!(tx.get("key3").unwrap(), Some(Bytes::from("value3")));
+
 		tx.cancel().unwrap();
 	}
 }
 
 #[test]
+
 fn snapshot_truncates_aol() {
 	let temp_dir = TempDir::new().unwrap();
+
 	let temp_path = temp_dir.path();
 
 	let db_opts = DatabaseOptions::default();
+
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::SynchronousOnCommit)
 		.with_snapshot_mode(SnapshotMode::Never)
@@ -504,11 +614,14 @@ fn snapshot_truncates_aol() {
 	// Add lots of data to AOL
 	for i in 0..100 {
 		let mut tx = db.transaction(true);
+
 		tx.set(format!("key_{:04}", i), format!("value_{}", i)).unwrap();
+
 		tx.commit().unwrap();
 	}
 
 	let aol_path = temp_path.join("aol.bin");
+
 	let aol_size_before = std::fs::metadata(&aol_path).unwrap().len();
 
 	// Create snapshot (should truncate AOL)

@@ -18,6 +18,7 @@ use bytes::Bytes;
 use std::cmp::Ordering;
 
 #[derive(Clone, Eq, PartialEq)]
+
 pub struct Version {
 	/// The version of this entry
 	pub(crate) version: u64,
@@ -29,6 +30,7 @@ pub struct Version {
 
 impl Ord for Version {
 	#[inline]
+
 	fn cmp(&self, other: &Self) -> Ordering {
 		self.version.cmp(&other.version)
 	}
@@ -36,6 +38,7 @@ impl Ord for Version {
 
 impl PartialOrd for Version {
 	#[inline]
+
 	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
 		Some(self.cmp(other))
 	}
