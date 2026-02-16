@@ -121,7 +121,8 @@ impl<'a> Cursor<'a> {
 		self.current.as_ref().map(|(k, _)| k)
 	}
 
-	/// Get the current value, or None if the cursor is not valid or the entry is deleted.
+	/// Get the current value, or None if the cursor is not valid or the entry
+	/// is deleted.
 	#[inline]
 	pub fn value(&self) -> Option<&Bytes> {
 		self.current.as_ref().and_then(|(_, v)| v.as_ref())
@@ -392,7 +393,8 @@ impl<'a> DoubleEndedIterator for KeyIterator<'a> {
 
 /// An iterator over key-value pairs in a range.
 ///
-/// This iterator skips deleted entries and only yields existing key-value pairs.
+/// This iterator skips deleted entries and only yields existing key-value
+/// pairs.
 ///
 /// # Example
 ///

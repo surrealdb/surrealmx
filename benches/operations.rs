@@ -311,7 +311,8 @@ fn bench_total_operations(c: &mut Criterion) {
 	group.finish();
 }
 
-// Cursor-based iteration benchmarks (exercises persistent MergeIterator in Cursor)
+// Cursor-based iteration benchmarks (exercises persistent MergeIterator in
+// Cursor)
 fn bench_cursor_scan(c: &mut Criterion) {
 	let mut group = c.benchmark_group("cursor_scan");
 
@@ -440,7 +441,8 @@ fn bench_concurrent_readers(c: &mut Criterion) {
 		let db = Arc::new(setup_database_with_sequential_data(*entry_count, 100));
 		let mut rng = StdRng::seed_from_u64(SEED);
 
-		// Pre-generate keys for lookup (more keys for better distribution across threads)
+		// Pre-generate keys for lookup (more keys for better distribution across
+		// threads)
 		let lookup_keys: Vec<Bytes> =
 			(0..200).map(|_| generate_sequential_key(rng.random_range(0..*entry_count))).collect();
 
@@ -567,12 +569,14 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 										for (op_type, key, value) in thread_operations {
 											match op_type {
 												"insert" => {
-													// For inserts, use putc to ensure we're creating new entries
+													// For inserts, use putc to ensure we're
+													// creating new entries
 													let result = tx.putc(key, value, None::<&[u8]>);
 													results.push(result.is_ok());
 												}
 												"update" => {
-													// For updates, we don't check if key exists (simpler)
+													// For updates, we don't check if key exists
+													// (simpler)
 													let result = tx.put(key, value);
 													results.push(result.is_ok());
 												}

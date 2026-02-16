@@ -10,7 +10,8 @@ pub(crate) const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60);
 /// Default interval at which transaction queue cleanup is performed.
 pub(crate) const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Default interval at which the timestamp oracle resyncs with the system clock.
+/// Default interval at which the timestamp oracle resyncs with the system
+/// clock.
 pub(crate) const DEFAULT_RESYNC_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Configuration options for [`crate::Database`].
@@ -18,17 +19,20 @@ pub(crate) const DEFAULT_RESYNC_INTERVAL: Duration = Duration::from_secs(5);
 pub struct DatabaseOptions {
 	/// Maximum number of transactions kept in the pool (default: 512).
 	pub pool_size: usize,
-	/// Whether the garbage collector thread is started automatically (default: true).
+	/// Whether the garbage collector thread is started automatically (default:
+	/// true).
 	pub enable_gc: bool,
 	/// Interval at which the garbage collector wakes up (default: 60 seconds).
 	pub gc_interval: Duration,
-	/// Whether the cleanup worker thread is started automatically (default: true).
+	/// Whether the cleanup worker thread is started automatically (default:
+	/// true).
 	pub enable_cleanup: bool,
 	/// Interval at which the cleanup worker wakes up (default: 1 second).
 	pub cleanup_interval: Duration,
 	/// Threshold after which transaction state maps are reset (default: 100).
 	pub reset_threshold: usize,
-	/// Interval at which the timestamp oracle resyncs with the system clock (default: 5 seconds).
+	/// Interval at which the timestamp oracle resyncs with the system clock
+	/// (default: 5 seconds).
 	pub resync_interval: Duration,
 }
 
@@ -88,7 +92,8 @@ impl DatabaseOptions {
 		self
 	}
 
-	/// Set the interval at which the timestamp oracle resyncs with the system clock.
+	/// Set the interval at which the timestamp oracle resyncs with the system
+	/// clock.
 	pub fn with_resync_interval(mut self, interval: Duration) -> Self {
 		self.resync_interval = interval;
 		self
@@ -101,7 +106,8 @@ impl DatabaseOptions {
 		self
 	}
 
-	/// Configure for high-performance scenarios with faster intervals and larger thresholds.
+	/// Configure for high-performance scenarios with faster intervals and
+	/// larger thresholds.
 	pub fn with_high_performance(mut self) -> Self {
 		self.pool_size *= 2;
 		self.gc_interval = Duration::from_secs(30);
@@ -111,7 +117,8 @@ impl DatabaseOptions {
 		self
 	}
 
-	/// Configure for low-resource scenarios with slower intervals and smaller thresholds.
+	/// Configure for low-resource scenarios with slower intervals and smaller
+	/// thresholds.
 	pub fn with_low_resource(mut self) -> Self {
 		self.pool_size /= 2;
 		self.gc_interval = Duration::from_secs(120);

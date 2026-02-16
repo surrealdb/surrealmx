@@ -81,7 +81,8 @@ impl Transaction {
 		self
 	}
 
-	/// Ensure this transaction is committed with serializable snapshot isolation guarantees
+	/// Ensure this transaction is committed with serializable snapshot
+	/// isolation guarantees
 	pub fn with_serializable_snapshot_isolation(mut self) -> Self {
 		self.inner.as_mut().unwrap().mode = IsolationLevel::SerializableSnapshotIsolation;
 		self
@@ -286,7 +287,8 @@ impl Transaction {
 		self.inner.as_ref().unwrap().keys_at_version(rng, skip, limit, version)
 	}
 
-	/// Retrieve a range of keys from the database at a specific version, in reverse order
+	/// Retrieve a range of keys from the database at a specific version, in
+	/// reverse order
 	pub fn keys_at_version_reverse<K>(
 		&self,
 		rng: Range<K>,
@@ -326,7 +328,8 @@ impl Transaction {
 		self.inner.as_ref().unwrap().scan_reverse(rng, skip, limit)
 	}
 
-	/// Retrieve a range of keys and values from the database at a specific version
+	/// Retrieve a range of keys and values from the database at a specific
+	/// version
 	pub fn scan_at_version<K>(
 		&self,
 		rng: Range<K>,
@@ -340,7 +343,8 @@ impl Transaction {
 		self.inner.as_ref().unwrap().scan_at_version(rng, skip, limit, version)
 	}
 
-	/// Retrieve a range of keys and values from the database at a specific version, in reverse order
+	/// Retrieve a range of keys and values from the database at a specific
+	/// version, in reverse order
 	pub fn scan_at_version_reverse<K>(
 		&self,
 		rng: Range<K>,
@@ -356,7 +360,8 @@ impl Transaction {
 
 	/// Retrieve all versions of keys within a range from the database
 	/// Returns tuples of (key, version, value) for all historical versions
-	/// The skip and limit parameters apply to the number of keys, not the number of versions
+	/// The skip and limit parameters apply to the number of keys, not the
+	/// number of versions
 	pub fn scan_all_versions<K>(
 		&self,
 		rng: Range<K>,
@@ -494,7 +499,8 @@ impl Transaction {
 		self.inner.as_ref().unwrap().scan_iter_at_version(rng, version)
 	}
 
-	/// Iterate over key-value pairs in a range at a specific version, in reverse order.
+	/// Iterate over key-value pairs in a range at a specific version, in
+	/// reverse order.
 	pub fn scan_iter_at_version_reverse<K>(
 		&self,
 		rng: Range<K>,
@@ -1352,7 +1358,8 @@ impl TransactionInner {
 		self.keys_any(rng, skip, limit, Direction::Forward, version)
 	}
 
-	/// Retrieve a range of keys from the database at a specific version, in reverse order
+	/// Retrieve a range of keys from the database at a specific version, in
+	/// reverse order
 	pub fn keys_at_version_reverse<K>(
 		&self,
 		rng: Range<K>,
@@ -1392,7 +1399,8 @@ impl TransactionInner {
 		self.scan_any(rng, skip, limit, Direction::Reverse, self.version)
 	}
 
-	/// Retrieve a range of keys and values from the database at a specific version
+	/// Retrieve a range of keys and values from the database at a specific
+	/// version
 	pub fn scan_at_version<K>(
 		&self,
 		rng: Range<K>,
@@ -1406,7 +1414,8 @@ impl TransactionInner {
 		self.scan_any(rng, skip, limit, Direction::Forward, version)
 	}
 
-	/// Retrieve a range of keys and values from the database at a specific version, in reverse order
+	/// Retrieve a range of keys and values from the database at a specific
+	/// version, in reverse order
 	pub fn scan_at_version_reverse<K>(
 		&self,
 		rng: Range<K>,
@@ -1422,7 +1431,8 @@ impl TransactionInner {
 
 	/// Retrieve all versions of keys within a range from the database
 	/// Returns tuples of (key, version, value) for all historical versions
-	/// The skip and limit parameters apply to the number of keys, not the number of versions
+	/// The skip and limit parameters apply to the number of keys, not the
+	/// number of versions
 	pub fn scan_all_versions<K>(
 		&self,
 		rng: Range<K>,
@@ -1435,7 +1445,8 @@ impl TransactionInner {
 		self.scan_all_versions_any(rng, skip, limit, self.version)
 	}
 
-	/// Helper to track a scan range in the scanset (optimized to minimize clones)
+	/// Helper to track a scan range in the scanset (optimized to minimize
+	/// clones)
 	#[inline(always)]
 	fn track_scan_range(&self, beg: &Bytes, end: &Bytes) {
 		// Add this range scan entry to the saved scans
@@ -1503,7 +1514,9 @@ impl TransactionInner {
 			};
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -1574,7 +1587,9 @@ impl TransactionInner {
 			};
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -1645,7 +1660,9 @@ impl TransactionInner {
 			};
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -1714,7 +1731,9 @@ impl TransactionInner {
 			};
 		// Create the 3-way merge iterator to iterate over keys
 		let iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -1870,7 +1889,8 @@ impl TransactionInner {
 		Ok(ScanIterator::new(cursor))
 	}
 
-	/// Iterate over key-value pairs in a range at a specific version, in reverse order.
+	/// Iterate over key-value pairs in a range at a specific version, in
+	/// reverse order.
 	pub fn scan_iter_at_version_reverse<K>(
 		&self,
 		rng: Range<K>,
@@ -2335,7 +2355,8 @@ mod tests {
 			assert!(txn2.commit().is_err());
 		}
 
-		// write-skew: read conflict when the read key was deleted by another transaction
+		// write-skew: read conflict when the read key was deleted by another
+		// transaction
 		{
 			let key = "key4";
 
@@ -3058,7 +3079,8 @@ mod tests {
 		assert_eq!(res[2].0.as_ref(), b"c"); // Local overwrite
 		assert_eq!(res[2].1.as_ref(), b"30");
 		assert_eq!(res[3].0.as_ref(), b"d"); // Local new
-		                               // "e" is deleted locally, so not in results
+		                               // "e" is deleted locally, so not in
+		                               // results
 	}
 
 	#[test]
@@ -3152,7 +3174,8 @@ mod tests {
 							// Successfully committed
 						}
 						Err(_) => {
-							// May fail due to conflicts, which is fine for this test
+							// May fail due to conflicts, which is fine for this
+							// test
 						}
 					}
 
@@ -3684,7 +3707,8 @@ mod tests {
 
 	#[test]
 	fn test_savepoint_rollback_preserves_earlier_scans() {
-		// Verify that rolling back a savepoint doesn't lose scans from before the savepoint
+		// Verify that rolling back a savepoint doesn't lose scans from before the
+		// savepoint
 
 		let db = Database::new();
 
@@ -3842,10 +3866,12 @@ mod tests {
 		// The race manifests under high concurrency when:
 		// 1. Writer commits and merges data into datastore
 		// 2. Writer removes entry from merge queue
-		// 3. Reader checks merge queue (sees removed), checks datastore (doesn't see data yet)
+		// 3. Reader checks merge queue (sees removed), checks datastore (doesn't see
+		//    data yet)
 		//
 		// This was fixed by removing the is_removed() checks and always checking all
-		// merge queue entries, since crossbeam-skiplist guarantees they remain accessible.
+		// merge queue entries, since crossbeam-skiplist guarantees they remain
+		// accessible.
 
 		let db = Database::new();
 		let db = Arc::new(db);

@@ -271,7 +271,8 @@ fn auto_detect_lz4_compressed_snapshot() {
 	let persistence_opts_default = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::Never)
 		.with_snapshot_mode(SnapshotMode::Never);
-	// Note: CompressionMode for reading is auto-detected, write mode defaults to None
+	// Note: CompressionMode for reading is auto-detected, write mode defaults to
+	// None
 
 	{
 		let db = Database::new_with_persistence(db_opts, persistence_opts_default).unwrap();

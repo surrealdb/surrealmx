@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! This module contains the merge iterator for scanning across multiple data sources.
+//! This module contains the merge iterator for scanning across multiple data
+//! sources.
 
 use crate::direction::Direction;
 use crate::versions::Versions;
@@ -30,7 +31,8 @@ use std::ops::Bound;
 /// and the MergeIterator, enabling persistent storage (e.g., in a Cursor).
 pub(crate) type SkipBounds = (Bound<Bytes>, Bound<Bytes>);
 
-/// Three-way merge iterator over tree, merge queue, and current transaction writesets
+/// Three-way merge iterator over tree, merge queue, and current transaction
+/// writesets
 pub struct MergeIterator<'a> {
 	// Source iterators
 	pub(crate) tree_iter: SkipRange<'a, Bytes, SkipBounds, Bytes, RwLock<Versions>>,
@@ -82,8 +84,7 @@ impl<'a> MergeIterator<'a> {
 		};
 
 		// Convert BTreeMap to VecDeque for O(1) sequential access
-		let mut join_entries: VecDeque<(Bytes, Option<Bytes>)> =
-			join_storage.into_iter().collect();
+		let mut join_entries: VecDeque<(Bytes, Option<Bytes>)> = join_storage.into_iter().collect();
 
 		// Get first join entry based on direction
 		let join_next = match direction {
@@ -112,7 +113,8 @@ impl<'a> MergeIterator<'a> {
 		};
 	}
 
-	/// Get next entry existence only (no key or value cloning) - optimized for counting
+	/// Get next entry existence only (no key or value cloning) - optimized for
+	/// counting
 	pub fn next_count(&mut self) -> Option<bool> {
 		loop {
 			// Find the next key to process (smallest for Forward, largest for Reverse)

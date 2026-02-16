@@ -62,6 +62,7 @@ impl Commit {
 		// No overlap was found
 		true
 	}
+
 	/// Returns true if self has no elements in common with other
 	pub fn is_disjoint_writeset(&self, other: &Arc<Commit>) -> bool {
 		// Create a key iterator for each writeset

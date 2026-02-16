@@ -65,6 +65,7 @@ impl Drop for Database {
 
 impl Deref for Database {
 	type Target = Inner;
+
 	fn deref(&self) -> &Self::Target {
 		&self.inner
 	}
@@ -101,7 +102,8 @@ impl Database {
 		db
 	}
 
-	/// Create a new persistent database with custom options and persistence settings
+	/// Create a new persistent database with custom options and persistence
+	/// settings
 	pub fn new_with_persistence(
 		opts: DatabaseOptions,
 		persistence_opts: crate::PersistenceOptions,
@@ -195,11 +197,11 @@ impl Database {
 	/// Manually perform garbage collection of stale record versions.
 	///
 	/// This function performs a full datastore scan to clean up old versions
-	/// across all keys. Note that inline garbage collection happens automatically
-	/// during transaction commits, but only for keys being modified. This function
-	/// is useful for cleaning up stale versions on keys that haven't been recently
-	/// modified, or when automatic background GC is disabled via
-	/// [`DatabaseOptions::enable_gc`].
+	/// across all keys. Note that inline garbage collection happens
+	/// automatically during transaction commits, but only for keys being
+	/// modified. This function is useful for cleaning up stale versions on
+	/// keys that haven't been recently modified, or when automatic background
+	/// GC is disabled via [`DatabaseOptions::enable_gc`].
 	pub fn run_gc(&self) {
 		// Get the current time in nanoseconds
 		let now = self.oracle.current_time_ns();
@@ -209,7 +211,8 @@ impl Database {
 		let history_cutoff = now.saturating_sub(history as u64);
 		// Get the earliest active transaction version
 		let earliest_tx = self.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(now);
-		// Use the earlier of history cutoff or earliest transaction to protect active transactions
+		// Use the earlier of history cutoff or earliest transaction to protect active
+		// transactions
 		let cleanup_ts = history_cutoff.min(earliest_tx);
 		// Iterate over the entire tree
 		for entry in self.datastore.iter() {
@@ -261,7 +264,8 @@ impl Database {
 		}
 	}
 
-	/// Start the transaction commit queue cleanup thread after creating the database
+	/// Start the transaction commit queue cleanup thread after creating the
+	/// database
 	fn initialise_cleanup_worker(&self) {
 		// Clone the underlying datastore inner
 		let db = self.inner.clone();
@@ -322,7 +326,8 @@ impl Database {
 					let history_cutoff = now.saturating_sub(history as u64);
 					// Get the earliest active transaction version
 					let earliest_tx = db.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(now);
-					// Use the earlier of history cutoff or earliest transaction to protect active transactions
+					// Use the earlier of history cutoff or earliest transaction to protect active
+					// transactions
 					let cleanup_ts = history_cutoff.min(earliest_tx);
 					// Iterate over the entire tree
 					for entry in db.datastore.iter() {
