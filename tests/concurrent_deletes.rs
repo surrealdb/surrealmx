@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Concurrent delete tests for SurrealMX.
 //!
 //! Tests delete operations under concurrent access, including racing
@@ -27,14 +26,15 @@ use surrealmx::Database;
 // =============================================================================
 // Concurrent Delete Same Key Tests
 // =============================================================================
-
 #[test]
 
 fn concurrent_delete_same_key() {
+
 	let db = Arc::new(Database::new());
 
 	// Create initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("shared_key", "value").unwrap();
@@ -48,11 +48,13 @@ fn concurrent_delete_same_key() {
 
 	// Spawn two threads that both try to delete the same key
 	for _ in 0..2 {
+
 		let db = Arc::clone(&db);
 
 		let barrier = Arc::clone(&barrier);
 
 		handles.push(thread::spawn(move || {
+
 			barrier.wait();
 
 			let mut tx = db.transaction(true).with_serializable_snapshot_isolation();
@@ -87,10 +89,12 @@ fn concurrent_delete_same_key() {
 #[test]
 
 fn delete_racing_with_update() {
+
 	let db = Arc::new(Database::new());
 
 	// Create initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", "initial").unwrap();
@@ -106,6 +110,7 @@ fn delete_racing_with_update() {
 	let barrier1 = Arc::clone(&barrier);
 
 	let delete_handle = thread::spawn(move || {
+
 		barrier1.wait();
 
 		let mut tx = db1.transaction(true).with_serializable_snapshot_isolation();
@@ -122,6 +127,7 @@ fn delete_racing_with_update() {
 	let barrier2 = Arc::clone(&barrier);
 
 	let update_handle = thread::spawn(move || {
+
 		barrier2.wait();
 
 		let mut tx = db2.transaction(true).with_serializable_snapshot_isolation();
@@ -156,13 +162,16 @@ fn delete_racing_with_update() {
 #[test]
 
 fn delete_during_range_scan() {
+
 	let db = Arc::new(Database::new());
 
 	// Create initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		for i in 0..10 {
+
 			tx.set(format!("key{:02}", i), format!("value{}", i)).unwrap();
 		}
 
@@ -177,6 +186,7 @@ fn delete_during_range_scan() {
 	let barrier1 = Arc::clone(&barrier);
 
 	let scan_handle = thread::spawn(move || {
+
 		barrier1.wait();
 
 		let mut tx = db1.transaction(true).with_serializable_snapshot_isolation();
@@ -195,6 +205,7 @@ fn delete_during_range_scan() {
 	let barrier2 = Arc::clone(&barrier);
 
 	let delete_handle = thread::spawn(move || {
+
 		barrier2.wait();
 
 		let mut tx = db2.transaction(true);
@@ -223,10 +234,12 @@ fn delete_during_range_scan() {
 #[test]
 
 fn concurrent_delete_different_keys() {
+
 	let db = Arc::new(Database::new());
 
 	// Create initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key_a", "value_a").unwrap();
@@ -244,6 +257,7 @@ fn concurrent_delete_different_keys() {
 	let barrier1 = Arc::clone(&barrier);
 
 	let handle1 = thread::spawn(move || {
+
 		barrier1.wait();
 
 		let mut tx = db1.transaction(true);
@@ -259,6 +273,7 @@ fn concurrent_delete_different_keys() {
 	let barrier2 = Arc::clone(&barrier);
 
 	let handle2 = thread::spawn(move || {
+
 		barrier2.wait();
 
 		let mut tx = db2.transaction(true);
@@ -288,10 +303,12 @@ fn concurrent_delete_different_keys() {
 #[test]
 
 fn delete_then_recreate_concurrent() {
+
 	let db = Arc::new(Database::new());
 
 	// Create initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", "original").unwrap();
@@ -307,6 +324,7 @@ fn delete_then_recreate_concurrent() {
 	let barrier1 = Arc::clone(&barrier);
 
 	let handle1 = thread::spawn(move || {
+
 		barrier1.wait();
 
 		let mut tx = db1.transaction(true).with_serializable_snapshot_isolation();
@@ -325,6 +343,7 @@ fn delete_then_recreate_concurrent() {
 	let barrier2 = Arc::clone(&barrier);
 
 	let handle2 = thread::spawn(move || {
+
 		barrier2.wait();
 
 		let mut tx = db2.transaction(true).with_serializable_snapshot_isolation();
@@ -364,10 +383,12 @@ fn delete_then_recreate_concurrent() {
 #[test]
 
 fn ssi_delete_read_conflict() {
+
 	let db = Database::new();
 
 	// Create initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", "value").unwrap();

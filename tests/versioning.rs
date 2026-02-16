@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Point-in-time query tests for SurrealMX.
 //!
 //! Tests version-specific APIs like `get_at_version()`, `exists_at_version()`,
@@ -23,6 +22,7 @@ use surrealmx::{Database, DatabaseOptions};
 
 // Helper to advance the oracle timestamp
 fn advance_time(db: &Database) {
+
 	std::thread::sleep(Duration::from_millis(5));
 
 	let mut tx = db.transaction(true);
@@ -37,10 +37,10 @@ fn advance_time(db: &Database) {
 // =============================================================================
 // get_at_version Tests
 // =============================================================================
-
 #[test]
 
 fn get_at_version_reads_historical_value() {
+
 	let db = Database::new();
 
 	// Version 1: Set initial value
@@ -106,6 +106,7 @@ fn get_at_version_reads_historical_value() {
 #[test]
 
 fn get_at_version_sees_delete_as_none() {
+
 	let db = Database::new();
 
 	// Create initial value
@@ -161,6 +162,7 @@ fn get_at_version_sees_delete_as_none() {
 #[test]
 
 fn get_at_version_non_existent_key_returns_none() {
+
 	let db = Database::new();
 
 	// Create some data
@@ -190,10 +192,10 @@ fn get_at_version_non_existent_key_returns_none() {
 // =============================================================================
 // exists_at_version Tests
 // =============================================================================
-
 #[test]
 
 fn exists_at_version_tracks_existence() {
+
 	let db = Database::new();
 
 	// Create the key
@@ -244,10 +246,10 @@ fn exists_at_version_tracks_existence() {
 // =============================================================================
 // scan_at_version Tests
 // =============================================================================
-
 #[test]
 
 fn scan_at_version_returns_consistent_snapshot() {
+
 	let db = Database::new();
 
 	// Version 1: Create initial range
@@ -314,6 +316,7 @@ fn scan_at_version_returns_consistent_snapshot() {
 #[test]
 
 fn keys_at_version_returns_historical_keys() {
+
 	let db = Database::new();
 
 	// Create initial keys
@@ -375,10 +378,10 @@ fn keys_at_version_returns_historical_keys() {
 // =============================================================================
 // scan_all_versions Tests
 // =============================================================================
-
 #[test]
 
 fn scan_all_versions_returns_complete_history() {
+
 	let db = Database::new();
 
 	// Create key with multiple versions
@@ -414,6 +417,7 @@ fn scan_all_versions_returns_complete_history() {
 
 	// All entries should be for "key"
 	for (key, _version, _value) in &all_versions {
+
 		assert_eq!(key, &Bytes::from("key"));
 	}
 
@@ -430,6 +434,7 @@ fn scan_all_versions_returns_complete_history() {
 #[test]
 
 fn scan_all_versions_includes_deletes() {
+
 	let db = Database::new();
 
 	// Create and delete key
@@ -468,12 +473,11 @@ fn scan_all_versions_includes_deletes() {
 // =============================================================================
 // GC History Tests
 // =============================================================================
-
 #[test]
 
 fn gc_history_preserves_versions_within_window() {
-	let history_duration = Duration::from_secs(60); // Long history window
 
+	let history_duration = Duration::from_secs(60); // Long history window
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(100))
@@ -527,6 +531,7 @@ fn gc_history_preserves_versions_within_window() {
 #[test]
 
 fn gc_mode_cleans_up_old_versions() {
+
 	// With gc (no history), old versions should be cleaned up
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
@@ -534,9 +539,9 @@ fn gc_mode_cleans_up_old_versions() {
 			.with_cleanup_interval(Duration::from_millis(50)),
 	)
 	.with_gc(); // Enable aggressive GC
-
-	// Create many versions quickly
+			 // Create many versions quickly
 	for i in 0..10 {
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", format!("v{}", i)).unwrap();
@@ -560,10 +565,10 @@ fn gc_mode_cleans_up_old_versions() {
 // =============================================================================
 // Edge Cases
 // =============================================================================
-
 #[test]
 
 fn version_query_with_uncommitted_changes() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -603,6 +608,7 @@ fn version_query_with_uncommitted_changes() {
 #[test]
 
 fn version_query_on_multiple_keys() {
+
 	let db = Database::new();
 
 	// Create key1
@@ -655,12 +661,14 @@ fn version_query_on_multiple_keys() {
 #[test]
 
 fn scan_at_version_with_skip_and_limit() {
+
 	let db = Database::new();
 
 	// Create range of keys
 	let mut tx = db.transaction(true);
 
 	for i in 0..10 {
+
 		tx.set(format!("key_{:02}", i), format!("value_{}", i)).unwrap();
 	}
 
@@ -690,6 +698,7 @@ fn scan_at_version_with_skip_and_limit() {
 #[test]
 
 fn scan_at_version_reverse() {
+
 	let db = Database::new();
 
 	// Create keys

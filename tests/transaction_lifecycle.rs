@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Transaction lifecycle tests for SurrealMX.
 //!
 //! Tests transaction management edge cases including long-lived transactions,
@@ -24,10 +23,10 @@ use surrealmx::{Database, DatabaseOptions};
 // =============================================================================
 // Long-Lived Read Transaction Tests
 // =============================================================================
-
 #[test]
 
 fn long_lived_read_transaction() {
+
 	let db = Arc::new(
 		Database::new_with_options(
 			DatabaseOptions::default()
@@ -39,6 +38,7 @@ fn long_lived_read_transaction() {
 
 	// Create initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", "v1").unwrap();
@@ -55,6 +55,7 @@ fn long_lived_read_transaction() {
 
 	// Perform many updates while read transaction is open
 	for i in 2..20 {
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", format!("v{}", i)).unwrap();
@@ -85,14 +86,15 @@ fn long_lived_read_transaction() {
 // =============================================================================
 // Transaction Drop Without Close Tests
 // =============================================================================
-
 #[test]
 
 fn transaction_drop_without_close() {
+
 	let db = Database::new();
 
 	// Create initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", "initial").unwrap();
@@ -102,6 +104,7 @@ fn transaction_drop_without_close() {
 
 	// Create a write transaction and drop it without commit or cancel
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", "uncommitted").unwrap();
@@ -128,10 +131,10 @@ fn transaction_drop_without_close() {
 // =============================================================================
 // Many Concurrent Transactions Tests
 // =============================================================================
-
 #[test]
 
 fn many_concurrent_transactions() {
+
 	let db = Arc::new(Database::new());
 
 	let num_threads = 10;
@@ -140,14 +143,18 @@ fn many_concurrent_transactions() {
 
 	let handles: Vec<_> = (0..num_threads)
 		.map(|thread_id| {
+
 			let db = Arc::clone(&db);
 
 			thread::spawn(move || {
+
 				for tx_num in 0..transactions_per_thread {
+
 					let key = format!("t{}_{}", thread_id, tx_num);
 
 					// Write transaction
 					{
+
 						let mut tx = db.transaction(true);
 
 						tx.set(&key, "value").unwrap();
@@ -157,6 +164,7 @@ fn many_concurrent_transactions() {
 
 					// Immediately read back
 					{
+
 						let tx = db.transaction(false);
 
 						let value = tx.get(&key).unwrap();
@@ -170,6 +178,7 @@ fn many_concurrent_transactions() {
 
 	// Wait for all threads
 	for handle in handles {
+
 		handle.join().unwrap();
 	}
 
@@ -189,10 +198,10 @@ fn many_concurrent_transactions() {
 // =============================================================================
 // Transaction After GC Tests
 // =============================================================================
-
 #[test]
 
 fn transaction_after_gc() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
@@ -202,6 +211,7 @@ fn transaction_after_gc() {
 
 	// Create data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("gc_test_key", "v1").unwrap();
@@ -211,6 +221,7 @@ fn transaction_after_gc() {
 
 	// Update multiple times to create versions
 	for i in 2..10 {
+
 		let mut tx = db.transaction(true);
 
 		tx.set("gc_test_key", format!("v{}", i)).unwrap();
@@ -225,6 +236,7 @@ fn transaction_after_gc() {
 
 	// New transactions should work normally after GC
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("gc_test_key", "post_gc_value").unwrap();
@@ -245,17 +257,19 @@ fn transaction_after_gc() {
 // =============================================================================
 // Read Transaction Longevity Tests
 // =============================================================================
-
 #[test]
 
 fn read_transaction_longevity() {
+
 	let db = Arc::new(Database::new());
 
 	// Create initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		for i in 0..100 {
+
 			tx.set(format!("longevity_{:03}", i), format!("v{}", i)).unwrap();
 		}
 
@@ -275,10 +289,12 @@ fn read_transaction_longevity() {
 	// Spawn threads that modify the data heavily
 	let handles: Vec<_> = (0..5)
 		.map(|thread_id| {
+
 			let db = Arc::clone(&db);
 
 			thread::spawn(move || {
 				for i in 0..20 {
+
 					let mut tx = db.transaction(true);
 
 					let key = format!("longevity_{:03}", (thread_id * 20 + i) % 100);
@@ -292,6 +308,7 @@ fn read_transaction_longevity() {
 		.collect();
 
 	for handle in handles {
+
 		handle.join().unwrap();
 	}
 
@@ -302,6 +319,7 @@ fn read_transaction_longevity() {
 
 	// Values should be original
 	for (i, (key, value)) in initial_scan.iter().enumerate() {
+
 		let (second_key, second_value) = &second_scan[i];
 
 		assert_eq!(key, second_key, "Keys should match");

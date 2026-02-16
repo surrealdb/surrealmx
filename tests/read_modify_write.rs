@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Read-modify-write pattern tests for SurrealMX.
 //!
 //! Tests common transactional patterns including increment, compare-and-swap,
@@ -23,14 +22,15 @@ use surrealmx::Database;
 // =============================================================================
 // Increment Pattern Tests
 // =============================================================================
-
 #[test]
 
 fn increment_pattern_ssi() {
+
 	let db = Database::new();
 
 	// Initialize counter
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("counter", "0").unwrap();
@@ -40,6 +40,7 @@ fn increment_pattern_ssi() {
 
 	// Perform several increments sequentially
 	for expected_before in 0..5 {
+
 		let mut tx = db.transaction(true).with_serializable_snapshot_isolation();
 
 		// Read current value
@@ -69,14 +70,15 @@ fn increment_pattern_ssi() {
 // =============================================================================
 // Compare and Swap Pattern Tests
 // =============================================================================
-
 #[test]
 
 fn compare_and_swap_pattern() {
+
 	let db = Database::new();
 
 	// Initialize value
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("cas_key", "initial").unwrap();
@@ -86,6 +88,7 @@ fn compare_and_swap_pattern() {
 
 	// Successful CAS: expect "initial", set to "updated"
 	{
+
 		let mut tx = db.transaction(true);
 
 		let result = tx.putc("cas_key", "updated", Some::<&str>("initial"));
@@ -97,6 +100,7 @@ fn compare_and_swap_pattern() {
 
 	// Verify update
 	{
+
 		let tx = db.transaction(false);
 
 		assert_eq!(tx.get("cas_key").unwrap(), Some(Bytes::from("updated")));
@@ -104,6 +108,7 @@ fn compare_and_swap_pattern() {
 
 	// Failed CAS: expect "initial" (but it's now "updated")
 	{
+
 		let mut tx = db.transaction(true);
 
 		let result = tx.putc("cas_key", "should_not_be_set", Some::<&str>("initial"));
@@ -115,6 +120,7 @@ fn compare_and_swap_pattern() {
 
 	// Value should still be "updated"
 	{
+
 		let tx = db.transaction(false);
 
 		assert_eq!(tx.get("cas_key").unwrap(), Some(Bytes::from("updated")));
@@ -124,14 +130,15 @@ fn compare_and_swap_pattern() {
 // =============================================================================
 // Conditional Update Chain Tests
 // =============================================================================
-
 #[test]
 
 fn conditional_update_chain() {
+
 	let db = Database::new();
 
 	// Initialize state machine value
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("state", "pending").unwrap();
@@ -143,6 +150,7 @@ fn conditional_update_chain() {
 	let transitions = [("pending", "processing"), ("processing", "completed")];
 
 	for (expected, new_state) in transitions {
+
 		let mut tx = db.transaction(true);
 
 		// Use putc to ensure atomic state transition
@@ -160,6 +168,7 @@ fn conditional_update_chain() {
 
 	// Attempting invalid transition should fail
 	{
+
 		let mut tx = db.transaction(true);
 
 		let result = tx.putc("state", "pending", Some::<&str>("processing"));
@@ -173,14 +182,15 @@ fn conditional_update_chain() {
 // =============================================================================
 // Optimistic Locking Pattern Tests
 // =============================================================================
-
 #[test]
 
 fn optimistic_locking_pattern() {
+
 	let db = Database::new();
 
 	// Initialize data with version
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("data", "initial_data").unwrap();
@@ -192,6 +202,7 @@ fn optimistic_locking_pattern() {
 
 	// Optimistic update: read version, update data and version atomically
 	{
+
 		let mut tx = db.transaction(true).with_serializable_snapshot_isolation();
 
 		// Read current version
@@ -221,14 +232,15 @@ fn optimistic_locking_pattern() {
 // =============================================================================
 // Retry on Conflict Pattern Tests
 // =============================================================================
-
 #[test]
 
 fn retry_on_conflict() {
+
 	let db = Database::new();
 
 	// Initialize counter
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("retry_counter", "0").unwrap();
@@ -238,6 +250,7 @@ fn retry_on_conflict() {
 
 	// Verify initial value is set
 	{
+
 		let tx = db.transaction(false);
 
 		let val = tx.get("retry_counter").unwrap();
@@ -251,11 +264,13 @@ fn retry_on_conflict() {
 	let mut total_retries = 0;
 
 	for _ in 0..num_increments {
+
 		let max_retries = 10;
 
 		let mut retries = 0;
 
 		loop {
+
 			let mut tx = db.transaction(true).with_serializable_snapshot_isolation();
 
 			// Read current value
@@ -270,11 +285,13 @@ fn retry_on_conflict() {
 			match tx.commit() {
 				Ok(_) => break,
 				Err(_) => {
+
 					retries += 1;
 
 					total_retries += 1;
 
 					if retries >= max_retries {
+
 						panic!("Exceeded max retries");
 					}
 				}

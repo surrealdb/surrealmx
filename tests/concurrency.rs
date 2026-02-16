@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Concurrency tests for SurrealMX.
 //!
 //! Tests concurrent operations, GC with active readers, and multi-writer
@@ -28,10 +27,10 @@ use surrealmx::{Database, DatabaseOptions};
 // =============================================================================
 // GC with Active Readers Tests
 // =============================================================================
-
 #[test]
 
 fn gc_does_not_remove_versions_needed_by_active_readers() {
+
 	let db = Arc::new(
 		Database::new_with_options(
 			DatabaseOptions::default()
@@ -43,6 +42,7 @@ fn gc_does_not_remove_versions_needed_by_active_readers() {
 
 	// Create initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", "v1").unwrap();
@@ -59,6 +59,7 @@ fn gc_does_not_remove_versions_needed_by_active_readers() {
 
 	// Update the key multiple times
 	for i in 2..10 {
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", format!("v{}", i)).unwrap();
@@ -82,6 +83,7 @@ fn gc_does_not_remove_versions_needed_by_active_readers() {
 #[test]
 
 fn gc_cleans_up_after_readers_complete() {
+
 	let db = Arc::new(
 		Database::new_with_options(
 			DatabaseOptions::default()
@@ -93,6 +95,7 @@ fn gc_cleans_up_after_readers_complete() {
 
 	// Create initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", "v1").unwrap();
@@ -102,6 +105,7 @@ fn gc_cleans_up_after_readers_complete() {
 
 	// Start and complete a read transaction
 	{
+
 		let tx = db.transaction(false);
 
 		let _ = tx.get("key").unwrap();
@@ -110,6 +114,7 @@ fn gc_cleans_up_after_readers_complete() {
 
 	// Update multiple times
 	for i in 2..20 {
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", format!("v{}", i)).unwrap();
@@ -133,10 +138,10 @@ fn gc_cleans_up_after_readers_complete() {
 // =============================================================================
 // Multiple Writers Tests
 // =============================================================================
-
 #[test]
 
 fn multiple_writers_disjoint_keys() {
+
 	let db = Arc::new(Database::new());
 
 	let num_writers = 8;
@@ -147,14 +152,17 @@ fn multiple_writers_disjoint_keys() {
 
 	let handles: Vec<_> = (0..num_writers)
 		.map(|writer_id| {
+
 			let db = Arc::clone(&db);
 
 			let barrier = Arc::clone(&barrier);
 
 			thread::spawn(move || {
+
 				barrier.wait();
 
 				for op_id in 0..ops_per_writer {
+
 					let key = format!("writer_{}_key_{}", writer_id, op_id);
 
 					let value = format!("value_{}_{}", writer_id, op_id);
@@ -170,6 +178,7 @@ fn multiple_writers_disjoint_keys() {
 		.collect();
 
 	for handle in handles {
+
 		handle.join().unwrap();
 	}
 
@@ -177,7 +186,9 @@ fn multiple_writers_disjoint_keys() {
 	let mut tx = db.transaction(false);
 
 	for writer_id in 0..num_writers {
+
 		for op_id in 0..ops_per_writer {
+
 			let key = format!("writer_{}_key_{}", writer_id, op_id);
 
 			let expected = format!("value_{}_{}", writer_id, op_id);
@@ -194,6 +205,7 @@ fn multiple_writers_disjoint_keys() {
 #[test]
 
 fn multiple_writers_overlapping_keys_conflict() {
+
 	let db = Arc::new(Database::new());
 
 	let num_writers = 4;
@@ -203,11 +215,13 @@ fn multiple_writers_overlapping_keys_conflict() {
 	// All writers try to update the same key using SSI to ensure conflict detection
 	let handles: Vec<_> = (0..num_writers)
 		.map(|writer_id| {
+
 			let db = Arc::clone(&db);
 
 			let barrier = Arc::clone(&barrier);
 
 			thread::spawn(move || {
+
 				barrier.wait();
 
 				// Use SSI with read to ensure conflict detection
@@ -247,17 +261,19 @@ fn multiple_writers_overlapping_keys_conflict() {
 // =============================================================================
 // Mixed Reader/Writer Tests
 // =============================================================================
-
 #[test]
 
 fn concurrent_readers_and_writers() {
+
 	let db = Arc::new(Database::new());
 
 	// Seed with initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		for i in 0..100 {
+
 			tx.set(format!("key_{:04}", i), format!("initial_{}", i)).unwrap();
 		}
 
@@ -273,18 +289,22 @@ fn concurrent_readers_and_writers() {
 	// Reader threads
 	let reader_handles: Vec<_> = (0..num_readers)
 		.map(|_| {
+
 			let db = Arc::clone(&db);
 
 			let barrier = Arc::clone(&barrier);
 
 			thread::spawn(move || {
+
 				barrier.wait();
 
 				for _ in 0..50 {
+
 					let tx = db.transaction(false);
 
 					// Read multiple keys
 					for i in 0..10 {
+
 						let _ = tx.get(format!("key_{:04}", i * 10)).unwrap();
 					}
 
@@ -298,14 +318,17 @@ fn concurrent_readers_and_writers() {
 	// Writer threads
 	let writer_handles: Vec<_> = (0..num_writers)
 		.map(|writer_id| {
+
 			let db = Arc::clone(&db);
 
 			let barrier = Arc::clone(&barrier);
 
 			thread::spawn(move || {
+
 				barrier.wait();
 
 				for op in 0..20 {
+
 					let key = format!("writer_{}_op_{}", writer_id, op);
 
 					let mut tx = db.transaction(true);
@@ -322,10 +345,12 @@ fn concurrent_readers_and_writers() {
 
 	// Wait for all to complete
 	for handle in reader_handles {
+
 		handle.join().unwrap();
 	}
 
 	for handle in writer_handles {
+
 		handle.join().unwrap();
 	}
 
@@ -333,6 +358,7 @@ fn concurrent_readers_and_writers() {
 	let mut tx = db.transaction(false);
 
 	for i in 0..100 {
+
 		let val = tx.get(format!("key_{:04}", i)).unwrap();
 
 		// Value should either be initial or have been updated
@@ -345,10 +371,10 @@ fn concurrent_readers_and_writers() {
 // =============================================================================
 // Transaction Pool Tests
 // =============================================================================
-
 #[test]
 
 fn rapid_transaction_creation() {
+
 	let db = Arc::new(Database::new());
 
 	let num_threads = 16;
@@ -359,14 +385,17 @@ fn rapid_transaction_creation() {
 
 	let handles: Vec<_> = (0..num_threads)
 		.map(|_| {
+
 			let db = Arc::clone(&db);
 
 			let barrier = Arc::clone(&barrier);
 
 			thread::spawn(move || {
+
 				barrier.wait();
 
 				for _ in 0..txns_per_thread {
+
 					// Create and immediately cancel transactions
 					let tx = db.transaction(false);
 
@@ -377,6 +406,7 @@ fn rapid_transaction_creation() {
 		.collect();
 
 	for handle in handles {
+
 		handle.join().unwrap();
 	}
 
@@ -386,17 +416,21 @@ fn rapid_transaction_creation() {
 #[test]
 
 fn transaction_pool_recycling() {
+
 	let db = Database::new_with_options(DatabaseOptions::default());
 
 	// Create and drop many transactions
 	for i in 0..1000 {
+
 		let mut tx = db.transaction(i % 2 == 0);
 
 		if i % 2 == 0 {
+
 			tx.set(format!("key_{}", i), "value").unwrap();
 
 			let _ = tx.commit();
 		} else {
+
 			let _ = tx.get("any_key");
 
 			tx.cancel().unwrap();
@@ -408,6 +442,7 @@ fn transaction_pool_recycling() {
 
 	// Only even numbered keys should exist
 	for i in (0..1000).step_by(2) {
+
 		assert!(tx.exists(format!("key_{}", i)).unwrap());
 	}
 
@@ -417,10 +452,10 @@ fn transaction_pool_recycling() {
 // =============================================================================
 // Concurrent Snapshot Tests
 // =============================================================================
-
 #[test]
 
 fn concurrent_writes_during_snapshot() {
+
 	use surrealmx::{AolMode, PersistenceOptions, SnapshotMode};
 	use tempfile::TempDir;
 
@@ -438,9 +473,11 @@ fn concurrent_writes_during_snapshot() {
 
 	// Seed data
 	{
+
 		let mut tx = db.transaction(true);
 
 		for i in 0..100 {
+
 			tx.set(format!("key_{}", i), "initial").unwrap();
 		}
 
@@ -455,9 +492,11 @@ fn concurrent_writes_during_snapshot() {
 	let barrier1 = Arc::clone(&barrier);
 
 	let snapshot_handle = thread::spawn(move || {
+
 		barrier1.wait();
 
 		if let Some(persistence) = db1.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	});
@@ -465,14 +504,17 @@ fn concurrent_writes_during_snapshot() {
 	// Thread 2 & 3: Write while snapshot is happening
 	let writer_handles: Vec<_> = (0..2)
 		.map(|writer_id| {
+
 			let db = Arc::clone(&db);
 
 			let barrier = Arc::clone(&barrier);
 
 			thread::spawn(move || {
+
 				barrier.wait();
 
 				for op in 0..50 {
+
 					let mut tx = db.transaction(true);
 
 					tx.set(format!("concurrent_{}_{}", writer_id, op), "value").unwrap();
@@ -486,6 +528,7 @@ fn concurrent_writes_during_snapshot() {
 	snapshot_handle.join().unwrap();
 
 	for handle in writer_handles {
+
 		handle.join().unwrap();
 	}
 
@@ -493,6 +536,7 @@ fn concurrent_writes_during_snapshot() {
 	let mut tx = db.transaction(false);
 
 	for i in 0..100 {
+
 		assert!(tx.get(format!("key_{}", i)).unwrap().is_some());
 	}
 
@@ -502,14 +546,15 @@ fn concurrent_writes_during_snapshot() {
 // =============================================================================
 // Stress Tests
 // =============================================================================
-
 #[test]
 
 fn high_contention_counter() {
+
 	let db = Arc::new(Database::new());
 
 	// Initialize counter
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("counter", "0").unwrap();
@@ -525,11 +570,13 @@ fn high_contention_counter() {
 
 	let handles: Vec<_> = (0..num_threads)
 		.map(|_| {
+
 			let db = Arc::clone(&db);
 
 			let barrier = Arc::clone(&barrier);
 
 			thread::spawn(move || {
+
 				barrier.wait();
 
 				let mut successes = 0;
@@ -537,6 +584,7 @@ fn high_contention_counter() {
 				let mut attempts = 0;
 
 				while successes < increments_per_thread && attempts < 200 {
+
 					attempts += 1;
 
 					let mut tx = db.transaction(true).with_serializable_snapshot_isolation();
@@ -554,6 +602,7 @@ fn high_contention_counter() {
 
 					// Try to commit
 					if tx.commit().is_ok() {
+
 						successes += 1;
 					}
 				}
@@ -563,6 +612,7 @@ fn high_contention_counter() {
 
 	// Wait for all threads
 	for handle in handles {
+
 		handle.join().unwrap();
 	}
 
@@ -590,13 +640,16 @@ fn high_contention_counter() {
 #[test]
 
 fn concurrent_scan_operations() {
+
 	let db = Arc::new(Database::new());
 
 	// Create data
 	{
+
 		let mut tx = db.transaction(true);
 
 		for i in 0..1000 {
+
 			tx.set(format!("key_{:06}", i), format!("value_{}", i)).unwrap();
 		}
 
@@ -609,14 +662,17 @@ fn concurrent_scan_operations() {
 
 	let handles: Vec<_> = (0..num_threads)
 		.map(|_| {
+
 			let db = Arc::clone(&db);
 
 			let barrier = Arc::clone(&barrier);
 
 			thread::spawn(move || {
+
 				barrier.wait();
 
 				for _ in 0..10 {
+
 					let tx = db.transaction(false);
 
 					let results = tx.scan("key_".."key_z", None, Some(100)).unwrap();
@@ -628,6 +684,7 @@ fn concurrent_scan_operations() {
 		.collect();
 
 	for handle in handles {
+
 		handle.join().unwrap();
 	}
 }

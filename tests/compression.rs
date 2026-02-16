@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Compression tests for SurrealMX.
 //!
 //! Tests LZ4 compression for snapshots and compression round-trips.
@@ -25,10 +24,10 @@ use tempfile::TempDir;
 // =============================================================================
 // LZ4 Snapshot Tests
 // =============================================================================
-
 #[test]
 
 fn lz4_snapshot_round_trip() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -42,11 +41,13 @@ fn lz4_snapshot_round_trip() {
 
 	// Create database and add data
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
 
 		for i in 0..100 {
+
 			tx.set(format!("key_{:04}", i), format!("value_{}", i)).unwrap();
 		}
 
@@ -54,6 +55,7 @@ fn lz4_snapshot_round_trip() {
 
 		// Create LZ4-compressed snapshot
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
@@ -72,11 +74,13 @@ fn lz4_snapshot_round_trip() {
 
 	// Recover and verify data
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
 
 		for i in 0..100 {
+
 			let expected = Bytes::from(format!("value_{}", i));
 
 			let actual = tx.get(format!("key_{:04}", i)).unwrap();
@@ -91,6 +95,7 @@ fn lz4_snapshot_round_trip() {
 #[test]
 
 fn uncompressed_snapshot_round_trip() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -104,11 +109,13 @@ fn uncompressed_snapshot_round_trip() {
 
 	// Create database and add data
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
 
 		for i in 0..100 {
+
 			tx.set(format!("key_{:04}", i), format!("value_{}", i)).unwrap();
 		}
 
@@ -116,6 +123,7 @@ fn uncompressed_snapshot_round_trip() {
 
 		// Create uncompressed snapshot
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
@@ -126,6 +134,7 @@ fn uncompressed_snapshot_round_trip() {
 	let snapshot_bytes = std::fs::read(&snapshot_path).unwrap();
 
 	if snapshot_bytes.len() >= 4 {
+
 		assert_ne!(
 			&snapshot_bytes[0..4],
 			&[0x04, 0x22, 0x4D, 0x18],
@@ -135,11 +144,13 @@ fn uncompressed_snapshot_round_trip() {
 
 	// Recover and verify data
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
 
 		for i in 0..100 {
+
 			let expected = Bytes::from(format!("value_{}", i));
 
 			let actual = tx.get(format!("key_{:04}", i)).unwrap();
@@ -154,10 +165,10 @@ fn uncompressed_snapshot_round_trip() {
 // =============================================================================
 // Large Data Compression Tests
 // =============================================================================
-
 #[test]
 
 fn lz4_compression_with_large_values() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -174,17 +185,20 @@ fn lz4_compression_with_large_values() {
 
 	// Create database with large values
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
 
 		for i in 0..50 {
+
 			tx.set(format!("key_{}", i), large_value.clone()).unwrap();
 		}
 
 		tx.commit().unwrap();
 
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
@@ -206,11 +220,13 @@ fn lz4_compression_with_large_values() {
 
 	// Verify recovery
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
 
 		for i in 0..50 {
+
 			let actual = tx.get(format!("key_{}", i)).unwrap();
 
 			assert_eq!(actual, Some(Bytes::from(large_value.clone())));
@@ -223,6 +239,7 @@ fn lz4_compression_with_large_values() {
 #[test]
 
 fn lz4_compression_with_random_data() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -239,11 +256,13 @@ fn lz4_compression_with_random_data() {
 
 	// Create database
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
 
 		for i in 0..100 {
+
 			// Mix the base value to make each entry somewhat unique
 			let mut val = random_value.clone();
 
@@ -257,17 +276,20 @@ fn lz4_compression_with_random_data() {
 		tx.commit().unwrap();
 
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
 
 	// Verify recovery (compression ratio doesn't matter, integrity does)
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
 
 		for i in 0..100 {
+
 			let mut expected = random_value.clone();
 
 			expected[0] = (i % 256) as u8;
@@ -286,10 +308,10 @@ fn lz4_compression_with_random_data() {
 // =============================================================================
 // Auto-Detection Tests
 // =============================================================================
-
 #[test]
 
 fn auto_detect_lz4_compressed_snapshot() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -303,6 +325,7 @@ fn auto_detect_lz4_compressed_snapshot() {
 		.with_compression(CompressionMode::Lz4);
 
 	{
+
 		let db =
 			Database::new_with_persistence(db_opts.clone(), persistence_opts_lz4.clone()).unwrap();
 
@@ -313,6 +336,7 @@ fn auto_detect_lz4_compressed_snapshot() {
 		tx.commit().unwrap();
 
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
@@ -324,8 +348,8 @@ fn auto_detect_lz4_compressed_snapshot() {
 
 	// Note: CompressionMode for reading is auto-detected, write mode defaults to
 	// None
-
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts_default).unwrap();
 
 		let mut tx = db.transaction(false);
@@ -345,6 +369,7 @@ fn auto_detect_lz4_compressed_snapshot() {
 #[test]
 
 fn auto_detect_uncompressed_snapshot() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -358,6 +383,7 @@ fn auto_detect_uncompressed_snapshot() {
 		.with_compression(CompressionMode::None);
 
 	{
+
 		let db =
 			Database::new_with_persistence(db_opts.clone(), persistence_opts_none.clone()).unwrap();
 
@@ -368,6 +394,7 @@ fn auto_detect_uncompressed_snapshot() {
 		tx.commit().unwrap();
 
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
@@ -379,6 +406,7 @@ fn auto_detect_uncompressed_snapshot() {
 		.with_compression(CompressionMode::Lz4);
 
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts_lz4).unwrap();
 
 		let mut tx = db.transaction(false);
@@ -398,10 +426,10 @@ fn auto_detect_uncompressed_snapshot() {
 // =============================================================================
 // Edge Cases
 // =============================================================================
-
 #[test]
 
 fn lz4_empty_snapshot() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -415,16 +443,19 @@ fn lz4_empty_snapshot() {
 
 	// Create empty database snapshot
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		// No data added - empty snapshot
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
 
 	// Should recover empty database
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
@@ -440,6 +471,7 @@ fn lz4_empty_snapshot() {
 #[test]
 
 fn lz4_with_binary_data() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -457,6 +489,7 @@ fn lz4_with_binary_data() {
 	let binary_value: Vec<u8> = vec![0xFF, 0x00, 0xFF, 0x00, 0xAA, 0xBB];
 
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
@@ -466,12 +499,14 @@ fn lz4_with_binary_data() {
 		tx.commit().unwrap();
 
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
 
 	// Verify binary data preserved
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
@@ -487,6 +522,7 @@ fn lz4_with_binary_data() {
 #[test]
 
 fn lz4_multiple_snapshots() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -499,6 +535,7 @@ fn lz4_multiple_snapshots() {
 		.with_compression(CompressionMode::Lz4);
 
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		// First snapshot
@@ -509,6 +546,7 @@ fn lz4_multiple_snapshots() {
 		tx.commit().unwrap();
 
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 
@@ -523,12 +561,14 @@ fn lz4_multiple_snapshots() {
 
 		// Second snapshot (overwrites first)
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
 
 	// Should recover from latest snapshot
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);

@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! This module stores the database error types.
 
 use bincode::error::{DecodeError as BincodeDecodeError, EncodeError as BincodeEncodeError};
@@ -90,6 +89,7 @@ pub enum PersistenceError {
 
 impl<T> From<PoisonError<std::sync::MutexGuard<'_, T>>> for PersistenceError {
 	fn from(error: PoisonError<std::sync::MutexGuard<'_, T>>) -> Self {
+
 		PersistenceError::LockFailed(error.to_string())
 	}
 }

@@ -11,14 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! This module stores the inner in-memory database type.
 
 use crate::{
 	oracle::Oracle,
 	persistence::Persistence,
 	queue::{Commit, Merge},
-	versions::VersionedEntry,
+	versions::Versions,
 	DatabaseOptions,
 };
 use bytes::Bytes;
@@ -39,7 +38,7 @@ pub struct Inner {
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
 	/// The underlying lock-free Skip Map datastructure
-	pub(crate) datastore: SkipMap<Bytes, VersionedEntry>,
+	pub(crate) datastore: SkipMap<Bytes, RwLock<Versions>>,
 	/// A count of total transactions grouped by oracle version
 	pub(crate) counter_by_oracle: SkipMap<u64, Arc<AtomicU64>>,
 	/// A count of total transactions grouped by commit id
@@ -72,6 +71,7 @@ impl Inner {
 	/// Create a new [`Inner`] structure with the given oracle resync interval.
 
 	pub fn new(opts: &DatabaseOptions) -> Self {
+
 		Self {
 			oracle: Oracle::new(opts.resync_interval),
 			datastore: SkipMap::new(),
@@ -94,6 +94,7 @@ impl Inner {
 
 impl Default for Inner {
 	fn default() -> Self {
+
 		Self::new(&DatabaseOptions::default())
 	}
 }

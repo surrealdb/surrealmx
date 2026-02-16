@@ -43,6 +43,7 @@ pub struct DatabaseOptions {
 
 impl Default for DatabaseOptions {
 	fn default() -> Self {
+
 		Self {
 			pool_size: DEFAULT_POOL_SIZE,
 			enable_gc: true,
@@ -59,12 +60,14 @@ impl DatabaseOptions {
 	/// Create a new `DatabaseOptions` instance with default settings.
 
 	pub fn new() -> Self {
+
 		Self::default()
 	}
 
 	/// Set the maximum number of transactions kept in the pool.
 
 	pub fn with_pool_size(mut self, pool_size: usize) -> Self {
+
 		self.pool_size = pool_size;
 
 		self
@@ -73,6 +76,7 @@ impl DatabaseOptions {
 	/// Set whether the garbage collector thread is started automatically.
 
 	pub fn with_enable_gc(mut self, enable: bool) -> Self {
+
 		self.enable_gc = enable;
 
 		self
@@ -81,6 +85,7 @@ impl DatabaseOptions {
 	/// Set the interval at which the garbage collector wakes up.
 
 	pub fn with_gc_interval(mut self, interval: Duration) -> Self {
+
 		self.gc_interval = interval;
 
 		self
@@ -89,6 +94,7 @@ impl DatabaseOptions {
 	/// Set whether the cleanup worker thread is started automatically.
 
 	pub fn with_enable_cleanup(mut self, enable: bool) -> Self {
+
 		self.enable_cleanup = enable;
 
 		self
@@ -97,6 +103,7 @@ impl DatabaseOptions {
 	/// Set the interval at which the cleanup worker wakes up.
 
 	pub fn with_cleanup_interval(mut self, interval: Duration) -> Self {
+
 		self.cleanup_interval = interval;
 
 		self
@@ -105,6 +112,7 @@ impl DatabaseOptions {
 	/// Set the threshold after which transaction state maps are reset.
 
 	pub fn with_reset_threshold(mut self, threshold: usize) -> Self {
+
 		self.reset_threshold = threshold;
 
 		self
@@ -114,6 +122,7 @@ impl DatabaseOptions {
 	/// clock.
 
 	pub fn with_resync_interval(mut self, interval: Duration) -> Self {
+
 		self.resync_interval = interval;
 
 		self
@@ -122,6 +131,7 @@ impl DatabaseOptions {
 	/// Disable all background worker threads (gc and cleanup).
 
 	pub fn with_all_workers_disabled(mut self) -> Self {
+
 		self.enable_gc = false;
 
 		self.enable_cleanup = false;
@@ -133,6 +143,7 @@ impl DatabaseOptions {
 	/// larger thresholds.
 
 	pub fn with_high_performance(mut self) -> Self {
+
 		self.pool_size *= 2;
 
 		self.gc_interval = Duration::from_secs(30);
@@ -150,6 +161,7 @@ impl DatabaseOptions {
 	/// thresholds.
 
 	pub fn with_low_resource(mut self) -> Self {
+
 		self.pool_size /= 2;
 
 		self.gc_interval = Duration::from_secs(120);

@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Conditional operation tests for SurrealMX.
 //!
 //! Tests `put()`, `putc()`, and `delc()` behavior for conditional
@@ -23,10 +22,10 @@ use surrealmx::{Database, Error};
 // =============================================================================
 // put() Tests (Insert if not exists)
 // =============================================================================
-
 #[test]
 
 fn put_succeeds_for_new_key() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -43,6 +42,7 @@ fn put_succeeds_for_new_key() {
 #[test]
 
 fn put_fails_for_existing_key() {
+
 	let db = Database::new();
 
 	// Create initial key
@@ -68,6 +68,7 @@ fn put_fails_for_existing_key() {
 #[test]
 
 fn put_fails_for_key_set_in_same_transaction() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -88,6 +89,7 @@ fn put_fails_for_key_set_in_same_transaction() {
 #[test]
 
 fn put_succeeds_after_delete_in_same_transaction() {
+
 	let db = Database::new();
 
 	// Create initial key
@@ -109,10 +111,12 @@ fn put_succeeds_after_delete_in_same_transaction() {
 
 	// This might fail or succeed depending on implementation
 	if result.is_ok() {
+
 		assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("recreated")));
 
 		tx.commit().unwrap();
 	} else {
+
 		tx.cancel().unwrap();
 	}
 }
@@ -120,10 +124,10 @@ fn put_succeeds_after_delete_in_same_transaction() {
 // =============================================================================
 // putc() Tests (Conditional put)
 // =============================================================================
-
 #[test]
 
 fn putc_succeeds_when_value_matches() {
+
 	let db = Database::new();
 
 	// Create initial key
@@ -155,6 +159,7 @@ fn putc_succeeds_when_value_matches() {
 #[test]
 
 fn putc_fails_when_value_differs() {
+
 	let db = Database::new();
 
 	// Create initial key
@@ -183,6 +188,7 @@ fn putc_fails_when_value_differs() {
 #[test]
 
 fn putc_with_none_check_succeeds_for_non_existent_key() {
+
 	let db = Database::new();
 
 	// putc with None check on non-existent key
@@ -200,6 +206,7 @@ fn putc_with_none_check_succeeds_for_non_existent_key() {
 #[test]
 
 fn putc_with_none_check_fails_for_existing_key() {
+
 	let db = Database::new();
 
 	// Create initial key
@@ -225,6 +232,7 @@ fn putc_with_none_check_fails_for_existing_key() {
 #[test]
 
 fn putc_in_same_transaction_with_matching_value() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -245,6 +253,7 @@ fn putc_in_same_transaction_with_matching_value() {
 #[test]
 
 fn putc_in_same_transaction_with_non_matching_value() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -269,6 +278,7 @@ fn putc_in_same_transaction_with_non_matching_value() {
 #[test]
 
 fn putc_after_delete_with_none_check() {
+
 	let db = Database::new();
 
 	// Create initial key
@@ -296,10 +306,10 @@ fn putc_after_delete_with_none_check() {
 // =============================================================================
 // delc() Tests (Conditional delete)
 // =============================================================================
-
 #[test]
 
 fn delc_succeeds_when_value_matches() {
+
 	let db = Database::new();
 
 	// Create initial key
@@ -332,6 +342,7 @@ fn delc_succeeds_when_value_matches() {
 #[test]
 
 fn delc_fails_when_value_differs() {
+
 	let db = Database::new();
 
 	// Create initial key
@@ -360,6 +371,7 @@ fn delc_fails_when_value_differs() {
 #[test]
 
 fn delc_with_none_check_succeeds_for_non_existent_key() {
+
 	let db = Database::new();
 
 	// delc with None check on non-existent key
@@ -375,6 +387,7 @@ fn delc_with_none_check_succeeds_for_non_existent_key() {
 #[test]
 
 fn delc_with_none_check_fails_for_existing_key() {
+
 	let db = Database::new();
 
 	// Create initial key
@@ -400,6 +413,7 @@ fn delc_with_none_check_fails_for_existing_key() {
 #[test]
 
 fn delc_in_same_transaction_with_matching_value() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -421,6 +435,7 @@ fn delc_in_same_transaction_with_matching_value() {
 #[test]
 
 fn delc_in_same_transaction_with_non_matching_value() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -445,10 +460,10 @@ fn delc_in_same_transaction_with_non_matching_value() {
 // =============================================================================
 // Combined / Edge Case Tests
 // =============================================================================
-
 #[test]
 
 fn conditional_operations_chain() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -491,6 +506,7 @@ fn conditional_operations_chain() {
 #[test]
 
 fn conditional_operations_across_transactions() {
+
 	let db = Database::new();
 
 	// Transaction 1: Create key
@@ -534,6 +550,7 @@ fn conditional_operations_across_transactions() {
 #[test]
 
 fn conditional_with_empty_value() {
+
 	let db = Database::new();
 
 	// Create key with empty value
@@ -563,6 +580,7 @@ fn conditional_with_empty_value() {
 #[test]
 
 fn conditional_with_binary_data() {
+
 	let db = Database::new();
 
 	// Create key with binary data
@@ -596,6 +614,7 @@ fn conditional_with_binary_data() {
 #[test]
 
 fn putc_concurrent_conflict() {
+
 	let db = Database::new();
 
 	// Create initial key

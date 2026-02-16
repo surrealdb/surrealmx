@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Recovery edge case tests for SurrealMX.
 //!
 //! Tests crash recovery scenarios including partial writes, corruption,
@@ -25,10 +24,10 @@ use tempfile::TempDir;
 // =============================================================================
 // Partial AOL Write Recovery Tests
 // =============================================================================
-
 #[test]
 
 fn recovery_after_partial_aol_write() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -41,6 +40,7 @@ fn recovery_after_partial_aol_write() {
 
 	// Create database with some data
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
@@ -54,6 +54,7 @@ fn recovery_after_partial_aol_write() {
 	let aol_path = temp_path.join("append-only.log");
 
 	if aol_path.exists() {
+
 		let mut file = fs::OpenOptions::new().append(true).open(&aol_path).unwrap();
 
 		// Write some invalid data
@@ -71,6 +72,7 @@ fn recovery_after_partial_aol_write() {
 	// 2. Return an error indicating corruption
 	match result {
 		Ok(db) => {
+
 			// If recovery succeeds, valid data should be present
 			let tx = db.transaction(false);
 
@@ -90,10 +92,10 @@ fn recovery_after_partial_aol_write() {
 // =============================================================================
 // Corrupted Snapshot Recovery Tests
 // =============================================================================
-
 #[test]
 
 fn recovery_with_corrupted_snapshot() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -106,6 +108,7 @@ fn recovery_with_corrupted_snapshot() {
 
 	// Create database with data and snapshot
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
@@ -115,17 +118,20 @@ fn recovery_with_corrupted_snapshot() {
 		tx.commit().unwrap();
 
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
 
 	// Find and corrupt the snapshot file
 	for entry in fs::read_dir(temp_path).unwrap() {
+
 		let entry = entry.unwrap();
 
 		let path = entry.path();
 
 		if path.extension().map(|e| e == "snap").unwrap_or(false) {
+
 			// Overwrite snapshot with garbage
 			fs::write(&path, b"CORRUPTED_SNAPSHOT_DATA").unwrap();
 		}
@@ -138,6 +144,7 @@ fn recovery_with_corrupted_snapshot() {
 
 	match result {
 		Ok(db) => {
+
 			// If recovery succeeds via AOL, data might still be present
 			let tx = db.transaction(false);
 
@@ -153,10 +160,10 @@ fn recovery_with_corrupted_snapshot() {
 // =============================================================================
 // Empty Database Recovery Tests
 // =============================================================================
-
 #[test]
 
 fn recovery_empty_database() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -169,6 +176,7 @@ fn recovery_empty_database() {
 
 	// Create and close empty database
 	{
+
 		let _db =
 			Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 		// Don't write any data
@@ -176,6 +184,7 @@ fn recovery_empty_database() {
 
 	// Recovery of empty database should work
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		// Verify database is empty but operational
@@ -204,10 +213,10 @@ fn recovery_empty_database() {
 // =============================================================================
 // Delete State Preservation Tests
 // =============================================================================
-
 #[test]
 
 fn recovery_preserves_delete_state() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -220,6 +229,7 @@ fn recovery_preserves_delete_state() {
 
 	// Create database with data, then delete some
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		// Create data
@@ -240,12 +250,14 @@ fn recovery_preserves_delete_state() {
 
 		// Create snapshot with delete state
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
 
 	// Recovery should preserve delete state
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let tx = db.transaction(false);
@@ -268,10 +280,10 @@ fn recovery_preserves_delete_state() {
 // =============================================================================
 // Concurrent Recovery Attempts Tests
 // =============================================================================
-
 #[test]
 
 fn concurrent_recovery_attempts() {
+
 	use std::{
 		sync::{Arc, Barrier},
 		thread,
@@ -289,6 +301,7 @@ fn concurrent_recovery_attempts() {
 
 	// Create initial data
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
@@ -308,6 +321,7 @@ fn concurrent_recovery_attempts() {
 	let barrier1 = Arc::clone(&barrier);
 
 	let handle1 = thread::spawn(move || {
+
 		barrier1.wait();
 
 		let persistence_opts = PersistenceOptions::new(&temp_path1)
@@ -324,6 +338,7 @@ fn concurrent_recovery_attempts() {
 	let barrier2 = Arc::clone(&barrier);
 
 	let handle2 = thread::spawn(move || {
+
 		barrier2.wait();
 
 		let persistence_opts = PersistenceOptions::new(&temp_path2)
@@ -340,7 +355,6 @@ fn concurrent_recovery_attempts() {
 	// One or both might succeed (depending on locking implementation)
 	// Or one might fail due to lock contention
 	// The key is that the data should not be corrupted
-
 	// At least one should succeed or both should handle the conflict gracefully
 	let successes = [&result1, &result2].iter().filter(|r| r.is_ok()).count();
 
@@ -353,12 +367,14 @@ fn concurrent_recovery_attempts() {
 
 	// If any succeeded, verify data integrity
 	if let Ok(db) = result1 {
+
 		let tx = db.transaction(false);
 
 		assert_eq!(tx.get("shared_key").unwrap(), Some(Bytes::from("shared_value")));
 	}
 
 	if let Ok(db) = result2 {
+
 		let tx = db.transaction(false);
 
 		assert_eq!(tx.get("shared_key").unwrap(), Some(Bytes::from("shared_value")));

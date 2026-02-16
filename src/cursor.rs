@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! This module contains the cursor and iterator types for range scans.
 
 use crate::{direction::Direction, inner::Inner, iter::MergeIterator};
@@ -21,7 +20,6 @@ use std::{collections::BTreeMap, ops::Bound, sync::Arc};
 // --------------------------------------------------
 // Cursor
 // --------------------------------------------------
-
 /// A bidirectional cursor over a range of keys in the database.
 ///
 /// The cursor provides low-level access to iterate forward and backward
@@ -78,16 +76,21 @@ impl<'a> Cursor<'a> {
 		end: Bytes,
 		version: u64,
 	) -> Self {
+
 		// Build combined writeset from merge queue entries.
 		// Fast path: skip entirely when the merge queue is empty (common case).
 		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> =
 			if database.transaction_merge_queue.is_empty() {
+
 				BTreeMap::new()
 			} else {
+
 				let mut ws = BTreeMap::new();
 
 				for entry in database.transaction_merge_queue.range(..=version).rev() {
+
 					for (k, v) in entry.value().writeset.range::<Bytes, _>(&beg..&end) {
+
 						ws.entry(k.clone()).or_insert_with(|| v.clone());
 					}
 				}
@@ -113,6 +116,7 @@ impl<'a> Cursor<'a> {
 	#[inline]
 
 	pub fn valid(&self) -> bool {
+
 		self.current.is_some()
 	}
 
@@ -120,6 +124,7 @@ impl<'a> Cursor<'a> {
 	#[inline]
 
 	pub fn key(&self) -> Option<&Bytes> {
+
 		self.current.as_ref().map(|(k, _)| k)
 	}
 
@@ -128,6 +133,7 @@ impl<'a> Cursor<'a> {
 	#[inline]
 
 	pub fn value(&self) -> Option<&Bytes> {
+
 		self.current.as_ref().and_then(|(_, v)| v.as_ref())
 	}
 
@@ -135,12 +141,14 @@ impl<'a> Cursor<'a> {
 	#[inline]
 
 	pub fn exists(&self) -> bool {
+
 		self.current.as_ref().map(|(_, v)| v.is_some()).unwrap_or(false)
 	}
 
 	/// Move the cursor to the first entry in the range.
 
 	pub fn seek_to_first(&mut self) {
+
 		self.direction = Direction::Forward;
 
 		self.positioned = true;
@@ -157,6 +165,7 @@ impl<'a> Cursor<'a> {
 	/// Move the cursor to the last entry in the range.
 
 	pub fn seek_to_last(&mut self) {
+
 		self.direction = Direction::Reverse;
 
 		self.positioned = true;
@@ -173,6 +182,7 @@ impl<'a> Cursor<'a> {
 	/// Seek to the first entry with a key >= the given key.
 
 	pub fn seek<K: AsRef<[u8]>>(&mut self, key: K) {
+
 		self.direction = Direction::Forward;
 
 		self.positioned = true;
@@ -181,8 +191,10 @@ impl<'a> Cursor<'a> {
 
 		// Clamp to range bounds
 		let seek_key = if key_bytes < self.beg {
+
 			self.beg.clone()
 		} else if key_bytes >= self.end {
+
 			// Beyond range, invalidate
 			self.current = None;
 
@@ -190,6 +202,7 @@ impl<'a> Cursor<'a> {
 
 			return;
 		} else {
+
 			key_bytes
 		};
 
@@ -203,6 +216,7 @@ impl<'a> Cursor<'a> {
 	/// Seek to the last entry with a key <= the given key.
 
 	pub fn seek_for_prev<K: AsRef<[u8]>>(&mut self, key: K) {
+
 		self.direction = Direction::Reverse;
 
 		self.positioned = true;
@@ -211,8 +225,10 @@ impl<'a> Cursor<'a> {
 
 		// Clamp to range bounds
 		let seek_key = if key_bytes >= self.end {
+
 			self.end.clone()
 		} else if key_bytes < self.beg {
+
 			// Before range, invalidate
 			self.current = None;
 
@@ -220,6 +236,7 @@ impl<'a> Cursor<'a> {
 
 			return;
 		} else {
+
 			key_bytes
 		};
 
@@ -233,7 +250,9 @@ impl<'a> Cursor<'a> {
 	/// Move to the next entry (forward direction).
 
 	pub fn next(&mut self) {
+
 		if !self.positioned {
+
 			self.seek_to_first();
 
 			return;
@@ -241,12 +260,15 @@ impl<'a> Cursor<'a> {
 
 		// If direction changed, recreate the iterator from the current position
 		if matches!(self.direction, Direction::Reverse) {
+
 			self.direction = Direction::Forward;
 
 			if let Some((ref key, _)) = self.current {
+
 				let next_start = next_key(key);
 
 				if next_start >= self.end {
+
 					self.current = None;
 
 					self.iter = None;
@@ -258,6 +280,7 @@ impl<'a> Cursor<'a> {
 
 				self.create_iterator(&next_start, &end, Direction::Forward);
 			} else {
+
 				self.iter = None;
 			}
 
@@ -273,7 +296,9 @@ impl<'a> Cursor<'a> {
 	/// Move to the previous entry (reverse direction).
 
 	pub fn prev(&mut self) {
+
 		if !self.positioned {
+
 			self.seek_to_last();
 
 			return;
@@ -281,10 +306,13 @@ impl<'a> Cursor<'a> {
 
 		// If direction changed, recreate the iterator from the current position
 		if matches!(self.direction, Direction::Forward) {
+
 			self.direction = Direction::Reverse;
 
 			if let Some((ref key, _)) = self.current {
+
 				if key <= &self.beg {
+
 					self.current = None;
 
 					self.iter = None;
@@ -298,6 +326,7 @@ impl<'a> Cursor<'a> {
 
 				self.create_iterator(&beg, &key_clone, Direction::Reverse);
 			} else {
+
 				self.iter = None;
 			}
 
@@ -313,11 +342,11 @@ impl<'a> Cursor<'a> {
 	// --------------------------------------------------
 	// Internal methods
 	// --------------------------------------------------
-
 	/// Create a new merge iterator over the given range and direction.
 	/// Replaces any existing iterator.
 
 	fn create_iterator(&mut self, start: &Bytes, end: &Bytes, direction: Direction) {
+
 		let join: BTreeMap<Bytes, Option<Bytes>> = self
 			.combined_writeset
 			.range::<Bytes, _>(start..end)
@@ -340,6 +369,7 @@ impl<'a> Cursor<'a> {
 	#[inline]
 
 	fn advance_current(&mut self) {
+
 		self.current = match &mut self.iter {
 			Some(iter) => iter.next(),
 			None => None,
@@ -350,7 +380,6 @@ impl<'a> Cursor<'a> {
 // --------------------------------------------------
 // KeyIterator
 // --------------------------------------------------
-
 /// An iterator over keys in a range.
 ///
 /// This iterator skips deleted entries and only yields existing keys.
@@ -374,6 +403,7 @@ impl<'a> KeyIterator<'a> {
 	/// Create a new forward key iterator.
 
 	pub(crate) fn new(cursor: Cursor<'a>) -> Self {
+
 		let mut iter = KeyIterator {
 			cursor,
 			reverse: false,
@@ -388,6 +418,7 @@ impl<'a> KeyIterator<'a> {
 	/// Create a new reverse key iterator.
 
 	pub(crate) fn new_reverse(cursor: Cursor<'a>) -> Self {
+
 		let mut iter = KeyIterator {
 			cursor,
 			reverse: true,
@@ -404,14 +435,19 @@ impl<'a> Iterator for KeyIterator<'a> {
 	type Item = Bytes;
 
 	fn next(&mut self) -> Option<Self::Item> {
+
 		// Skip deleted entries
 		while self.cursor.valid() {
+
 			if self.cursor.exists() {
+
 				let key = self.cursor.key()?.clone();
 
 				if self.reverse {
+
 					self.cursor.prev();
 				} else {
+
 					self.cursor.next();
 				}
 
@@ -419,8 +455,10 @@ impl<'a> Iterator for KeyIterator<'a> {
 			}
 
 			if self.reverse {
+
 				self.cursor.prev();
 			} else {
+
 				self.cursor.next();
 			}
 		}
@@ -431,6 +469,7 @@ impl<'a> Iterator for KeyIterator<'a> {
 
 impl<'a> DoubleEndedIterator for KeyIterator<'a> {
 	fn next_back(&mut self) -> Option<Self::Item> {
+
 		// When iterating from the back, we go in the opposite direction
 		let was_reverse = self.reverse;
 
@@ -438,13 +477,17 @@ impl<'a> DoubleEndedIterator for KeyIterator<'a> {
 
 		// If we haven't positioned yet for back iteration, do so now
 		if was_reverse {
+
 			// Was reverse (going backward), now go forward from start
 			if !self.cursor.positioned {
+
 				self.cursor.seek_to_first();
 			}
 		} else {
+
 			// Was forward (going forward), now go backward from end
 			if !self.cursor.positioned {
+
 				self.cursor.seek_to_last();
 			}
 		}
@@ -460,7 +503,6 @@ impl<'a> DoubleEndedIterator for KeyIterator<'a> {
 // --------------------------------------------------
 // ScanIterator
 // --------------------------------------------------
-
 /// An iterator over key-value pairs in a range.
 ///
 /// This iterator skips deleted entries and only yields existing key-value
@@ -485,6 +527,7 @@ impl<'a> ScanIterator<'a> {
 	/// Create a new forward scan iterator.
 
 	pub(crate) fn new(cursor: Cursor<'a>) -> Self {
+
 		let mut iter = ScanIterator {
 			cursor,
 			reverse: false,
@@ -499,6 +542,7 @@ impl<'a> ScanIterator<'a> {
 	/// Create a new reverse scan iterator.
 
 	pub(crate) fn new_reverse(cursor: Cursor<'a>) -> Self {
+
 		let mut iter = ScanIterator {
 			cursor,
 			reverse: true,
@@ -515,16 +559,21 @@ impl<'a> Iterator for ScanIterator<'a> {
 	type Item = (Bytes, Bytes);
 
 	fn next(&mut self) -> Option<Self::Item> {
+
 		// Skip deleted entries
 		while self.cursor.valid() {
+
 			if let Some(value) = self.cursor.value() {
+
 				let key = self.cursor.key()?.clone();
 
 				let value = value.clone();
 
 				if self.reverse {
+
 					self.cursor.prev();
 				} else {
+
 					self.cursor.next();
 				}
 
@@ -532,8 +581,10 @@ impl<'a> Iterator for ScanIterator<'a> {
 			}
 
 			if self.reverse {
+
 				self.cursor.prev();
 			} else {
+
 				self.cursor.next();
 			}
 		}
@@ -544,6 +595,7 @@ impl<'a> Iterator for ScanIterator<'a> {
 
 impl<'a> DoubleEndedIterator for ScanIterator<'a> {
 	fn next_back(&mut self) -> Option<Self::Item> {
+
 		// When iterating from the back, we go in the opposite direction
 		let was_reverse = self.reverse;
 
@@ -551,13 +603,17 @@ impl<'a> DoubleEndedIterator for ScanIterator<'a> {
 
 		// If we haven't positioned yet for back iteration, do so now
 		if was_reverse {
+
 			// Was reverse (going backward), now go forward from start
 			if !self.cursor.positioned {
+
 				self.cursor.seek_to_first();
 			}
 		} else {
+
 			// Was forward (going forward), now go backward from end
 			if !self.cursor.positioned {
+
 				self.cursor.seek_to_last();
 			}
 		}
@@ -573,11 +629,11 @@ impl<'a> DoubleEndedIterator for ScanIterator<'a> {
 // --------------------------------------------------
 // Helper functions
 // --------------------------------------------------
-
 /// Compute the next key after the given key (lexicographically).
 /// This is used for exclusive lower bounds.
 
 fn next_key(key: &Bytes) -> Bytes {
+
 	let mut next = key.to_vec();
 
 	// Append a zero byte to get the next key
@@ -595,6 +651,7 @@ mod tests {
 	#[test]
 
 	fn test_next_key() {
+
 		let key = Bytes::from_static(b"hello");
 
 		let next = next_key(&key);

@@ -1,5 +1,4 @@
 // Test to demonstrate memory usage improvement with the GC fix
-
 use bytes::Bytes;
 use std::time::Duration;
 use surrealmx::{Database, DatabaseOptions};
@@ -7,6 +6,7 @@ use surrealmx::{Database, DatabaseOptions};
 #[test]
 
 fn test_version_cleanup_with_updates() {
+
 	// Create a database with aggressive inline GC (no history retention)
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
@@ -14,7 +14,6 @@ fn test_version_cleanup_with_updates() {
 			.with_cleanup_interval(Duration::from_millis(50)),
 	)
 	.with_gc(); // Enable aggressive inline GC
-
 	let num_keys = 1000;
 
 	let num_updates = 10;
@@ -23,6 +22,7 @@ fn test_version_cleanup_with_updates() {
 
 	// Create initial keys
 	for i in 0..num_keys {
+
 		let mut tx = db.transaction(true);
 
 		let key = format!("key_{:06}", i);
@@ -38,7 +38,9 @@ fn test_version_cleanup_with_updates() {
 
 	// Update each key multiple times
 	for update_round in 0..num_updates {
+
 		for i in 0..num_keys {
+
 			let mut tx = db.transaction(true);
 
 			let key = format!("key_{:06}", i);
@@ -51,6 +53,7 @@ fn test_version_cleanup_with_updates() {
 		}
 
 		if update_round % 2 == 0 {
+
 			println!("  Round {}/{}", update_round + 1, num_updates);
 
 			// Give GC a chance to run
@@ -64,6 +67,7 @@ fn test_version_cleanup_with_updates() {
 	let mut tx = db.transaction(false);
 
 	for i in 0..num_keys {
+
 		let key = format!("key_{:06}", i);
 
 		let value = tx.get(key).unwrap();
@@ -85,6 +89,7 @@ fn test_version_cleanup_with_updates() {
 #[test]
 
 fn test_version_cleanup_with_deletes() {
+
 	let db = Database::new().with_gc();
 
 	let num_keys = 500;
@@ -93,6 +98,7 @@ fn test_version_cleanup_with_deletes() {
 
 	// Create keys
 	for i in 0..num_keys {
+
 		let mut tx = db.transaction(true);
 
 		let key = format!("key_{:06}", i);
@@ -108,6 +114,7 @@ fn test_version_cleanup_with_deletes() {
 
 	// Update all keys
 	for i in 0..num_keys {
+
 		let mut tx = db.transaction(true);
 
 		let key = format!("key_{:06}", i);
@@ -123,6 +130,7 @@ fn test_version_cleanup_with_deletes() {
 
 	// Delete all keys
 	for i in 0..num_keys {
+
 		let mut tx = db.transaction(true);
 
 		let key = format!("key_{:06}", i);
@@ -141,6 +149,7 @@ fn test_version_cleanup_with_deletes() {
 	let mut tx = db.transaction(false);
 
 	for i in 0..num_keys {
+
 		let key = format!("key_{:06}", i);
 
 		let value = tx.get(key).unwrap();
@@ -160,6 +169,7 @@ fn test_version_cleanup_with_deletes() {
 #[test]
 
 fn test_memory_with_batch_operations() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default().with_gc_interval(Duration::from_millis(100)),
 	)
@@ -172,10 +182,12 @@ fn test_memory_with_batch_operations() {
 	println!("Running {} batches of {} operations...", num_batches, batch_size);
 
 	for batch_num in 0..num_batches {
+
 		// Create a batch
 		let mut tx = db.transaction(true);
 
 		for i in 0..batch_size {
+
 			let key = format!("batch_{}_{:04}", batch_num, i);
 
 			let value = vec![batch_num as u8; 100];
@@ -191,6 +203,7 @@ fn test_memory_with_batch_operations() {
 		let mut tx = db.transaction(true);
 
 		for i in 0..batch_size {
+
 			let key = format!("batch_{}_{:04}", batch_num, i);
 
 			let value = vec![(batch_num + 100) as u8; 100];
@@ -204,6 +217,7 @@ fn test_memory_with_batch_operations() {
 
 		// Give GC time to clean up
 		if batch_num % 3 == 0 {
+
 			std::thread::sleep(Duration::from_millis(200));
 		}
 	}
@@ -216,7 +230,9 @@ fn test_memory_with_batch_operations() {
 	let mut count = 0;
 
 	for batch_num in 0..num_batches {
+
 		for i in 0..batch_size {
+
 			let key = format!("batch_{}_{:04}", batch_num, i);
 
 			let value = tx.get(&key).unwrap();

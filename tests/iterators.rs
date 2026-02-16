@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Iterator and cursor edge case tests for SurrealMX.
 //!
 //! Tests cursor, KeyIterator, and ScanIterator behavior including
@@ -23,10 +22,10 @@ use surrealmx::Database;
 // =============================================================================
 // Cursor Direction Tests
 // =============================================================================
-
 #[test]
 
 fn cursor_direction_switch_at_first_element() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -68,6 +67,7 @@ fn cursor_direction_switch_at_first_element() {
 #[test]
 
 fn cursor_direction_switch_at_last_element() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -102,11 +102,13 @@ fn cursor_direction_switch_at_last_element() {
 #[test]
 
 fn cursor_rapid_direction_changes() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
 
 	for c in b'a'..=b'z' {
+
 		tx.set(&[c][..], &[c][..]).unwrap();
 	}
 
@@ -153,10 +155,10 @@ fn cursor_rapid_direction_changes() {
 // =============================================================================
 // Empty Range Tests
 // =============================================================================
-
 #[test]
 
 fn cursor_empty_range_no_data() {
+
 	let db = Database::new();
 
 	let tx = db.transaction(false);
@@ -175,6 +177,7 @@ fn cursor_empty_range_no_data() {
 #[test]
 
 fn cursor_empty_range_with_data_outside() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -202,6 +205,7 @@ fn cursor_empty_range_with_data_outside() {
 #[test]
 
 fn keys_iterator_empty_range() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -222,6 +226,7 @@ fn keys_iterator_empty_range() {
 #[test]
 
 fn scan_iterator_empty_range() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -240,10 +245,10 @@ fn scan_iterator_empty_range() {
 // =============================================================================
 // Double-Ended Iterator Tests
 // =============================================================================
-
 #[test]
 
 fn keys_iterator_double_ended_meets_in_middle() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -282,6 +287,7 @@ fn keys_iterator_double_ended_meets_in_middle() {
 #[test]
 
 fn scan_iterator_double_ended() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -317,10 +323,10 @@ fn scan_iterator_double_ended() {
 // =============================================================================
 // Seek Edge Cases
 // =============================================================================
-
 #[test]
 
 fn cursor_seek_beyond_range_end() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -336,8 +342,7 @@ fn cursor_seek_beyond_range_end() {
 	let tx = db.transaction(false);
 
 	let mut cursor = tx.cursor("a".."c").unwrap(); // Range excludes "c"
-
-	// Seek beyond range
+												// Seek beyond range
 	cursor.seek("z");
 
 	assert!(!cursor.valid(), "Seek beyond range should invalidate");
@@ -350,6 +355,7 @@ fn cursor_seek_beyond_range_end() {
 #[test]
 
 fn cursor_seek_to_non_existent_key() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -384,10 +390,10 @@ fn cursor_seek_to_non_existent_key() {
 // =============================================================================
 // Writeset and Merge Queue Interaction Tests
 // =============================================================================
-
 #[test]
 
 fn iterator_sees_uncommitted_writes() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -412,6 +418,7 @@ fn iterator_sees_uncommitted_writes() {
 #[test]
 
 fn iterator_sees_uncommitted_deletes() {
+
 	let db = Database::new();
 
 	// Create committed data
@@ -445,6 +452,7 @@ fn iterator_sees_uncommitted_deletes() {
 #[test]
 
 fn iterator_merge_queue_and_writeset() {
+
 	let db = Database::new();
 
 	// First transaction creates some data
@@ -462,8 +470,7 @@ fn iterator_merge_queue_and_writeset() {
 	// tx2 modifies some keys
 	tx2.set("a", "tx2_a").unwrap(); // Override
 	tx2.set("c", "tx2_c").unwrap(); // New key
-
-	// Iterator should see merged view
+								 // Iterator should see merged view
 	let scan: Vec<_> = tx2.scan_iter("a".."z").unwrap().collect();
 
 	assert_eq!(scan.len(), 3);
@@ -471,17 +478,16 @@ fn iterator_merge_queue_and_writeset() {
 	assert_eq!(scan[0], (Bytes::from("a"), Bytes::from("tx2_a"))); // From writeset
 	assert_eq!(scan[1], (Bytes::from("b"), Bytes::from("tx1_b"))); // From committed/merge queue
 	assert_eq!(scan[2], (Bytes::from("c"), Bytes::from("tx2_c"))); // From writeset
-
 	tx2.cancel().unwrap();
 }
 
 // =============================================================================
 // Iterator with Skip and Limit
 // =============================================================================
-
 #[test]
 
 fn scan_with_skip_beyond_data() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -504,6 +510,7 @@ fn scan_with_skip_beyond_data() {
 #[test]
 
 fn scan_with_limit_one() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -528,11 +535,13 @@ fn scan_with_limit_one() {
 #[test]
 
 fn scan_with_skip_and_limit() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
 
 	for i in 0..10 {
+
 		tx.set(format!("key_{:02}", i), format!("value_{}", i)).unwrap();
 	}
 
@@ -556,10 +565,10 @@ fn scan_with_skip_and_limit() {
 // =============================================================================
 // Reverse Iterator Tests
 // =============================================================================
-
 #[test]
 
 fn keys_reverse_iterator() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -588,6 +597,7 @@ fn keys_reverse_iterator() {
 #[test]
 
 fn scan_reverse_iterator() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -616,10 +626,10 @@ fn scan_reverse_iterator() {
 // =============================================================================
 // Binary Key Tests
 // =============================================================================
-
 #[test]
 
 fn iterator_with_binary_keys() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -653,10 +663,10 @@ fn iterator_with_binary_keys() {
 // =============================================================================
 // Single Element Range Tests
 // =============================================================================
-
 #[test]
 
 fn cursor_single_element_range() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);

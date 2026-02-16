@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Concurrent snapshot operation tests for SurrealMX.
 //!
 //! Tests snapshot behavior under concurrent access including writes during
@@ -28,10 +27,10 @@ use tempfile::TempDir;
 // =============================================================================
 // Snapshot During Writes Tests
 // =============================================================================
-
 #[test]
 
 fn snapshot_during_writes() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -46,9 +45,11 @@ fn snapshot_during_writes() {
 
 	// Create some initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		for i in 0..50 {
+
 			tx.set(format!("initial_{:03}", i), format!("value_{}", i)).unwrap();
 		}
 
@@ -63,11 +64,14 @@ fn snapshot_during_writes() {
 	let barrier1 = Arc::clone(&barrier);
 
 	let snapshot_handle = thread::spawn(move || {
+
 		barrier1.wait();
 
 		if let Some(persistence) = db1.persistence() {
+
 			persistence.snapshot()
 		} else {
+
 			Ok(())
 		}
 	});
@@ -78,9 +82,11 @@ fn snapshot_during_writes() {
 	let barrier2 = Arc::clone(&barrier);
 
 	let write_handle = thread::spawn(move || {
+
 		barrier2.wait();
 
 		for i in 0..50 {
+
 			let mut tx = db2.transaction(true);
 
 			tx.set(format!("concurrent_{:03}", i), format!("value_{}", i)).unwrap();
@@ -112,10 +118,10 @@ fn snapshot_during_writes() {
 // =============================================================================
 // Multiple Concurrent Snapshots Tests
 // =============================================================================
-
 #[test]
 
 fn multiple_concurrent_snapshots() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -130,9 +136,11 @@ fn multiple_concurrent_snapshots() {
 
 	// Create data
 	{
+
 		let mut tx = db.transaction(true);
 
 		for i in 0..100 {
+
 			tx.set(format!("key_{:04}", i), format!("value_{}", i)).unwrap();
 		}
 
@@ -144,16 +152,20 @@ fn multiple_concurrent_snapshots() {
 	// Spawn multiple threads that try to snapshot concurrently
 	let handles: Vec<_> = (0..3)
 		.map(|_| {
+
 			let db = Arc::clone(&db);
 
 			let barrier = Arc::clone(&barrier);
 
 			thread::spawn(move || {
+
 				barrier.wait();
 
 				if let Some(persistence) = db.persistence() {
+
 					persistence.snapshot()
 				} else {
+
 					Ok(())
 				}
 			})
@@ -178,10 +190,10 @@ fn multiple_concurrent_snapshots() {
 // =============================================================================
 // Read During Snapshot Tests
 // =============================================================================
-
 #[test]
 
 fn read_during_snapshot() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -196,9 +208,11 @@ fn read_during_snapshot() {
 
 	// Create data
 	{
+
 		let mut tx = db.transaction(true);
 
 		for i in 0..100 {
+
 			tx.set(format!("read_key_{:04}", i), format!("value_{}", i)).unwrap();
 		}
 
@@ -213,11 +227,14 @@ fn read_during_snapshot() {
 	let barrier1 = Arc::clone(&barrier);
 
 	let snapshot_handle = thread::spawn(move || {
+
 		barrier1.wait();
 
 		if let Some(persistence) = db1.persistence() {
+
 			persistence.snapshot()
 		} else {
+
 			Ok(())
 		}
 	});
@@ -228,16 +245,19 @@ fn read_during_snapshot() {
 	let barrier2 = Arc::clone(&barrier);
 
 	let read_handle = thread::spawn(move || {
+
 		barrier2.wait();
 
 		let mut read_count = 0;
 
 		for i in 0..100 {
+
 			let tx = db2.transaction(false);
 
 			let key = format!("read_key_{:04}", i);
 
 			if tx.get(&key).unwrap().is_some() {
+
 				read_count += 1;
 			}
 		}
@@ -256,10 +276,10 @@ fn read_during_snapshot() {
 // =============================================================================
 // Recovery From Concurrent Snapshot Tests
 // =============================================================================
-
 #[test]
 
 fn recovery_from_concurrent_snapshot() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -268,6 +288,7 @@ fn recovery_from_concurrent_snapshot() {
 
 	// Create database with data and snapshot during writes
 	{
+
 		let persistence_opts = PersistenceOptions::new(temp_path)
 			.with_aol_mode(AolMode::SynchronousOnCommit)
 			.with_snapshot_mode(SnapshotMode::Never);
@@ -277,9 +298,11 @@ fn recovery_from_concurrent_snapshot() {
 
 		// Initial data
 		{
+
 			let mut tx = db.transaction(true);
 
 			for i in 0..50 {
+
 				tx.set(format!("before_snap_{:03}", i), "before").unwrap();
 			}
 
@@ -288,14 +311,17 @@ fn recovery_from_concurrent_snapshot() {
 
 		// Take a snapshot
 		if let Some(p) = db.persistence() {
+
 			p.snapshot().unwrap();
 		}
 
 		// Write more data after snapshot
 		{
+
 			let mut tx = db.transaction(true);
 
 			for i in 0..50 {
+
 				tx.set(format!("after_snap_{:03}", i), "after").unwrap();
 			}
 
@@ -305,6 +331,7 @@ fn recovery_from_concurrent_snapshot() {
 
 	// Recover from persistence
 	{
+
 		let persistence_opts = PersistenceOptions::new(temp_path)
 			.with_aol_mode(AolMode::SynchronousOnCommit)
 			.with_snapshot_mode(SnapshotMode::Never);

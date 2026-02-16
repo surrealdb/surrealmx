@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! This module stores a MVCC versioned entry.
 
 use bytes::Bytes;
@@ -32,6 +31,7 @@ impl Ord for Version {
 	#[inline]
 
 	fn cmp(&self, other: &Self) -> Ordering {
+
 		self.version.cmp(&other.version)
 	}
 }
@@ -40,6 +40,7 @@ impl PartialOrd for Version {
 	#[inline]
 
 	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+
 		Some(self.cmp(other))
 	}
 }

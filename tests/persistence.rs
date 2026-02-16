@@ -6,6 +6,7 @@ use tempfile::TempDir;
 #[test]
 
 fn test_aol_synchronous_basic() {
+
 	// Create a temporary directory for testing
 	let temp_dir = TempDir::new().unwrap();
 
@@ -25,6 +26,7 @@ fn test_aol_synchronous_basic() {
 
 	// Add some data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key1", "value1").unwrap();
@@ -36,6 +38,7 @@ fn test_aol_synchronous_basic() {
 
 	// Add more data in a separate transaction
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key3", "value3").unwrap();
@@ -46,6 +49,7 @@ fn test_aol_synchronous_basic() {
 
 	// Verify data is accessible in current session
 	{
+
 		let mut tx = db.transaction(false);
 
 		assert_eq!(tx.get("key1").unwrap(), None); // Should be deleted
@@ -76,6 +80,7 @@ fn test_aol_synchronous_basic() {
 #[test]
 
 fn test_aol_asynchronous_basic() {
+
 	// Create a temporary directory for testing
 	let temp_dir = TempDir::new().unwrap();
 
@@ -95,6 +100,7 @@ fn test_aol_asynchronous_basic() {
 
 	// Add some data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key1", "value1").unwrap();
@@ -106,6 +112,7 @@ fn test_aol_asynchronous_basic() {
 
 	// Add more data in a separate transaction
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key3", "value3").unwrap();
@@ -116,6 +123,7 @@ fn test_aol_asynchronous_basic() {
 
 	// Verify data is accessible in current session
 	{
+
 		let mut tx = db.transaction(false);
 
 		assert_eq!(tx.get("key1").unwrap(), None); // Should be deleted
@@ -146,6 +154,7 @@ fn test_aol_asynchronous_basic() {
 #[test]
 
 fn test_aol_recovery() {
+
 	// Create a temporary directory for testing
 	let temp_dir = TempDir::new().unwrap();
 
@@ -162,6 +171,7 @@ fn test_aol_recovery() {
 
 	// Create first database instance and add data
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
@@ -188,9 +198,9 @@ fn test_aol_recovery() {
 
 		tx.commit().unwrap();
 	} // Database drops here, releasing all resources
-
-	// Create second database instance from the same directory (simulates restart)
+   // Create second database instance from the same directory (simulates restart)
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		// Verify data was recovered from AOL
@@ -208,8 +218,10 @@ fn test_aol_recovery() {
 #[test]
 
 fn test_aol_fsync_modes() {
+
 	// Test FsyncMode::EveryAppend
 	{
+
 		let temp_dir = TempDir::new().unwrap();
 
 		let temp_path = temp_dir.path();
@@ -231,6 +243,7 @@ fn test_aol_fsync_modes() {
 
 	// Test FsyncMode::Interval
 	{
+
 		let temp_dir = TempDir::new().unwrap();
 
 		let temp_path = temp_dir.path();
@@ -248,13 +261,13 @@ fn test_aol_fsync_modes() {
 		tx.set(&b"key_1"[..], "fsync_interval").unwrap();
 
 		tx.commit().unwrap(); // Should not fsync immediately
-
-		// Wait for interval to pass
+						// Wait for interval to pass
 		std::thread::sleep(Duration::from_millis(200));
 	}
 
 	// Test FsyncMode::Never
 	{
+
 		let temp_dir = TempDir::new().unwrap();
 
 		let temp_path = temp_dir.path();
@@ -278,6 +291,7 @@ fn test_aol_fsync_modes() {
 #[test]
 
 fn test_snapshot_manual_creation() {
+
 	// Create a temporary directory for testing
 	let temp_dir = TempDir::new().unwrap();
 
@@ -296,6 +310,7 @@ fn test_snapshot_manual_creation() {
 
 	// Add some data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("snap_key1".to_string(), "snap_value1".to_string()).unwrap();
@@ -307,6 +322,7 @@ fn test_snapshot_manual_creation() {
 
 	// Manually create a snapshot
 	if let Some(persistence) = db.persistence() {
+
 		persistence.snapshot().unwrap();
 	}
 
@@ -328,6 +344,7 @@ fn test_snapshot_manual_creation() {
 #[test]
 
 fn test_snapshot_only_persistence_basic() {
+
 	// Create a temporary directory for testing
 	let temp_dir = TempDir::new().unwrap();
 
@@ -346,6 +363,7 @@ fn test_snapshot_only_persistence_basic() {
 
 	// Add some data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.put("key1".to_string(), "value1".to_string()).unwrap();
@@ -357,6 +375,7 @@ fn test_snapshot_only_persistence_basic() {
 
 	// Verify data is accessible in current session
 	{
+
 		let mut tx = db.transaction(false);
 
 		assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
@@ -368,6 +387,7 @@ fn test_snapshot_only_persistence_basic() {
 
 	// Trigger a manual snapshot
 	if let Some(persistence) = db.persistence() {
+
 		persistence.snapshot().unwrap();
 	}
 
@@ -391,6 +411,7 @@ fn test_snapshot_only_persistence_basic() {
 #[test]
 
 fn test_snapshot_basic() {
+
 	// Test basic snapshot creation
 	let temp_dir = TempDir::new().unwrap();
 
@@ -406,9 +427,11 @@ fn test_snapshot_basic() {
 
 	// Add test data
 	{
+
 		let mut tx = db.transaction(true);
 
 		for i in 0..100 {
+
 			tx.set(format!("key_{i}"), format!("value_{i}_with_some_data")).unwrap();
 		}
 
@@ -417,6 +440,7 @@ fn test_snapshot_basic() {
 
 	// Create snapshot
 	if let Some(persistence) = db.persistence() {
+
 		persistence.snapshot().unwrap();
 	}
 
@@ -435,6 +459,7 @@ fn test_snapshot_basic() {
 #[test]
 
 fn test_snapshot_recovery() {
+
 	// Create a temporary directory for testing
 	let temp_dir = TempDir::new().unwrap();
 
@@ -448,10 +473,12 @@ fn test_snapshot_recovery() {
 
 	// Create first database instance and add data
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		// Add initial data
 		{
+
 			let mut tx = db.transaction(true);
 
 			tx.set("snapshot_key1".to_string(), "snapshot_value1".to_string()).unwrap();
@@ -463,6 +490,7 @@ fn test_snapshot_recovery() {
 
 		// Update data
 		{
+
 			let mut tx = db.transaction(true);
 
 			tx.set("snapshot_key1".to_string(), "updated_snapshot_value1".to_string()).unwrap();
@@ -474,6 +502,7 @@ fn test_snapshot_recovery() {
 
 		// Delete data
 		{
+
 			let mut tx = db.transaction(true);
 
 			tx.del("snapshot_key2".to_string()).unwrap();
@@ -483,12 +512,13 @@ fn test_snapshot_recovery() {
 
 		// Create snapshot before closing
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	} // Database drops here
-
-	// Create second database instance from the same directory (simulates restart)
+   // Create second database instance from the same directory (simulates restart)
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		// Verify data was recovered from snapshot
@@ -509,6 +539,7 @@ fn test_snapshot_recovery() {
 #[test]
 
 fn test_snapshot_interval() {
+
 	// Create a temporary directory for testing
 	let temp_dir = TempDir::new().unwrap();
 
@@ -524,6 +555,7 @@ fn test_snapshot_interval() {
 
 	// Add some data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("interval_key1".to_string(), "interval_value1".to_string()).unwrap();
@@ -536,6 +568,7 @@ fn test_snapshot_interval() {
 
 	// Add more data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("interval_key2".to_string(), "interval_value2".to_string()).unwrap();
@@ -555,6 +588,7 @@ fn test_snapshot_interval() {
 #[test]
 
 fn test_combined_aol_and_snapshot() {
+
 	// Create a temporary directory for testing
 	let temp_dir = TempDir::new().unwrap();
 
@@ -569,10 +603,12 @@ fn test_combined_aol_and_snapshot() {
 
 	// Create first database instance
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		// Add initial data (will go to AOL)
 		{
+
 			let mut tx = db.transaction(true);
 
 			tx.set("combined_key1".to_string(), "combined_value1".to_string()).unwrap();
@@ -584,11 +620,13 @@ fn test_combined_aol_and_snapshot() {
 
 		// Create a snapshot (should truncate AOL)
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 
 		// Add more data after snapshot (will go to AOL)
 		{
+
 			let mut tx = db.transaction(true);
 
 			tx.set("combined_key3".to_string(), "combined_value3".to_string()).unwrap();
@@ -598,8 +636,7 @@ fn test_combined_aol_and_snapshot() {
 			tx.commit().unwrap();
 		}
 	} // Database drops here
-
-	// Verify both snapshot and AOL files exist
+   // Verify both snapshot and AOL files exist
 	let snapshot_path = temp_path.join("snapshot.bin");
 
 	let aol_path = temp_path.join("aol.bin");
@@ -610,6 +647,7 @@ fn test_combined_aol_and_snapshot() {
 
 	// Create second database instance (simulates restart)
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		// Verify data was recovered from both snapshot and AOL
@@ -631,6 +669,7 @@ fn test_combined_aol_and_snapshot() {
 #[test]
 
 fn test_aol_snapshot_with_truncation() {
+
 	// Create a temporary directory for testing
 	let temp_dir = TempDir::new().unwrap();
 
@@ -647,9 +686,11 @@ fn test_aol_snapshot_with_truncation() {
 
 	// Add data that will go to AOL
 	{
+
 		let mut tx = db.transaction(true);
 
 		for i in 0..10 {
+
 			tx.set(format!("key_{}", i), format!("value_{}", i)).unwrap();
 		}
 
@@ -665,6 +706,7 @@ fn test_aol_snapshot_with_truncation() {
 
 	// Create snapshot (should truncate AOL)
 	if let Some(persistence) = db.persistence() {
+
 		persistence.snapshot().unwrap();
 	}
 
@@ -675,6 +717,7 @@ fn test_aol_snapshot_with_truncation() {
 
 	// Add more data after snapshot
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("post_snapshot_key".to_string(), "post_snapshot_value".to_string()).unwrap();
@@ -689,9 +732,11 @@ fn test_aol_snapshot_with_truncation() {
 
 	// Verify all data is still accessible
 	{
+
 		let mut tx = db.transaction(false);
 
 		for i in 0..10 {
+
 			assert_eq!(
 				tx.get(format!("key_{}", i)).unwrap(),
 				Some(Bytes::from(format!("value_{}", i)))
@@ -707,6 +752,7 @@ fn test_aol_snapshot_with_truncation() {
 #[test]
 
 fn test_combined_recovery_complex() {
+
 	// Create a temporary directory for testing
 	let temp_dir = TempDir::new().unwrap();
 
@@ -721,10 +767,12 @@ fn test_combined_recovery_complex() {
 
 	// First session: Add data, snapshot, add more data
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		// Phase 1: Add initial data
 		{
+
 			let mut tx = db.transaction(true);
 
 			tx.set("phase1_key1".to_string(), "phase1_value1".to_string()).unwrap();
@@ -736,6 +784,7 @@ fn test_combined_recovery_complex() {
 
 		// Phase 2: Update and delete some data
 		{
+
 			let mut tx = db.transaction(true);
 
 			tx.set("phase1_key1".to_string(), "updated_phase1_value1".to_string()).unwrap();
@@ -749,11 +798,13 @@ fn test_combined_recovery_complex() {
 
 		// Create snapshot
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 
 		// Phase 3: Add data after snapshot
 		{
+
 			let mut tx = db.transaction(true);
 
 			tx.set("phase3_key1".to_string(), "phase3_value1".to_string()).unwrap();
@@ -763,9 +814,9 @@ fn test_combined_recovery_complex() {
 			tx.commit().unwrap();
 		}
 	} // First session ends
-
-	// Second session: Verify all data is recovered correctly
+   // Second session: Verify all data is recovered correctly
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
@@ -787,6 +838,7 @@ fn test_combined_recovery_complex() {
 #[test]
 
 fn test_custom_file_paths() {
+
 	// Create a temporary directory for testing
 	let temp_dir = TempDir::new().unwrap();
 
@@ -813,6 +865,7 @@ fn test_custom_file_paths() {
 
 	// Add some data
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("custom_key".to_string(), "custom_value".to_string()).unwrap();
@@ -822,6 +875,7 @@ fn test_custom_file_paths() {
 
 	// Create snapshot
 	if let Some(persistence) = db.persistence() {
+
 		persistence.snapshot().unwrap();
 	}
 
@@ -838,6 +892,7 @@ fn test_custom_file_paths() {
 #[test]
 
 fn test_persistence_options_builder() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -864,6 +919,7 @@ fn test_persistence_options_builder() {
 #[test]
 
 fn test_readonly_operations_no_persistence() {
+
 	// Test that read-only operations work even with persistence configured
 	let temp_dir = TempDir::new().unwrap();
 
@@ -879,6 +935,7 @@ fn test_readonly_operations_no_persistence() {
 
 	// Perform read-only operations (should not trigger persistence)
 	{
+
 		let mut tx = db.transaction(false);
 
 		assert_eq!(tx.get("non_existent_key").unwrap(), None);
@@ -895,6 +952,7 @@ fn test_readonly_operations_no_persistence() {
 
 	// AOL file might exist but should be empty, snapshot should not exist
 	if aol_path.exists() {
+
 		let metadata = std::fs::metadata(&aol_path).unwrap();
 
 		assert_eq!(metadata.len(), 0, "AOL file should be empty after read-only operations");

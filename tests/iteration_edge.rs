@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Iteration edge case tests for SurrealMX.
 //!
 //! Tests iterator and cursor behavior under edge conditions including
@@ -28,10 +27,10 @@ use surrealmx::Database;
 // =============================================================================
 // Cursor After Transaction Cancel Tests
 // =============================================================================
-
 #[test]
 
 fn cursor_after_transaction_cancel() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -68,10 +67,10 @@ fn cursor_after_transaction_cancel() {
 // =============================================================================
 // Modify Key While Iterating Tests
 // =============================================================================
-
 #[test]
 
 fn modify_key_while_iterating() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -118,6 +117,7 @@ fn modify_key_while_iterating() {
 #[test]
 
 fn delete_key_while_iterating() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -164,6 +164,7 @@ fn delete_key_while_iterating() {
 #[test]
 
 fn seek_after_mutation() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -212,6 +213,7 @@ fn seek_after_mutation() {
 #[test]
 
 fn iterator_exhaustion_and_reuse() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -245,8 +247,7 @@ fn iterator_exhaustion_and_reuse() {
 	assert!(iter.next().is_none());
 
 	assert!(iter.next().is_none()); // Multiple calls should keep returning None
-
-	// Creating a new iterator should work fine
+								 // Creating a new iterator should work fine
 	let mut new_iter = tx.keys_iter("x".."zz").unwrap();
 
 	assert_eq!(new_iter.next(), Some(Bytes::from("x")));
@@ -255,13 +256,16 @@ fn iterator_exhaustion_and_reuse() {
 #[test]
 
 fn concurrent_iteration_same_range() {
+
 	let db = Arc::new(Database::new());
 
 	// Create initial data
 	{
+
 		let mut tx = db.transaction(true);
 
 		for i in 0..20 {
+
 			tx.set(format!("data_{:02}", i), format!("value_{}", i)).unwrap();
 		}
 
@@ -274,11 +278,13 @@ fn concurrent_iteration_same_range() {
 
 	// Spawn multiple threads that iterate over the same range
 	for thread_id in 0..3 {
+
 		let db = Arc::clone(&db);
 
 		let barrier = Arc::clone(&barrier);
 
 		handles.push(thread::spawn(move || {
+
 			barrier.wait();
 
 			let tx = db.transaction(false);
@@ -293,6 +299,7 @@ fn concurrent_iteration_same_range() {
 
 	// All threads should see the same count
 	for (thread_id, count) in &results {
+
 		assert_eq!(*count, 20, "Thread {} should see all 20 items, got {}", thread_id, count);
 	}
 }

@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! This module stores the database persistence logic.
 
 use crate::{
@@ -19,7 +18,7 @@ use crate::{
 	err::PersistenceError,
 	inner::Inner,
 	version::Version,
-	versions::{VersionedEntry, Versions},
+	versions::Versions,
 };
 use bincode::config;
 use bytes::Bytes;
@@ -105,6 +104,7 @@ pub struct PersistenceOptions {
 
 impl Default for PersistenceOptions {
 	fn default() -> Self {
+
 		Self {
 			base_path: PathBuf::from("./data"),
 			aol_mode: AolMode::default(),
@@ -121,6 +121,7 @@ impl PersistenceOptions {
 	/// Create new persistence options with the given base path
 
 	pub fn new<P: Into<PathBuf>>(base_path: P) -> Self {
+
 		Self {
 			base_path: base_path.into(),
 			..Self::default()
@@ -130,6 +131,7 @@ impl PersistenceOptions {
 	/// Set the base path for persistence files
 
 	pub fn with_base_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
+
 		self.base_path = path.into();
 
 		self
@@ -138,6 +140,7 @@ impl PersistenceOptions {
 	/// Set the AOL (append-only log) behavior mode
 
 	pub fn with_aol_mode(mut self, mode: AolMode) -> Self {
+
 		self.aol_mode = mode;
 
 		self
@@ -146,6 +149,7 @@ impl PersistenceOptions {
 	/// Set the snapshot behavior mode
 
 	pub fn with_snapshot_mode(mut self, mode: SnapshotMode) -> Self {
+
 		self.snapshot_mode = mode;
 
 		self
@@ -154,6 +158,7 @@ impl PersistenceOptions {
 	/// Set the fsync mode
 
 	pub fn with_fsync_mode(mut self, mode: FsyncMode) -> Self {
+
 		self.fsync_mode = mode;
 
 		self
@@ -162,6 +167,7 @@ impl PersistenceOptions {
 	/// Set a custom AOL file path
 
 	pub fn with_aol_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
+
 		self.aol_path = Some(path.into());
 
 		self
@@ -170,6 +176,7 @@ impl PersistenceOptions {
 	/// Set a custom snapshot file path
 
 	pub fn with_snapshot_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
+
 		self.snapshot_path = Some(path.into());
 
 		self
@@ -178,6 +185,7 @@ impl PersistenceOptions {
 	/// Set the compression mode for snapshots
 
 	pub fn with_compression(mut self, mode: CompressionMode) -> Self {
+
 		self.compression_mode = mode;
 
 		self
@@ -240,6 +248,7 @@ impl Persistence {
 		options: PersistenceOptions,
 		inner: Arc<Inner>,
 	) -> Result<Self, PersistenceError> {
+
 		// Get the base path from options
 		let base_path = &options.base_path;
 
@@ -248,30 +257,40 @@ impl Persistence {
 
 		// Determine the specified AOL file path
 		let aol_path = if let Some(path) = options.aol_path {
+
 			if path.is_absolute() {
+
 				path
 			} else {
+
 				base_path.join(path)
 			}
 		} else {
+
 			base_path.join("aol.bin")
 		};
 
 		// Determine the specified snapshot file path
 		let snapshot_path = if let Some(path) = options.snapshot_path {
+
 			if path.is_absolute() {
+
 				path
 			} else {
+
 				base_path.join(path)
 			}
 		} else {
+
 			base_path.join("snapshot.bin")
 		};
 
 		// Initialize AOL components if enabled
 		let aol = if !matches!(options.aol_mode, AolMode::Never) {
+
 			// Ensure parent directories exist for AOL path
 			if let Some(parent) = aol_path.parent() {
+
 				fs::create_dir_all(parent)?;
 			}
 
@@ -280,11 +299,13 @@ impl Persistence {
 
 			Some(Arc::new(Mutex::new(file)))
 		} else {
+
 			None
 		};
 
 		// Ensure parent directories exist for snapshot path
 		if let Some(parent) = snapshot_path.parent() {
+
 			fs::create_dir_all(parent)?;
 		}
 
@@ -336,11 +357,13 @@ impl Persistence {
 	/// * `Result<(), PersistenceError>` - Success or an error
 
 	pub fn snapshot(&self) -> Result<(), PersistenceError> {
+
 		// Create temporary file for atomic swap
 		let temp_path = self.snapshot_path.with_extension("tmp");
 
 		// Execute snapshot operation in closure for clean error handling
 		let result = (|| -> Result<(), PersistenceError> {
+
 			// Create temporary file
 			let file = File::create(&temp_path)?;
 
@@ -349,18 +372,22 @@ impl Persistence {
 
 			// Get the current position in the AOL file (if AOL is enabled)
 			let aol_cutoff_position = if let Some(ref aol) = self.aol {
+
 				aol.lock()?.metadata()?.len()
 			} else {
+
 				0
 			};
 
 			// Stream write each key-value pair to reduce memory usage
 			for entry in self.inner.datastore.iter() {
+
 				// Get all versions for this key
-				let versions = entry.value().versions.read().all_versions();
+				let versions = entry.value().read().all_versions();
 
 				// Ensure that there are version entries
 				if !versions.is_empty() {
+
 					// Serialize and write this single entry
 					bincode::serde::encode_into_std_write(
 						&(entry.key().clone(), versions),
@@ -381,6 +408,7 @@ impl Persistence {
 
 			// Sync the renamed file to disk for durability
 			{
+
 				let final_file = File::open(&self.snapshot_path)?;
 
 				final_file.sync_all()?;
@@ -395,6 +423,7 @@ impl Persistence {
 
 		// Clean up temporary file if operation failed
 		if result.is_err() {
+
 			// Ignore removal errors
 			let _ = fs::remove_file(&temp_path);
 		}
@@ -410,8 +439,10 @@ impl Persistence {
 	/// 2. Applies any changes from the append-only log
 
 	fn load(&self) -> Result<(), PersistenceError> {
+
 		// Check if snapshot file exists
 		if self.snapshot_path.exists() {
+
 			// Read and deserialize the snapshot data
 			let file = File::open(&self.snapshot_path)?;
 
@@ -420,6 +451,7 @@ impl Persistence {
 
 			// Check if the snapshot file is empty
 			if metadata.len() > 0 {
+
 				// Create compressed reader that auto-detects compression mode
 				let mut reader = CompressedReader::new(file)?;
 
@@ -428,6 +460,7 @@ impl Persistence {
 
 				// Stream reading the snapshot to reduce memory usage
 				loop {
+
 					// Increment the counter
 					count += 1;
 
@@ -444,23 +477,15 @@ impl Persistence {
 					// Detech any end of file errors
 					match result {
 						Ok((k, versions)) => {
+
 							// Ensure that there are version entries
 							if !versions.is_empty() {
+
 								// Create a new versions entry
 								let mut entries = Versions::new();
 
-								// Track the latest version for the lock-free snapshot
-								let mut latest_ver: u64 = 0;
-
-								let mut latest_val: Option<Bytes> = None;
-
 								// Add all of the version entries
 								for (version, value) in versions.into_iter() {
-									if version >= latest_ver {
-										latest_ver = version;
-
-										latest_val = value.clone();
-									}
 
 									entries.push(Version {
 										version,
@@ -469,10 +494,7 @@ impl Persistence {
 								}
 
 								// Insert the entry into the datastore
-								self.inner.datastore.insert(
-									k,
-									VersionedEntry::from_parts(entries, latest_ver, latest_val),
-								);
+								self.inner.datastore.insert(k, RwLock::new(entries));
 							}
 						}
 						Err(e) => match e {
@@ -481,6 +503,7 @@ impl Persistence {
 								inner,
 								..
 							} if inner.kind() == std::io::ErrorKind::UnexpectedEof => {
+
 								break;
 							}
 							e => return Err(PersistenceError::Deserialization(e)),
@@ -492,6 +515,7 @@ impl Persistence {
 
 		// Check if append-only file exists
 		if self.aol_path.exists() {
+
 			// Open and read the AOL file
 			let file = File::open(&self.aol_path)?;
 
@@ -500,6 +524,7 @@ impl Persistence {
 
 			// Check if the append-only file is empty
 			if metadata.len() > 0 {
+
 				// Create buffered reader for efficient reading
 				let mut reader = BufReader::new(file);
 
@@ -508,6 +533,7 @@ impl Persistence {
 
 				// Read and apply each change from the AOL
 				loop {
+
 					// Increment the counter
 					count += 1;
 
@@ -524,24 +550,25 @@ impl Persistence {
 					// Detech any end of file errors
 					match result {
 						Ok((k, version, val)) => {
+
 							// Check if the key already exists
 							if let Some(entry) = self.inner.datastore.get(&k) {
-								let ve = entry.value();
 
 								// Update existing key with stored version
-								let val_clone = val.clone();
-
-								ve.versions.write().push(Version {
+								entry.value().write().push(Version {
 									version,
 									value: val,
 								});
-
-								ve.update_latest(version, val_clone);
 							} else {
+
 								// Insert new key with stored version
-								self.inner
-									.datastore
-									.insert(k.clone(), VersionedEntry::new(version, val));
+								self.inner.datastore.insert(
+									k.clone(),
+									RwLock::new(Versions::from(Version {
+										version,
+										value: val,
+									})),
+								);
 							}
 						}
 						Err(e) => match e {
@@ -550,6 +577,7 @@ impl Persistence {
 								inner,
 								..
 							} if inner.kind() == std::io::ErrorKind::UnexpectedEof => {
+
 								break;
 							}
 							e => return Err(PersistenceError::Deserialization(e)),
@@ -571,8 +599,10 @@ impl Persistence {
 		position: u64,
 		pending_syncs: &Arc<AtomicU64>,
 	) -> Result<(), PersistenceError> {
+
 		// Check that we have a AOL file handle
 		if let Some(ref aol) = aol {
+
 			// Lock the AOL file
 			let mut file = aol.lock()?;
 
@@ -581,6 +611,7 @@ impl Persistence {
 
 			// Check if there is remaining data
 			if file_len > position {
+
 				// Generate a unique name for the temporary file
 				let name = format!("aol_truncate_{}.tmp", std::process::id());
 
@@ -589,8 +620,10 @@ impl Persistence {
 
 				// Execute truncation in a closure for clean error handling
 				let result = (|| -> Result<(), PersistenceError> {
+
 					// Create temporary file and copy remaining data
 					{
+
 						file.seek(SeekFrom::Start(position))?;
 
 						// Create the temporary file
@@ -611,6 +644,7 @@ impl Persistence {
 
 					// Copy data from temporary file
 					{
+
 						let mut temp = File::open(&path)?;
 
 						std::io::copy(&mut temp, &mut *file)?;
@@ -629,6 +663,7 @@ impl Persistence {
 				// Return the result
 				result?;
 			} else {
+
 				// Truncate the AOL file
 				file.set_len(0)?;
 
@@ -638,6 +673,7 @@ impl Persistence {
 
 			// Reset pending syncs if we truncated to beginning
 			if position == 0 {
+
 				pending_syncs.store(0, Ordering::Release);
 			}
 		}
@@ -649,20 +685,25 @@ impl Persistence {
 	/// Spawns a background worker thread for periodic fsync
 
 	fn spawn_fsync_worker(&self) {
+
 		// Check if AOL is enabled
 		if self.aol_mode == AolMode::Never {
+
 			return;
 		}
 
 		// Get the specified fsync interval
 		let FsyncMode::Interval(interval) = self.fsync_mode else {
+
 			return;
 		};
 
 		// Check if AOL is enabled
 		if let Some(ref aol) = self.aol {
+
 			// Check if a background thread is already running
 			if self.fsync_handle.read().is_none() {
+
 				// Clone necessary fields for the worker thread
 				let aol = aol.clone();
 
@@ -672,22 +713,29 @@ impl Persistence {
 
 				// Spawn the background worker thread
 				let handle = thread::spawn(move || {
+
 					// Check whether the persistence process is enabled
 					while enabled.load(Ordering::Acquire) {
+
 						// Sleep for the configured interval
 						thread::park_timeout(interval);
 
 						// Check shutdown flag again after waking
 						if !enabled.load(Ordering::Acquire) {
+
 							break;
 						}
 
 						// Check if there are pending syncs
 						if pending_syncs.load(Ordering::Acquire) > 0 {
+
 							if let Ok(file) = aol.lock() {
+
 								if let Err(e) = file.sync_all() {
+
 									tracing::error!("Fsync worker error: {e}");
 								} else {
+
 									pending_syncs.store(0, Ordering::Release);
 								}
 							}
@@ -710,18 +758,22 @@ impl Persistence {
 	/// 4. Truncates AOL up to the cutoff, preserving newer entries
 
 	fn spawn_snapshot_worker(&self) {
+
 		// Check if snapshots are enabled
 		if self.snapshot_mode == SnapshotMode::Never {
+
 			return;
 		}
 
 		// Only spawn if snapshot interval is configured
 		let SnapshotMode::Interval(interval) = self.snapshot_mode else {
+
 			return;
 		};
 
 		// Check if a background thread is already running
 		if self.snapshot_handle.read().is_none() {
+
 			// Clone necessary fields for the worker thread
 			let db = self.inner.clone();
 
@@ -737,13 +789,16 @@ impl Persistence {
 
 			// Spawn the background worker thread
 			let handle = thread::spawn(move || {
+
 				// Check whether the persistence process is enabled
 				while enabled.load(Ordering::Acquire) {
+
 					// Sleep for the configured interval
 					thread::park_timeout(interval);
 
 					// Check shutdown flag again after waking
 					if !enabled.load(Ordering::Acquire) {
+
 						break;
 					}
 
@@ -752,6 +807,7 @@ impl Persistence {
 
 					// Ensure clean error handling in closure
 					let result = (|| -> Result<(), PersistenceError> {
+
 						// Create temporary file
 						let file = File::create(&temp_path)?;
 
@@ -761,18 +817,22 @@ impl Persistence {
 						// Get the current position in the AOL file before snapshotting (if AOL
 						// enabled)
 						let aol_cutoff_position = if let Some(ref aol) = aol {
+
 							aol.lock()?.metadata()?.len()
 						} else {
+
 							0
 						};
 
 						// Stream write each entry to reduce memory usage
 						for entry in db.datastore.iter() {
+
 							// Get all versions for this key
-							let versions = entry.value().versions.read().all_versions();
+							let versions = entry.value().read().all_versions();
 
 							// Ensure that there are version entries
 							if !versions.is_empty() {
+
 								// Serialize and write this single entry
 								bincode::serde::encode_into_std_write(
 									&(entry.key().clone(), versions),
@@ -793,6 +853,7 @@ impl Persistence {
 
 						// Sync the renamed file to disk for durability
 						{
+
 							let final_file = File::open(&snapshot_path)?;
 
 							final_file.sync_all()?;
@@ -807,6 +868,7 @@ impl Persistence {
 
 					// Check if the snapshot operation failed
 					if let Err(e) = result {
+
 						// Trace the snapshot worker error
 						tracing::error!("Snapshot worker error: {e}");
 
@@ -825,15 +887,19 @@ impl Persistence {
 	/// operations
 
 	fn spawn_appender_worker(&self) {
+
 		// Check if asynchronous append mode is enabled
 		if self.aol_mode != AolMode::AsynchronousAfterCommit {
+
 			return;
 		}
 
 		// Check if AOL is enabled
 		if let Some(ref aol) = self.aol {
+
 			// Check if a background thread is already running
 			if self.appender_handle.read().is_none() {
+
 				// Clone necessary fields for the worker thread
 				let injector = self.async_append_injector.clone();
 
@@ -849,6 +915,7 @@ impl Persistence {
 
 				// Spawn the background worker thread
 				let handle = thread::spawn(move || {
+
 					// Set the batch size and timeout
 					const BATCH_SIZE: usize = 100;
 
@@ -859,8 +926,10 @@ impl Persistence {
 
 					// Check whether the persistence process is enabled
 					while enabled.load(Ordering::Acquire) {
+
 						// Check shutdown flag again after waking
 						if !enabled.load(Ordering::Acquire) {
+
 							break;
 						}
 
@@ -869,27 +938,34 @@ impl Persistence {
 
 						// Collect operations into a batch
 						loop {
+
 							// Check shutdown flag in the inner loop
 							if !enabled.load(Ordering::Acquire) {
+
 								break;
 							}
 
 							match injector.steal() {
 								Steal::Retry => {
+
 									std::thread::yield_now();
 
 									continue;
 								}
 								Steal::Success(op) => {
+
 									batch.push(op);
 
 									if batch.len() == BATCH_SIZE {
+
 										break;
 									}
 								}
 								Steal::Empty => {
+
 									// If we have items to append, break
 									if !batch.is_empty() {
+
 										break;
 									}
 
@@ -901,16 +977,21 @@ impl Persistence {
 
 						// Process the batch if we have operations
 						if !batch.is_empty() {
+
 							// Ensure clean error handling in closure
 							let result = (|| -> Result<(), PersistenceError> {
+
 								// Lock the AOL file for writing
 								if let Ok(mut file) = aol.lock() {
+
 									// Create a new buffer for the AOL file
 									let mut writer = BufWriter::new(&mut *file);
 
 									// Write all operations in the batch
 									for op in &batch {
+
 										for (k, v) in &op.writeset {
+
 											bincode::serde::encode_into_std_write(
 												(k, op.version, v),
 												&mut writer,
@@ -929,44 +1010,52 @@ impl Persistence {
 									match fsync_mode {
 										// Let the operating system handle syncing to disk
 										FsyncMode::Never => {
+
 											// No fsync, just increment pending counter
 											pending_syncs.fetch_add(1, Ordering::Release);
 										}
 										// Sync immediately to diskafter every append
 										FsyncMode::EveryAppend => {
+
 											// Sync immediately
 											file.sync_all()?;
 										}
 										// Force sync to disk at a specified interval
 										FsyncMode::Interval(duration) => {
+
 											// Check if we should sync based on time
 											let now = Instant::now();
 
 											// Check if we should sync based on time
 											let should_sync = {
+
 												// Get the last fsync time
 												let mut last_fsync = last_fsync.lock()?;
 
 												// Check if the last fsync time is greater than the
 												// duration
 												if now.duration_since(*last_fsync) >= duration {
+
 													// Update the last fsync time
 													*last_fsync = now;
 
 													true
 												} else {
+
 													false
 												}
 											};
 
 											// Check if we should sync
 											if should_sync {
+
 												// Force sync the AOL file to disk
 												file.sync_all()?;
 
 												// Reset the pending syncs counter
 												pending_syncs.store(0, Ordering::Release);
 											} else {
+
 												// Increment the pending syncs counter
 												pending_syncs.fetch_add(1, Ordering::Release);
 											}
@@ -980,6 +1069,7 @@ impl Persistence {
 
 							// Check if the async append operation failed
 							if let Err(e) = result {
+
 								// Trace the snapshot worker error
 								tracing::error!("Async append worker error: {e}");
 							}
@@ -1007,15 +1097,19 @@ impl Persistence {
 		version: u64,
 		writeset: &BTreeMap<Bytes, Option<Bytes>>,
 	) -> Result<(), PersistenceError> {
+
 		// Skip AOL writing if AOL is disabled
 		if self.aol_mode == AolMode::Never {
+
 			return Ok(());
 		}
 
 		// AOL is enabled, proceed with append logic
 		if let Some(ref aol) = self.aol {
+
 			// Handle asynchronous AOL mode by queuing the operation
 			if self.aol_mode == AolMode::AsynchronousAfterCommit {
+
 				// Queue the append operation
 				self.async_append_injector.push(AsyncAppendOperation {
 					version,
@@ -1024,11 +1118,13 @@ impl Persistence {
 
 				// Wake up the async append worker if available
 				if let Some(handle) = self.appender_handle.read().as_ref() {
+
 					handle.thread().unpark();
 				}
 			}
 
 			if self.aol_mode == AolMode::SynchronousOnCommit {
+
 				// Lock the AOL file for writing
 				let mut file = aol.lock()?;
 
@@ -1037,6 +1133,7 @@ impl Persistence {
 
 				// Serialize and write each change with version
 				for (k, v) in writeset {
+
 					bincode::serde::encode_into_std_write(
 						(k, version, v),
 						&mut writer,
@@ -1054,43 +1151,51 @@ impl Persistence {
 				match self.fsync_mode {
 					// Let the operating system handle syncing to disk
 					FsyncMode::Never => {
+
 						// No fsync, just increment pending counter
 						self.pending_syncs.fetch_add(1, Ordering::Release);
 					}
 					// Sync immediately to diskafter every append
 					FsyncMode::EveryAppend => {
+
 						// Sync immediately
 						file.sync_all()?;
 					}
 					// Force sync to disk at a specified interval
 					FsyncMode::Interval(duration) => {
+
 						// Check if we should sync based on time
 						let now = Instant::now();
 
 						// Check if we should sync based on time
 						let should_sync = {
+
 							// Get the last fsync time
 							let mut last_fsync = self.last_fsync.lock()?;
 
 							// Check if the last fsync time is greater than the duration
 							if now.duration_since(*last_fsync) >= duration {
+
 								// Update the last fsync time
 								*last_fsync = now;
 
 								true
 							} else {
+
 								false
 							}
 						};
 
 						// Check if we should sync
 						if should_sync {
+
 							// Force sync the AOL file to disk
 							file.sync_all()?;
 
 							// Reset the pending syncs counter
 							self.pending_syncs.store(0, Ordering::Release);
 						} else {
+
 							// Increment the pending syncs counter
 							self.pending_syncs.fetch_add(1, Ordering::Release);
 						}
@@ -1108,11 +1213,13 @@ impl Drop for Persistence {
 	/// Cleans up resources when the persistence layer is dropped
 
 	fn drop(&mut self) {
+
 		// Signal shutdown to the worker threads
 		self.background_threads_enabled.store(false, Ordering::Release);
 
 		// Stop the fsync worker if it exists
 		if let Some(handle) = self.fsync_handle.write().take() {
+
 			handle.thread().unpark();
 
 			let _ = handle.join();
@@ -1120,6 +1227,7 @@ impl Drop for Persistence {
 
 		// Stop the snapshot worker if it exists
 		if let Some(handle) = self.snapshot_handle.write().take() {
+
 			handle.thread().unpark();
 
 			let _ = handle.join();
@@ -1127,6 +1235,7 @@ impl Drop for Persistence {
 
 		// Stop the async append worker if it exists
 		if let Some(handle) = self.appender_handle.write().take() {
+
 			handle.thread().unpark();
 
 			let _ = handle.join();
@@ -1134,10 +1243,13 @@ impl Drop for Persistence {
 
 		// Perform final fsync if there are pending syncs
 		if self.aol_mode != AolMode::Never && self.pending_syncs.load(Ordering::Acquire) > 0 {
+
 			// Try to acquire lock on AOL file
 			if let Some(ref aol) = self.aol {
+
 				// Lock the AOL file
 				if let Ok(file) = aol.lock() {
+
 					// Sync file contents to disk
 					let _ = file.sync_all();
 				}

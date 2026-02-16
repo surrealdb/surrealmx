@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Large transaction stress tests for SurrealMX.
 //!
 //! Tests high-volume transaction scenarios including many keys,
@@ -23,10 +22,10 @@ use surrealmx::Database;
 // =============================================================================
 // Transaction With Thousands of Keys Tests
 // =============================================================================
-
 #[test]
 
 fn transaction_with_thousands_of_keys() {
+
 	let db = Database::new();
 
 	let num_keys = 10_000;
@@ -35,6 +34,7 @@ fn transaction_with_thousands_of_keys() {
 	let mut tx = db.transaction(true);
 
 	for i in 0..num_keys {
+
 		let key = format!("key_{:06}", i);
 
 		let value = format!("value_{}", i);
@@ -62,14 +62,15 @@ fn transaction_with_thousands_of_keys() {
 #[test]
 
 fn large_value_handling() {
+
 	let db = Database::new();
 
 	// Create values of increasing sizes
 	let sizes = [1024, 10 * 1024, 100 * 1024, 1024 * 1024]; // 1KB, 10KB, 100KB, 1MB
-
 	let mut tx = db.transaction(true);
 
 	for (i, size) in sizes.iter().enumerate() {
+
 		let key = format!("large_key_{}", i);
 
 		// Create a value of the specified size
@@ -84,6 +85,7 @@ fn large_value_handling() {
 	let tx = db.transaction(false);
 
 	for (i, expected_size) in sizes.iter().enumerate() {
+
 		let key = format!("large_key_{}", i);
 
 		let value = tx.get(&key).unwrap().expect("Value should exist");
@@ -98,6 +100,7 @@ fn large_value_handling() {
 #[test]
 
 fn many_small_writes() {
+
 	let db = Database::new();
 
 	let num_transactions = 1000;
@@ -106,9 +109,11 @@ fn many_small_writes() {
 
 	// Perform many small transactions
 	for tx_num in 0..num_transactions {
+
 		let mut tx = db.transaction(true);
 
 		for key_num in 0..keys_per_tx {
+
 			let key = format!("tx{:04}_key{:02}", tx_num, key_num);
 
 			tx.set(key, "value").unwrap();
@@ -133,15 +138,18 @@ fn many_small_writes() {
 #[test]
 
 fn large_scan_results() {
+
 	let db = Database::new();
 
 	let num_keys = 5000;
 
 	// Insert many keys
 	{
+
 		let mut tx = db.transaction(true);
 
 		for i in 0..num_keys {
+
 			let key = format!("scan_key_{:05}", i);
 
 			let value = format!("value_for_{}", i);
@@ -163,7 +171,9 @@ fn large_scan_results() {
 	let mut prev_key: Option<Bytes> = None;
 
 	for (key, _value) in &results {
+
 		if let Some(ref prev) = prev_key {
+
 			assert!(key > prev, "Keys should be in sorted order");
 		}
 
@@ -179,6 +189,7 @@ fn large_scan_results() {
 #[test]
 
 fn memory_under_write_pressure() {
+
 	let db = Database::new();
 
 	// Perform sustained writes to test memory behavior
@@ -187,11 +198,12 @@ fn memory_under_write_pressure() {
 	let keys_per_iteration = 100;
 
 	let value_size = 1024; // 1KB values
-
 	for iter in 0..iterations {
+
 		let mut tx = db.transaction(true);
 
 		for key_num in 0..keys_per_iteration {
+
 			// Reuse key names to simulate updates (overwriting existing data)
 			let key = format!("pressure_key_{:03}", key_num);
 
@@ -214,6 +226,7 @@ fn memory_under_write_pressure() {
 	let expected_byte = ((iterations - 1) % 256) as u8;
 
 	for (_key, value) in &results {
+
 		assert_eq!(value.len(), value_size);
 
 		assert!(
@@ -226,15 +239,18 @@ fn memory_under_write_pressure() {
 #[test]
 
 fn large_batch_getm() {
+
 	let db = Database::new();
 
 	let num_keys = 500;
 
 	// Insert keys
 	{
+
 		let mut tx = db.transaction(true);
 
 		for i in 0..num_keys {
+
 			let key = format!("batch_key_{:04}", i);
 
 			let value = format!("batch_value_{}", i);
@@ -258,6 +274,7 @@ fn large_batch_getm() {
 
 	// All values should be present
 	for (i, result) in results.iter().enumerate() {
+
 		assert!(result.is_some(), "Key {} should have a value", i);
 
 		let expected = format!("batch_value_{}", i);
@@ -269,8 +286,10 @@ fn large_batch_getm() {
 	let mixed_keys: Vec<String> = (0..100)
 		.map(|i| {
 			if i % 2 == 0 {
+
 				format!("batch_key_{:04}", i)
 			} else {
+
 				format!("nonexistent_{:04}", i)
 			}
 		})
@@ -284,9 +303,12 @@ fn large_batch_getm() {
 
 	// Every other result should be Some/None
 	for (i, result) in mixed_results.iter().enumerate() {
+
 		if i % 2 == 0 {
+
 			assert!(result.is_some(), "Even index {} should have value", i);
 		} else {
+
 			assert!(result.is_none(), "Odd index {} should be None", i);
 		}
 	}

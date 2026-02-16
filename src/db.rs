@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! This module stores the core in-memory database type.
 
 use crate::{
@@ -30,7 +29,6 @@ use std::{
 // --------------------------------------------------
 // Database
 // --------------------------------------------------
-
 /// A transactional in-memory database
 
 pub struct Database {
@@ -48,6 +46,7 @@ pub struct Database {
 
 impl Default for Database {
 	fn default() -> Self {
+
 		let inner = Arc::new(Inner::default());
 
 		let pool = Pool::new(inner.clone(), DEFAULT_POOL_SIZE);
@@ -64,6 +63,7 @@ impl Default for Database {
 
 impl Drop for Database {
 	fn drop(&mut self) {
+
 		self.shutdown();
 	}
 }
@@ -72,6 +72,7 @@ impl Deref for Database {
 	type Target = Inner;
 
 	fn deref(&self) -> &Self::Target {
+
 		&self.inner
 	}
 }
@@ -80,12 +81,14 @@ impl Database {
 	/// Create a new transactional in-memory database
 
 	pub fn new() -> Self {
+
 		Self::new_with_options(DatabaseOptions::default())
 	}
 
 	/// Create a new transactional in-memory database with custom options
 
 	pub fn new_with_options(opts: DatabaseOptions) -> Self {
+
 		//  Create a new inner database
 		let inner = Arc::new(Inner::new(&opts));
 
@@ -103,10 +106,12 @@ impl Database {
 
 		// Start background tasks when enabled
 		if opts.enable_cleanup {
+
 			db.initialise_cleanup_worker();
 		}
 
 		if opts.enable_gc {
+
 			db.initialise_garbage_worker();
 		}
 
@@ -121,6 +126,7 @@ impl Database {
 		opts: DatabaseOptions,
 		persistence_opts: crate::PersistenceOptions,
 	) -> std::io::Result<Self> {
+
 		//  Create a new inner database
 		let inner = Arc::new(Inner::new(&opts));
 
@@ -145,10 +151,12 @@ impl Database {
 
 		// Start background tasks when enabled
 		if opts.enable_cleanup {
+
 			db.initialise_cleanup_worker();
 		}
 
 		if opts.enable_gc {
+
 			db.initialise_garbage_worker();
 		}
 
@@ -167,6 +175,7 @@ impl Database {
 	/// stale versions.
 
 	pub fn with_gc(self) -> Self {
+
 		// Store the garbage collection epoch
 		*self.garbage_collection_epoch.write() = None;
 
@@ -185,6 +194,7 @@ impl Database {
 	/// versions across the entire datastore.
 
 	pub fn with_gc_history(self, history: Duration) -> Self {
+
 		// Store the garbage collection epoch
 		*self.garbage_collection_epoch.write() = Some(history);
 
@@ -195,12 +205,14 @@ impl Database {
 	/// Start a new transaction on this database
 
 	pub fn transaction(&self, write: bool) -> Transaction {
+
 		self.pool.get(write)
 	}
 
 	/// Get a reference to the persistence layer if enabled
 
 	pub fn persistence(&self) -> Option<&Persistence> {
+
 		self.persistence.as_ref()
 	}
 
@@ -210,13 +222,16 @@ impl Database {
 	/// [`DatabaseOptions::enable_cleanup`].
 
 	pub fn run_cleanup(&self) {
+
 		// Get the oldest commit entry which is still active
 		if let Some(entry) = self.counter_by_commit.front() {
+
 			// Get the oldest commit version
 			let oldest = entry.key();
 
 			// Remove commits up to this commit queue id from the transaction queue
 			self.transaction_commit_queue.range(..oldest).for_each(|e| {
+
 				e.remove();
 			});
 		}
@@ -232,6 +247,7 @@ impl Database {
 	/// GC is disabled via [`DatabaseOptions::enable_gc`].
 
 	pub fn run_gc(&self) {
+
 		// Get the current time in nanoseconds
 		let now = self.oracle.current_time_ns();
 
@@ -250,14 +266,16 @@ impl Database {
 
 		// Iterate over the entire tree
 		for entry in self.datastore.iter() {
+
 			// Fetch the entry value
-			let ve = entry.value();
+			let versions = entry.value();
 
 			// Modify the version entries
-			let mut versions = ve.versions.write();
+			let mut versions = versions.write();
 
 			// Clean up unnecessary older versions
 			if versions.gc_older_versions(cleanup_ts) == 0 {
+
 				// Drop the version reference
 				drop(versions);
 
@@ -270,25 +288,30 @@ impl Database {
 	/// Shutdown the datastore, waiting for background threads to exit
 
 	fn shutdown(&self) {
+
 		// First, disable Persistence background workers if present
 		if let Some(ref persistence) = self.persistence {
+
 			// Disable the persistence background workers
 			persistence.background_threads_enabled.store(false, Ordering::Release);
 
 			// Wait for persistence threads to exit
 			if let Some(handle) = persistence.fsync_handle.write().take() {
+
 				handle.thread().unpark();
 
 				let _ = handle.join();
 			}
 
 			if let Some(handle) = persistence.snapshot_handle.write().take() {
+
 				handle.thread().unpark();
 
 				let _ = handle.join();
 			}
 
 			if let Some(handle) = persistence.appender_handle.write().take() {
+
 				handle.thread().unpark();
 
 				let _ = handle.join();
@@ -300,6 +323,7 @@ impl Database {
 
 		// Wait for the transaction cleanup thread to exit
 		if let Some(handle) = self.transaction_cleanup_handle.write().take() {
+
 			handle.thread().unpark();
 
 			let _ = handle.join();
@@ -307,6 +331,7 @@ impl Database {
 
 		// Wait for the garbage collector thread to exit
 		if let Some(handle) = self.garbage_collection_handle.write().take() {
+
 			handle.thread().unpark();
 
 			let _ = handle.join();
@@ -317,34 +342,41 @@ impl Database {
 	/// database
 
 	fn initialise_cleanup_worker(&self) {
+
 		// Clone the underlying datastore inner
 		let db = self.inner.clone();
 
 		// Check if a background thread is already running
 		if db.transaction_cleanup_handle.read().is_none() {
+
 			// Get the specified interval
 			let interval = self.cleanup_interval;
 
 			// Spawn a new thread to handle periodic cleanup
 			let handle = std::thread::spawn(move || {
+
 				// Check whether the garbage collection process is enabled
 				while db.background_threads_enabled.load(Ordering::Relaxed) {
+
 					// Wait for a specified time interval
 					std::thread::park_timeout(interval);
 
 					// Check shutdown flag again after waking
 					if !db.background_threads_enabled.load(Ordering::Relaxed) {
+
 						break;
 					}
 
 					// Clean up the transaction commit queue
 					// Get the oldest commit entry which is still active
 					if let Some(entry) = db.counter_by_commit.front() {
+
 						// Get the oldest commit version
 						let oldest = entry.key();
 
 						// Remove the commits up to this commit queue id from the transaction queue
 						db.transaction_commit_queue.range(..oldest).for_each(|e| {
+
 							e.remove();
 						});
 					}
@@ -359,23 +391,28 @@ impl Database {
 	/// Start the garbage collection thread after creating the database
 
 	fn initialise_garbage_worker(&self) {
+
 		// Clone the underlying datastore inner
 		let db = self.inner.clone();
 
 		// Check if a background thread is already running
 		if db.garbage_collection_handle.read().is_none() {
+
 			// Get the specified interval
 			let interval = self.gc_interval;
 
 			// Spawn a new thread to handle periodic garbage collection
 			let handle = std::thread::spawn(move || {
+
 				// Check whether the garbage collection process is enabled
 				while db.background_threads_enabled.load(Ordering::Relaxed) {
+
 					// Wait for a specified time interval
 					std::thread::park_timeout(interval);
 
 					// Check shutdown flag again after waking
 					if !db.background_threads_enabled.load(Ordering::Relaxed) {
+
 						break;
 					}
 
@@ -397,14 +434,16 @@ impl Database {
 
 					// Iterate over the entire tree
 					for entry in db.datastore.iter() {
+
 						// Fetch the entry value
-						let ve = entry.value();
+						let versions = entry.value();
 
 						// Modify the version entries
-						let mut versions = ve.versions.write();
+						let mut versions = versions.write();
 
 						// Clean up unnecessary older versions
 						if versions.gc_older_versions(cleanup_ts) == 0 {
+
 							// Drop the version reference
 							drop(versions);
 
@@ -430,6 +469,7 @@ mod tests {
 	#[test]
 
 	fn begin_tx() {
+
 		let db = Database::new();
 
 		db.transaction(false);
@@ -438,6 +478,7 @@ mod tests {
 	#[test]
 
 	fn finished_tx_not_writeable() {
+
 		let db = Database::new();
 
 		// ----------
@@ -471,6 +512,7 @@ mod tests {
 	#[test]
 
 	fn cancelled_tx_is_cancelled() {
+
 		let db = Database::new();
 
 		// ----------
@@ -509,6 +551,7 @@ mod tests {
 	#[test]
 
 	fn committed_tx_is_committed() {
+
 		let db = Database::new();
 
 		// ----------
@@ -547,6 +590,7 @@ mod tests {
 	#[test]
 
 	fn multiple_concurrent_readers() {
+
 		let db = Database::new();
 
 		// ----------
@@ -601,6 +645,7 @@ mod tests {
 	#[test]
 
 	fn multiple_concurrent_operators() {
+
 		let db = Database::new();
 
 		// ----------
@@ -677,6 +722,7 @@ mod tests {
 	#[test]
 
 	fn iterate_keys_forward() {
+
 		let db = Database::new();
 
 		// ----------
@@ -806,6 +852,7 @@ mod tests {
 	#[test]
 
 	fn iterate_keys_reverse() {
+
 		let db = Database::new();
 
 		// ----------
@@ -935,6 +982,7 @@ mod tests {
 	#[test]
 
 	fn iterate_keys_values_forward() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1072,6 +1120,7 @@ mod tests {
 	#[test]
 
 	fn iterate_keys_values_reverse() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1201,6 +1250,7 @@ mod tests {
 	#[test]
 
 	fn count_keys_values() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1259,10 +1309,10 @@ mod tests {
 	// --------------------------------------------------
 	// Cursor and Iterator Tests
 	// --------------------------------------------------
-
 	#[test]
 
 	fn cursor_forward_iteration() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1325,6 +1375,7 @@ mod tests {
 	#[test]
 
 	fn cursor_reverse_iteration() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1387,6 +1438,7 @@ mod tests {
 	#[test]
 
 	fn cursor_seek_operations() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1445,6 +1497,7 @@ mod tests {
 	#[test]
 
 	fn cursor_bidirectional_switch() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1506,6 +1559,7 @@ mod tests {
 	#[test]
 
 	fn keys_iterator_forward() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1546,6 +1600,7 @@ mod tests {
 	#[test]
 
 	fn keys_iterator_reverse() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1586,6 +1641,7 @@ mod tests {
 	#[test]
 
 	fn keys_iterator_with_take() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1630,6 +1686,7 @@ mod tests {
 	#[test]
 
 	fn keys_iterator_with_skip() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1670,6 +1727,7 @@ mod tests {
 	#[test]
 
 	fn scan_iterator_forward() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1712,6 +1770,7 @@ mod tests {
 	#[test]
 
 	fn scan_iterator_reverse() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1754,6 +1813,7 @@ mod tests {
 	#[test]
 
 	fn scan_iterator_with_take() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1792,6 +1852,7 @@ mod tests {
 	#[test]
 
 	fn iterator_sees_uncommitted_writes() {
+
 		let db = Database::new();
 
 		// ----------
@@ -1818,6 +1879,7 @@ mod tests {
 	#[test]
 
 	fn cursor_handles_deleted_entries() {
+
 		let db = Database::new();
 
 		// ----------

@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Transaction isolation tests for SurrealMX.
 //!
 //! Tests SSI (Serializable Snapshot Isolation) conflict detection
@@ -23,10 +22,10 @@ use surrealmx::Database;
 // =============================================================================
 // Snapshot Isolation Tests
 // =============================================================================
-
 #[test]
 
 fn snapshot_isolation_read_sees_consistent_snapshot() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -80,6 +79,7 @@ fn snapshot_isolation_read_sees_consistent_snapshot() {
 #[test]
 
 fn snapshot_isolation_allows_concurrent_writes_to_different_keys() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -120,10 +120,10 @@ fn snapshot_isolation_allows_concurrent_writes_to_different_keys() {
 // =============================================================================
 // Serializable Snapshot Isolation (SSI) Tests
 // =============================================================================
-
 #[test]
 
 fn ssi_detects_write_write_conflict_on_same_key() {
+
 	let db = Database::new();
 
 	// Start two concurrent SSI transactions
@@ -157,6 +157,7 @@ fn ssi_detects_write_write_conflict_on_same_key() {
 #[test]
 
 fn ssi_detects_read_write_conflict() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -188,6 +189,7 @@ fn ssi_detects_read_write_conflict() {
 #[test]
 
 fn ssi_allows_concurrent_writes_to_disjoint_keys() {
+
 	let db = Database::new();
 
 	// Start two concurrent SSI transactions
@@ -218,6 +220,7 @@ fn ssi_allows_concurrent_writes_to_disjoint_keys() {
 #[test]
 
 fn ssi_phantom_read_prevention_on_range_scan() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -254,6 +257,7 @@ fn ssi_phantom_read_prevention_on_range_scan() {
 #[test]
 
 fn ssi_read_on_non_existent_key_then_concurrent_insert() {
+
 	let db = Database::new();
 
 	// tx1 reads a non-existent key
@@ -278,6 +282,7 @@ fn ssi_read_on_non_existent_key_then_concurrent_insert() {
 #[test]
 
 fn ssi_exists_check_creates_read_dependency() {
+
 	let db = Database::new();
 
 	// tx1 checks existence of a key
@@ -301,6 +306,7 @@ fn ssi_exists_check_creates_read_dependency() {
 #[test]
 
 fn ssi_delete_conflict() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -331,6 +337,7 @@ fn ssi_delete_conflict() {
 #[test]
 
 fn ssi_scan_conflict_on_update() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -367,6 +374,7 @@ fn ssi_scan_conflict_on_update() {
 #[test]
 
 fn ssi_multiple_readers_one_writer() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -400,10 +408,10 @@ fn ssi_multiple_readers_one_writer() {
 // =============================================================================
 // Mixed Isolation Level Tests
 // =============================================================================
-
 #[test]
 
 fn default_transaction_uses_ssi() {
+
 	let db = Database::new();
 
 	// Default write transactions should use SSI
@@ -429,6 +437,7 @@ fn default_transaction_uses_ssi() {
 #[test]
 
 fn si_mode_allows_read_write_anomaly() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -460,6 +469,7 @@ fn si_mode_allows_read_write_anomaly() {
 #[test]
 
 fn concurrent_counter_increment_conflict() {
+
 	let db = Database::new();
 
 	// Create counter

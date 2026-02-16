@@ -10,6 +10,7 @@ use surrealmx::Database;
 #[test]
 
 fn concurrent_random_transactions() {
+
 	// The total number of concurrent threads
 	const THREADS: usize = 24;
 
@@ -31,6 +32,7 @@ fn concurrent_random_transactions() {
 
 	// Spin up a number of threads
 	for _ in 0..THREADS {
+
 		// Clone the database
 		let db = db.clone();
 
@@ -39,16 +41,19 @@ fn concurrent_random_transactions() {
 
 		// Store the reference to the thread
 		handles.push(thread::spawn(move || {
+
 			let mut rng = rand::rng();
 
 			// Run the set of operations
 			for _ in 0..OPERATIONS {
+
 				let key_num = rng.random_range(0..KEY_COUNT);
 
 				let key = Bytes::from(key_num.to_be_bytes().to_vec());
 
 				match rng.random_range(0..3) {
 					0 => {
+
 						// Read transaction
 						let mut tx = db.transaction(false);
 
@@ -57,6 +62,7 @@ fn concurrent_random_transactions() {
 						let _ = tx.cancel();
 					}
 					1 => {
+
 						// Set value
 						let value_num = rng.random_range(0..1000u32);
 
@@ -67,16 +73,19 @@ fn concurrent_random_transactions() {
 						tx.set(key.clone(), value.clone()).unwrap();
 
 						if tx.commit().is_ok() {
+
 							expected.lock().unwrap().insert(key, Some(value));
 						}
 					}
 					_ => {
+
 						// Delete value
 						let mut tx = db.transaction(true);
 
 						tx.del(key.clone()).unwrap();
 
 						if tx.commit().is_ok() {
+
 							expected.lock().unwrap().insert(key, None);
 						}
 					}
@@ -87,6 +96,7 @@ fn concurrent_random_transactions() {
 
 	// Shut down the threads
 	for handle in handles {
+
 		handle.join().unwrap();
 	}
 
@@ -96,6 +106,7 @@ fn concurrent_random_transactions() {
 	let mut tx = db.transaction(false);
 
 	for key_num in 0..KEY_COUNT {
+
 		let key = Bytes::from(key_num.to_be_bytes().to_vec());
 
 		let val = tx.get(&key).unwrap();

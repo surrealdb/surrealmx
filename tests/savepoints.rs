@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Savepoint functionality tests for SurrealMX.
 //!
 //! Tests `set_savepoint()` and `rollback_to_savepoint()` behavior
@@ -23,10 +22,10 @@ use surrealmx::{Database, Error};
 // =============================================================================
 // Basic Savepoint Tests
 // =============================================================================
-
 #[test]
 
 fn savepoint_basic_rollback() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -80,6 +79,7 @@ fn savepoint_basic_rollback() {
 #[test]
 
 fn savepoint_rollback_restores_deleted_keys() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -121,10 +121,10 @@ fn savepoint_rollback_restores_deleted_keys() {
 // =============================================================================
 // Nested Savepoint Tests
 // =============================================================================
-
 #[test]
 
 fn savepoint_nested_multiple_levels() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -196,6 +196,7 @@ fn savepoint_nested_multiple_levels() {
 #[test]
 
 fn savepoint_partial_nested_rollback() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -248,10 +249,10 @@ fn savepoint_partial_nested_rollback() {
 // =============================================================================
 // Savepoint Edge Cases
 // =============================================================================
-
 #[test]
 
 fn savepoint_rollback_without_savepoint_errors() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -272,6 +273,7 @@ fn savepoint_rollback_without_savepoint_errors() {
 #[test]
 
 fn savepoint_on_read_transaction() {
+
 	let db = Database::new();
 
 	// Create some data first
@@ -287,6 +289,7 @@ fn savepoint_on_read_transaction() {
 	// Note: set_savepoint might succeed on read-only tx (depends on implementation)
 	// but rollback should work without issues
 	if read_tx.set_savepoint().is_ok() {
+
 		// Read some data
 		let _ = read_tx.get("key").unwrap();
 
@@ -300,6 +303,7 @@ fn savepoint_on_read_transaction() {
 #[test]
 
 fn savepoint_modify_after_rollback_then_commit() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -333,6 +337,7 @@ fn savepoint_modify_after_rollback_then_commit() {
 #[test]
 
 fn savepoint_set_same_key_multiple_times() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -361,6 +366,7 @@ fn savepoint_set_same_key_multiple_times() {
 #[test]
 
 fn savepoint_empty_savepoint_rollback() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -388,6 +394,7 @@ fn savepoint_empty_savepoint_rollback() {
 #[test]
 
 fn savepoint_with_scan_operations() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -421,13 +428,13 @@ fn savepoint_with_scan_operations() {
 	assert_eq!(scan_result.len(), 3);
 
 	assert_eq!(scan_result[1].1.as_ref(), b"2"); // b should be original value
-
 	tx.commit().unwrap();
 }
 
 #[test]
 
 fn savepoint_delete_then_recreate_key() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -454,6 +461,7 @@ fn savepoint_delete_then_recreate_key() {
 #[test]
 
 fn savepoint_stress_many_savepoints() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -462,6 +470,7 @@ fn savepoint_stress_many_savepoints() {
 
 	// Create many nested savepoints
 	for i in 0..num_savepoints {
+
 		tx.set_savepoint().unwrap();
 
 		tx.set(format!("key_{}", i), format!("value_{}", i)).unwrap();
@@ -469,21 +478,25 @@ fn savepoint_stress_many_savepoints() {
 
 	// Verify all keys exist
 	for i in 0..num_savepoints {
+
 		assert!(tx.get(format!("key_{}", i)).unwrap().is_some());
 	}
 
 	// Rollback half of them
 	for _ in 0..(num_savepoints / 2) {
+
 		tx.rollback_to_savepoint().unwrap();
 	}
 
 	// First half should still exist
 	for i in 0..(num_savepoints / 2) {
+
 		assert!(tx.get(format!("key_{}", i)).unwrap().is_some(), "key_{} should exist", i);
 	}
 
 	// Second half should not exist
 	for i in (num_savepoints / 2)..num_savepoints {
+
 		assert!(tx.get(format!("key_{}", i)).unwrap().is_none(), "key_{} should not exist", i);
 	}
 
@@ -493,6 +506,7 @@ fn savepoint_stress_many_savepoints() {
 #[test]
 
 fn savepoint_preserves_existing_data() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -532,6 +546,7 @@ fn savepoint_preserves_existing_data() {
 #[test]
 
 fn savepoint_with_conditional_operations() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);

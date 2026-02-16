@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! This module stores the transaction pool for database transactions.
 
 use crate::{inner::Inner, tx::Transaction, TransactionInner};
@@ -35,6 +34,7 @@ impl Pool {
 	/// Creates a new transaction pool for allocated transactions
 
 	pub(crate) fn new(inner: Arc<Inner>, size: usize) -> Arc<Self> {
+
 		Arc::new(Self {
 			inner,
 			pool: ArrayQueue::new(size),
@@ -44,18 +44,22 @@ impl Pool {
 	/// Put a transaction back into the pool
 
 	pub(crate) fn put(self: &Arc<Self>, inner: TransactionInner) {
+
 		let _ = self.pool.push(inner);
 	}
 
 	/// Get a new transaction from the pool
 
 	pub(crate) fn get(self: &Arc<Self>, write: bool) -> Transaction {
+
 		// Fetch a new or pooled inner transaction
 		let inner = if let Some(mut tx) = self.pool.pop() {
+
 			tx.reset(write);
 
 			tx
 		} else {
+
 			TransactionInner::new(self.inner.clone(), write)
 		};
 

@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Garbage collection tests for SurrealMX.
 //!
 //! Tests manual `run_gc()`, background GC behavior, and GC history modes.
@@ -23,10 +22,10 @@ use surrealmx::{Database, DatabaseOptions};
 // =============================================================================
 // Manual GC Tests
 // =============================================================================
-
 #[test]
 
 fn manual_gc_removes_stale_versions() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_secs(3600)) // Disable background GC
@@ -36,6 +35,7 @@ fn manual_gc_removes_stale_versions() {
 
 	// Create multiple versions
 	for i in 0..10 {
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", format!("v{}", i)).unwrap();
@@ -61,6 +61,7 @@ fn manual_gc_removes_stale_versions() {
 #[test]
 
 fn manual_gc_respects_active_transactions() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_secs(3600))
@@ -84,6 +85,7 @@ fn manual_gc_respects_active_transactions() {
 
 	// Update multiple times
 	for i in 2..10 {
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", format!("v{}", i)).unwrap();
@@ -107,6 +109,7 @@ fn manual_gc_respects_active_transactions() {
 #[test]
 
 fn manual_gc_removes_deleted_keys() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_secs(3600))
@@ -144,10 +147,10 @@ fn manual_gc_removes_deleted_keys() {
 // =============================================================================
 // Background GC Tests
 // =============================================================================
-
 #[test]
 
 fn background_gc_runs_automatically() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(100))
@@ -157,6 +160,7 @@ fn background_gc_runs_automatically() {
 
 	// Create many versions quickly
 	for i in 0..20 {
+
 		let mut tx = db.transaction(true);
 
 		tx.set("gc_key", format!("value_{}", i)).unwrap();
@@ -180,6 +184,7 @@ fn background_gc_runs_automatically() {
 #[test]
 
 fn disabled_gc_preserves_all_versions() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
@@ -187,7 +192,6 @@ fn disabled_gc_preserves_all_versions() {
 	);
 
 	// Note: NOT calling .with_gc() or .with_gc_history() - no GC enabled
-
 	// Create v1
 	let mut tx = db.transaction(true);
 
@@ -234,12 +238,11 @@ fn disabled_gc_preserves_all_versions() {
 // =============================================================================
 // GC History Mode Tests
 // =============================================================================
-
 #[test]
 
 fn gc_history_mode_preserves_recent_versions() {
-	let history = Duration::from_secs(60); // 60 second history window
 
+	let history = Duration::from_secs(60); // 60 second history window
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
@@ -293,6 +296,7 @@ fn gc_history_mode_preserves_recent_versions() {
 #[test]
 
 fn gc_with_zero_history_cleans_aggressively() {
+
 	// with_gc() sets history to None/zero - most aggressive cleanup
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
@@ -303,6 +307,7 @@ fn gc_with_zero_history_cleans_aggressively() {
 
 	// Create versions quickly
 	for i in 0..10 {
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", format!("v{}", i)).unwrap();
@@ -326,10 +331,10 @@ fn gc_with_zero_history_cleans_aggressively() {
 // =============================================================================
 // GC with Multiple Keys
 // =============================================================================
-
 #[test]
 
 fn gc_handles_multiple_keys() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(100))
@@ -339,7 +344,9 @@ fn gc_handles_multiple_keys() {
 
 	// Create multiple keys with multiple versions
 	for key_id in 0..10 {
+
 		for version in 0..5 {
+
 			let mut tx = db.transaction(true);
 
 			tx.set(format!("key_{}", key_id), format!("v{}", version)).unwrap();
@@ -355,6 +362,7 @@ fn gc_handles_multiple_keys() {
 	let mut tx = db.transaction(false);
 
 	for key_id in 0..10 {
+
 		let val = tx.get(format!("key_{}", key_id)).unwrap();
 
 		assert_eq!(val, Some(Bytes::from("v4")), "Key {} should have latest value", key_id);
@@ -366,6 +374,7 @@ fn gc_handles_multiple_keys() {
 #[test]
 
 fn gc_with_mixed_deletes() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
@@ -415,10 +424,10 @@ fn gc_with_mixed_deletes() {
 // =============================================================================
 // Transaction Cleanup Tests
 // =============================================================================
-
 #[test]
 
 fn transaction_cleanup_runs_automatically() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_secs(3600))
@@ -427,6 +436,7 @@ fn transaction_cleanup_runs_automatically() {
 
 	// Create and complete many transactions
 	for i in 0..50 {
+
 		let mut tx = db.transaction(true);
 
 		tx.set(format!("key_{}", i), "value").unwrap();
@@ -441,6 +451,7 @@ fn transaction_cleanup_runs_automatically() {
 	let mut tx = db.transaction(false);
 
 	for i in 0..50 {
+
 		assert!(tx.exists(format!("key_{}", i)).unwrap());
 	}
 
@@ -450,6 +461,7 @@ fn transaction_cleanup_runs_automatically() {
 #[test]
 
 fn manual_cleanup() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_secs(3600))
@@ -458,6 +470,7 @@ fn manual_cleanup() {
 
 	// Create transactions
 	for i in 0..20 {
+
 		let mut tx = db.transaction(true);
 
 		tx.set(format!("key_{}", i), "value").unwrap();
@@ -472,6 +485,7 @@ fn manual_cleanup() {
 	let mut tx = db.transaction(false);
 
 	for i in 0..20 {
+
 		assert!(tx.exists(format!("key_{}", i)).unwrap());
 	}
 
@@ -481,10 +495,10 @@ fn manual_cleanup() {
 // =============================================================================
 // Concurrent GC Tests
 // =============================================================================
-
 #[test]
 
 fn concurrent_gc_and_transactions() {
+
 	let db = Arc::new(
 		Database::new_with_options(
 			DatabaseOptions::default()
@@ -500,10 +514,13 @@ fn concurrent_gc_and_transactions() {
 
 	let handles: Vec<_> = (0..num_threads)
 		.map(|thread_id| {
+
 			let db = Arc::clone(&db);
 
 			std::thread::spawn(move || {
+
 				for op in 0..ops_per_thread {
+
 					let key = format!("thread_{}_key_{}", thread_id, op % 10);
 
 					// Write
@@ -523,6 +540,7 @@ fn concurrent_gc_and_transactions() {
 		.collect();
 
 	for handle in handles {
+
 		handle.join().unwrap();
 	}
 
@@ -530,7 +548,9 @@ fn concurrent_gc_and_transactions() {
 	let mut tx = db.transaction(false);
 
 	for thread_id in 0..num_threads {
+
 		for key_id in 0..10 {
+
 			let key = format!("thread_{}_key_{}", thread_id, key_id);
 
 			let val = tx.get(&key).unwrap();
@@ -545,10 +565,10 @@ fn concurrent_gc_and_transactions() {
 // =============================================================================
 // Edge Cases
 // =============================================================================
-
 #[test]
 
 fn gc_with_only_deleted_keys() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
@@ -560,6 +580,7 @@ fn gc_with_only_deleted_keys() {
 	let mut tx = db.transaction(true);
 
 	for i in 0..10 {
+
 		tx.set(format!("temp_{}", i), "value").unwrap();
 	}
 
@@ -568,6 +589,7 @@ fn gc_with_only_deleted_keys() {
 	let mut tx = db.transaction(true);
 
 	for i in 0..10 {
+
 		tx.del(format!("temp_{}", i)).unwrap();
 	}
 
@@ -580,6 +602,7 @@ fn gc_with_only_deleted_keys() {
 	let mut tx = db.transaction(false);
 
 	for i in 0..10 {
+
 		assert!(tx.get(format!("temp_{}", i)).unwrap().is_none());
 	}
 
@@ -589,6 +612,7 @@ fn gc_with_only_deleted_keys() {
 #[test]
 
 fn gc_empty_database() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
@@ -618,6 +642,7 @@ fn gc_empty_database() {
 #[test]
 
 fn gc_preserves_tombstones_for_active_readers() {
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))

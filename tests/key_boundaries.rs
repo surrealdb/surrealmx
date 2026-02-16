@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Key and value boundary tests for SurrealMX.
 //!
 //! Tests boundary conditions including empty values, null bytes,
@@ -23,10 +22,10 @@ use surrealmx::Database;
 // =============================================================================
 // Empty Value Tests
 // =============================================================================
-
 #[test]
 
 fn empty_value() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -58,10 +57,10 @@ fn empty_value() {
 // =============================================================================
 // Null Bytes Tests
 // =============================================================================
-
 #[test]
 
 fn null_bytes_in_key() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -106,6 +105,7 @@ fn null_bytes_in_key() {
 #[test]
 
 fn null_bytes_in_value() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -144,10 +144,10 @@ fn null_bytes_in_value() {
 // =============================================================================
 // Byte Boundary Tests
 // =============================================================================
-
 #[test]
 
 fn max_byte_key() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -180,12 +180,14 @@ fn max_byte_key() {
 #[test]
 
 fn single_byte_keys() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
 
 	// Single byte keys covering the byte range
 	for byte in [0x00u8, 0x01, 0x7F, 0x80, 0xFE, 0xFF] {
+
 		let key = vec![byte];
 
 		let value = format!("value_{:02X}", byte);
@@ -199,6 +201,7 @@ fn single_byte_keys() {
 	let tx = db.transaction(false);
 
 	for byte in [0x00u8, 0x01, 0x7F, 0x80, 0xFE, 0xFF] {
+
 		let key = vec![byte];
 
 		let expected = format!("value_{:02X}", byte);
@@ -215,10 +218,10 @@ fn single_byte_keys() {
 // =============================================================================
 // Unicode and UTF-8 Tests
 // =============================================================================
-
 #[test]
 
 fn unicode_keys() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -235,6 +238,7 @@ fn unicode_keys() {
 	];
 
 	for (i, key) in keys.iter().enumerate() {
+
 		tx.set(*key, format!("value_{}", i)).unwrap();
 	}
 
@@ -244,6 +248,7 @@ fn unicode_keys() {
 	let tx = db.transaction(false);
 
 	for (i, key) in keys.iter().enumerate() {
+
 		let expected = format!("value_{}", i);
 
 		assert_eq!(tx.get(*key).unwrap(), Some(Bytes::from(expected)), "Unicode key: {}", key);
@@ -263,10 +268,10 @@ fn unicode_keys() {
 // =============================================================================
 // Key Ordering Tests
 // =============================================================================
-
 #[test]
 
 fn binary_key_ordering() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -284,6 +289,7 @@ fn binary_key_ordering() {
 	];
 
 	for key in &keys {
+
 		tx.set(*key, "value").unwrap();
 	}
 
@@ -302,7 +308,9 @@ fn binary_key_ordering() {
 	let mut prev: Option<&Bytes> = None;
 
 	for (key, _) in &results {
+
 		if let Some(p) = prev {
+
 			assert!(
 				key.as_ref() > p.as_ref(),
 				"Keys should be in ascending byte order: {:?} should be after {:?}",
@@ -318,6 +326,7 @@ fn binary_key_ordering() {
 #[test]
 
 fn key_prefix_edge_cases() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);

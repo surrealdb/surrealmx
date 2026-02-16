@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Batch operation tests for SurrealMX.
 //!
 //! Tests `getm()` and `getm_at_version()` for multi-key operations.
@@ -23,10 +22,10 @@ use surrealmx::Database;
 // =============================================================================
 // getm() Tests
 // =============================================================================
-
 #[test]
 
 fn getm_returns_values_in_order() {
+
 	let db = Database::new();
 
 	// Create keys
@@ -59,6 +58,7 @@ fn getm_returns_values_in_order() {
 #[test]
 
 fn getm_handles_missing_keys() {
+
 	let db = Database::new();
 
 	// Create only some keys
@@ -91,6 +91,7 @@ fn getm_handles_missing_keys() {
 #[test]
 
 fn getm_handles_all_missing_keys() {
+
 	let db = Database::new();
 
 	let tx = db.transaction(false);
@@ -107,6 +108,7 @@ fn getm_handles_all_missing_keys() {
 #[test]
 
 fn getm_with_empty_keys() {
+
 	let db = Database::new();
 
 	let tx = db.transaction(false);
@@ -121,6 +123,7 @@ fn getm_with_empty_keys() {
 #[test]
 
 fn getm_with_duplicate_keys() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -144,6 +147,7 @@ fn getm_with_duplicate_keys() {
 #[test]
 
 fn getm_sees_uncommitted_writes() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -167,6 +171,7 @@ fn getm_sees_uncommitted_writes() {
 #[test]
 
 fn getm_with_deleted_keys() {
+
 	let db = Database::new();
 
 	// Create keys
@@ -198,6 +203,7 @@ fn getm_with_deleted_keys() {
 #[test]
 
 fn getm_large_batch() {
+
 	let db = Database::new();
 
 	// Create many keys
@@ -206,6 +212,7 @@ fn getm_large_batch() {
 	let mut tx = db.transaction(true);
 
 	for i in 0..count {
+
 		tx.set(format!("key_{:04}", i), format!("value_{}", i)).unwrap();
 	}
 
@@ -221,6 +228,7 @@ fn getm_large_batch() {
 	assert_eq!(results.len(), count);
 
 	for (i, result) in results.iter().enumerate() {
+
 		assert_eq!(*result, Some(Bytes::from(format!("value_{}", i))));
 	}
 }
@@ -228,10 +236,10 @@ fn getm_large_batch() {
 // =============================================================================
 // getm_at_version() Tests
 // =============================================================================
-
 #[test]
 
 fn getm_at_version_reads_historical() {
+
 	let db = Database::new();
 
 	// Version 1: Create keys
@@ -282,6 +290,7 @@ fn getm_at_version_reads_historical() {
 #[test]
 
 fn getm_at_version_sees_deletes() {
+
 	let db = Database::new();
 
 	// Create key
@@ -328,6 +337,7 @@ fn getm_at_version_sees_deletes() {
 #[test]
 
 fn getm_at_version_preserves_order() {
+
 	let db = Database::new();
 
 	// Create keys in different order
@@ -377,6 +387,7 @@ fn getm_at_version_preserves_order() {
 #[test]
 
 fn getm_at_version_mixed_exists_and_missing() {
+
 	let db = Database::new();
 
 	// Create only key1
@@ -421,10 +432,10 @@ fn getm_at_version_mixed_exists_and_missing() {
 // =============================================================================
 // SSI Interaction Tests
 // =============================================================================
-
 #[test]
 
 fn getm_tracks_reads_for_ssi() {
+
 	let db = Database::new();
 
 	// Create initial key
@@ -457,10 +468,10 @@ fn getm_tracks_reads_for_ssi() {
 // =============================================================================
 // Edge Cases
 // =============================================================================
-
 #[test]
 
 fn getm_with_binary_keys() {
+
 	let db = Database::new();
 
 	// Create keys with binary data
@@ -491,6 +502,7 @@ fn getm_with_binary_keys() {
 #[test]
 
 fn getm_concurrent_with_writes() {
+
 	let db = Database::new();
 
 	// Create initial data

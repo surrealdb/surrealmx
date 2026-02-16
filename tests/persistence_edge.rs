@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Persistence edge case tests for SurrealMX.
 //!
 //! Tests recovery scenarios, edge cases, and persistence behavior.
@@ -24,10 +23,10 @@ use tempfile::TempDir;
 // =============================================================================
 // Recovery Edge Cases
 // =============================================================================
-
 #[test]
 
 fn recovery_with_empty_aol() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -40,6 +39,7 @@ fn recovery_with_empty_aol() {
 
 	// Create database but don't add any data
 	{
+
 		let _db =
 			Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 		// No operations - AOL file might be empty or not exist
@@ -47,6 +47,7 @@ fn recovery_with_empty_aol() {
 
 	// Create new database from same path
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		// Should work with empty/no AOL
@@ -63,6 +64,7 @@ fn recovery_with_empty_aol() {
 #[test]
 
 fn recovery_snapshot_only_no_aol() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -75,6 +77,7 @@ fn recovery_snapshot_only_no_aol() {
 
 	// Create data and snapshot
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
@@ -86,12 +89,14 @@ fn recovery_snapshot_only_no_aol() {
 		tx.commit().unwrap();
 
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
 
 	// Recovery from snapshot only (no AOL)
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
@@ -107,6 +112,7 @@ fn recovery_snapshot_only_no_aol() {
 #[test]
 
 fn recovery_aol_only_no_snapshot() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -120,6 +126,7 @@ fn recovery_aol_only_no_snapshot() {
 
 	// Create data (no snapshot)
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
@@ -139,6 +146,7 @@ fn recovery_aol_only_no_snapshot() {
 
 	// Recovery from AOL only
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
@@ -154,6 +162,7 @@ fn recovery_aol_only_no_snapshot() {
 #[test]
 
 fn recovery_combined_snapshot_and_aol() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -167,6 +176,7 @@ fn recovery_combined_snapshot_and_aol() {
 
 	// Create data, snapshot, then more data
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		// Data before snapshot
@@ -178,6 +188,7 @@ fn recovery_combined_snapshot_and_aol() {
 
 		// Create snapshot
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 
@@ -191,6 +202,7 @@ fn recovery_combined_snapshot_and_aol() {
 
 	// Recovery should include both
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
@@ -206,10 +218,10 @@ fn recovery_combined_snapshot_and_aol() {
 // =============================================================================
 // Snapshot During Operations Tests
 // =============================================================================
-
 #[test]
 
 fn snapshot_during_read_transaction() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -234,6 +246,7 @@ fn snapshot_during_read_transaction() {
 
 	// Create snapshot while read is active
 	if let Some(persistence) = db.persistence() {
+
 		let result = persistence.snapshot();
 
 		assert!(result.is_ok(), "Snapshot during read should succeed");
@@ -246,6 +259,7 @@ fn snapshot_during_read_transaction() {
 #[test]
 
 fn snapshot_preserves_delete_state() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -258,6 +272,7 @@ fn snapshot_preserves_delete_state() {
 
 	// Create and delete data, then snapshot
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
@@ -275,12 +290,14 @@ fn snapshot_preserves_delete_state() {
 		tx.commit().unwrap();
 
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
 
 	// Recovery should not have deleted key
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
@@ -296,10 +313,10 @@ fn snapshot_preserves_delete_state() {
 // =============================================================================
 // Interval Snapshot Tests
 // =============================================================================
-
 #[test]
 
 fn interval_snapshot_triggers() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -331,10 +348,10 @@ fn interval_snapshot_triggers() {
 // =============================================================================
 // Async AOL Tests
 // =============================================================================
-
 #[test]
 
 fn async_aol_eventual_persistence() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -347,6 +364,7 @@ fn async_aol_eventual_persistence() {
 
 	// Write data with async AOL
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
@@ -370,6 +388,7 @@ fn async_aol_eventual_persistence() {
 
 	// Recovery should work
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
@@ -383,10 +402,10 @@ fn async_aol_eventual_persistence() {
 // =============================================================================
 // Fsync Mode Tests
 // =============================================================================
-
 #[test]
 
 fn fsync_interval_mode() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -402,6 +421,7 @@ fn fsync_interval_mode() {
 
 	// Write multiple transactions
 	for i in 0..5 {
+
 		let mut tx = db.transaction(true);
 
 		tx.set(format!("key_{}", i), format!("value_{}", i)).unwrap();
@@ -421,6 +441,7 @@ fn fsync_interval_mode() {
 #[test]
 
 fn fsync_never_mode() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -433,6 +454,7 @@ fn fsync_never_mode() {
 		.with_fsync_mode(FsyncMode::Never);
 
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
@@ -444,6 +466,7 @@ fn fsync_never_mode() {
 
 	// Should still work for recovery (OS buffers)
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
@@ -457,10 +480,10 @@ fn fsync_never_mode() {
 // =============================================================================
 // Custom Path Tests
 // =============================================================================
-
 #[test]
 
 fn custom_aol_and_snapshot_paths() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -484,6 +507,7 @@ fn custom_aol_and_snapshot_paths() {
 
 	// Create data
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
@@ -493,6 +517,7 @@ fn custom_aol_and_snapshot_paths() {
 		tx.commit().unwrap();
 
 		if let Some(persistence) = db.persistence() {
+
 			persistence.snapshot().unwrap();
 		}
 	}
@@ -504,6 +529,7 @@ fn custom_aol_and_snapshot_paths() {
 
 	// Verify recovery works from custom paths
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
@@ -517,10 +543,10 @@ fn custom_aol_and_snapshot_paths() {
 // =============================================================================
 // Multiple Restart Tests
 // =============================================================================
-
 #[test]
 
 fn multiple_restarts_accumulate_data() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -534,6 +560,7 @@ fn multiple_restarts_accumulate_data() {
 
 	// First session
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		let mut tx = db.transaction(true);
@@ -545,6 +572,7 @@ fn multiple_restarts_accumulate_data() {
 
 	// Second session
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		// Should see key1
@@ -562,6 +590,7 @@ fn multiple_restarts_accumulate_data() {
 
 	// Third session
 	{
+
 		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 
 		// Should see both keys
@@ -581,6 +610,7 @@ fn multiple_restarts_accumulate_data() {
 
 	// Final verification
 	{
+
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
@@ -598,6 +628,7 @@ fn multiple_restarts_accumulate_data() {
 #[test]
 
 fn snapshot_truncates_aol() {
+
 	let temp_dir = TempDir::new().unwrap();
 
 	let temp_path = temp_dir.path();
@@ -613,6 +644,7 @@ fn snapshot_truncates_aol() {
 
 	// Add lots of data to AOL
 	for i in 0..100 {
+
 		let mut tx = db.transaction(true);
 
 		tx.set(format!("key_{:04}", i), format!("value_{}", i)).unwrap();
@@ -626,6 +658,7 @@ fn snapshot_truncates_aol() {
 
 	// Create snapshot (should truncate AOL)
 	if let Some(persistence) = db.persistence() {
+
 		persistence.snapshot().unwrap();
 	}
 

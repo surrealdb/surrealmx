@@ -17,6 +17,7 @@ pub(crate) struct Oracle {
 
 impl Drop for Oracle {
 	fn drop(&mut self) {
+
 		self.shutdown();
 	}
 }
@@ -40,6 +41,7 @@ impl Oracle {
 	/// Creates a new timestamp oracle with the specified resync interval
 
 	pub fn new(resync_interval: Duration) -> Arc<Self> {
+
 		// Get the current unix time in nanoseconds
 		let reference_unix = Self::current_unix_ns();
 
@@ -68,6 +70,7 @@ impl Oracle {
 	#[inline]
 
 	pub fn current_timestamp(&self) -> u64 {
+
 		self.inner.timestamp.load(Ordering::Acquire)
 	}
 
@@ -75,6 +78,7 @@ impl Oracle {
 	#[inline]
 
 	pub(crate) fn current_unix_ns() -> u64 {
+
 		// Get the current system time
 		let timestamp = SystemTime::now().duration_since(UNIX_EPOCH);
 
@@ -86,6 +90,7 @@ impl Oracle {
 	#[inline]
 
 	pub(crate) fn current_time_ns(&self) -> u64 {
+
 		// Get the current reference time
 		let reference = self.inner.reference.load();
 
@@ -96,11 +101,13 @@ impl Oracle {
 	/// Shutdown the oracle resync, waiting for background threads to exit
 
 	fn shutdown(&self) {
+
 		// Disable timestamp resyncing
 		self.inner.resync_enabled.store(false, Ordering::Release);
 
 		// Wait for the timestamp resyncing thread to exit
 		if let Some(handle) = self.inner.resync_handle.lock().unwrap().take() {
+
 			handle.thread().unpark();
 
 			handle.join().unwrap();
@@ -110,6 +117,7 @@ impl Oracle {
 	/// Start the resyncing thread after creating the oracle
 
 	fn worker_resync(&self) {
+
 		// Clone the underlying oracle inner
 		let oracle = self.inner.clone();
 
@@ -118,8 +126,10 @@ impl Oracle {
 
 		// Spawn a new thread to handle timestamp resyncing
 		let handle = std::thread::spawn(move || {
+
 			// Check whether the timestamp resync process is enabled
 			while oracle.resync_enabled.load(Ordering::Acquire) {
+
 				// Wait for a specified time interval
 				std::thread::park_timeout(interval);
 

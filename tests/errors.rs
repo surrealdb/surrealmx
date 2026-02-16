@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 //! Error handling tests for SurrealMX.
 //!
 //! Tests error conditions and proper error handling behavior.
@@ -21,10 +20,10 @@ use surrealmx::{Database, Error};
 // =============================================================================
 // Transaction Closed Errors
 // =============================================================================
-
 #[test]
 
 fn operations_after_commit_fail() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -52,6 +51,7 @@ fn operations_after_commit_fail() {
 #[test]
 
 fn operations_after_cancel_fail() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -73,6 +73,7 @@ fn operations_after_cancel_fail() {
 #[test]
 
 fn double_commit_fails() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -87,6 +88,7 @@ fn double_commit_fails() {
 #[test]
 
 fn double_cancel_fails() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -101,6 +103,7 @@ fn double_cancel_fails() {
 #[test]
 
 fn commit_after_cancel_fails() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -115,6 +118,7 @@ fn commit_after_cancel_fails() {
 #[test]
 
 fn cancel_after_commit_fails() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -129,14 +133,15 @@ fn cancel_after_commit_fails() {
 // =============================================================================
 // Not Writable Errors
 // =============================================================================
-
 #[test]
 
 fn write_operations_on_read_transaction_fail() {
+
 	let db = Database::new();
 
 	// Create some data first
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("existing_key", "value").unwrap();
@@ -184,10 +189,10 @@ fn write_operations_on_read_transaction_fail() {
 // =============================================================================
 // Key Already Exists Errors
 // =============================================================================
-
 #[test]
 
 fn put_existing_key_fails() {
+
 	let db = Database::new();
 
 	// Create initial key
@@ -210,6 +215,7 @@ fn put_existing_key_fails() {
 #[test]
 
 fn put_key_in_same_transaction_fails() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -226,10 +232,10 @@ fn put_key_in_same_transaction_fails() {
 // =============================================================================
 // Value Not Expected Errors
 // =============================================================================
-
 #[test]
 
 fn putc_wrong_check_value_fails() {
+
 	let db = Database::new();
 
 	// Create key with known value
@@ -252,6 +258,7 @@ fn putc_wrong_check_value_fails() {
 #[test]
 
 fn delc_wrong_check_value_fails() {
+
 	let db = Database::new();
 
 	// Create key with known value
@@ -274,6 +281,7 @@ fn delc_wrong_check_value_fails() {
 #[test]
 
 fn putc_none_check_on_existing_key_fails() {
+
 	let db = Database::new();
 
 	// Create key
@@ -299,6 +307,7 @@ fn putc_none_check_on_existing_key_fails() {
 #[test]
 
 fn delc_none_check_on_existing_key_fails() {
+
 	let db = Database::new();
 
 	// Create key
@@ -324,10 +333,10 @@ fn delc_none_check_on_existing_key_fails() {
 // =============================================================================
 // No Savepoint Errors
 // =============================================================================
-
 #[test]
 
 fn rollback_without_savepoint_fails() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -344,6 +353,7 @@ fn rollback_without_savepoint_fails() {
 #[test]
 
 fn rollback_after_all_savepoints_consumed_fails() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -367,10 +377,10 @@ fn rollback_after_all_savepoints_consumed_fails() {
 // =============================================================================
 // Conflict Errors
 // =============================================================================
-
 #[test]
 
 fn write_conflict_error() {
+
 	let db = Database::new();
 
 	// Two transactions writing same key
@@ -397,6 +407,7 @@ fn write_conflict_error() {
 #[test]
 
 fn read_conflict_error_ssi() {
+
 	let db = Database::new();
 
 	// Create initial data
@@ -429,10 +440,10 @@ fn read_conflict_error_ssi() {
 // =============================================================================
 // Version In Future Error
 // =============================================================================
-
 #[test]
 
 fn get_at_future_version_fails() {
+
 	let db = Database::new();
 
 	// Create data
@@ -449,7 +460,6 @@ fn get_at_future_version_fails() {
 
 	// Future version
 	let future_version = current_version + 1_000_000_000; // Way in the future
-
 	let result = tx.get_at_version("key", future_version);
 
 	assert!(matches!(result, Err(Error::VersionInFuture)), "reading future version should fail");
@@ -458,6 +468,7 @@ fn get_at_future_version_fails() {
 #[test]
 
 fn exists_at_future_version_fails() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -478,10 +489,10 @@ fn exists_at_future_version_fails() {
 // =============================================================================
 // Iterator/Cursor with Closed Transaction
 // =============================================================================
-
 #[test]
 
 fn cursor_after_cancel_fails() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -498,6 +509,7 @@ fn cursor_after_cancel_fails() {
 #[test]
 
 fn keys_iter_after_commit_fails() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -514,6 +526,7 @@ fn keys_iter_after_commit_fails() {
 #[test]
 
 fn scan_iter_after_cancel_fails() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(false);
@@ -528,10 +541,10 @@ fn scan_iter_after_cancel_fails() {
 // =============================================================================
 // Getm with Closed Transaction
 // =============================================================================
-
 #[test]
 
 fn getm_after_close_fails() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(false);
@@ -546,14 +559,15 @@ fn getm_after_close_fails() {
 // =============================================================================
 // Edge Cases
 // =============================================================================
-
 #[test]
 
 fn operations_on_dropped_transaction() {
+
 	let db = Database::new();
 
 	// Transaction drops without commit or cancel
 	{
+
 		let mut tx = db.transaction(true);
 
 		tx.set("key", "value").unwrap();
@@ -571,6 +585,7 @@ fn operations_on_dropped_transaction() {
 #[test]
 
 fn set_savepoint_on_closed_transaction() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
@@ -585,6 +600,7 @@ fn set_savepoint_on_closed_transaction() {
 #[test]
 
 fn rollback_on_closed_transaction() {
+
 	let db = Database::new();
 
 	let mut tx = db.transaction(true);
