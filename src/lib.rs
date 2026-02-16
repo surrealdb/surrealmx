@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 #![allow(clippy::bool_comparison)]
 
 mod compression;
@@ -31,6 +32,9 @@ mod version;
 mod versions;
 
 #[doc(inline)]
+pub use bytes::Bytes;
+
+#[doc(inline)]
 pub use self::compression::*;
 #[doc(inline)]
 pub use self::cursor::*;
@@ -48,5 +52,3 @@ pub use self::options::*;
 pub use self::persistence::*;
 #[doc(inline)]
 pub use self::tx::*;
-#[doc(inline)]
-pub use bytes::Bytes;

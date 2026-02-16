@@ -11,15 +11,17 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 //! This module stores the database error types.
 
-use bincode::error::{DecodeError as BincodeDecodeError, EncodeError as BincodeEncodeError};
-use std::{io::Error as IoError, sync::PoisonError};
+use bincode::error::DecodeError as BincodeDecodeError;
+use bincode::error::EncodeError as BincodeEncodeError;
+use std::io::Error as IoError;
+use std::sync::PoisonError;
 use thiserror::Error;
 
 /// The errors which can be emitted from a database.
 #[derive(Error, Debug)]
-
 pub enum Error {
 	/// A transaction is closed.
 	#[error("Transaction is closed")]
@@ -60,7 +62,6 @@ pub enum Error {
 
 /// The errors that can occur during persistence operations.
 #[derive(Error, Debug)]
-
 pub enum PersistenceError {
 	/// An IO error occurred.
 	#[error("IO error: {0}")]
@@ -89,7 +90,6 @@ pub enum PersistenceError {
 
 impl<T> From<PoisonError<std::sync::MutexGuard<'_, T>>> for PersistenceError {
 	fn from(error: PoisonError<std::sync::MutexGuard<'_, T>>) -> Self {
-
 		PersistenceError::LockFailed(error.to_string())
 	}
 }

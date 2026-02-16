@@ -11,29 +11,23 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 //! This module stores the inner in-memory database type.
 
-use crate::{
-	oracle::Oracle,
-	persistence::Persistence,
-	queue::{Commit, Merge},
-	versions::Versions,
-	DatabaseOptions,
-};
+use crate::oracle::Oracle;
+use crate::persistence::Persistence;
+use crate::queue::{Commit, Merge};
+use crate::versions::Versions;
+use crate::DatabaseOptions;
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
-use std::{
-	sync::{
-		atomic::{AtomicBool, AtomicU64},
-		Arc,
-	},
-	thread::JoinHandle,
-	time::Duration,
-};
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 /// The inner structure of the transactional in-memory database
-
 pub struct Inner {
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
@@ -69,9 +63,7 @@ pub struct Inner {
 
 impl Inner {
 	/// Create a new [`Inner`] structure with the given oracle resync interval.
-
 	pub fn new(opts: &DatabaseOptions) -> Self {
-
 		Self {
 			oracle: Oracle::new(opts.resync_interval),
 			datastore: SkipMap::new(),
@@ -94,7 +86,6 @@ impl Inner {
 
 impl Default for Inner {
 	fn default() -> Self {
-
 		Self::new(&DatabaseOptions::default())
 	}
 }

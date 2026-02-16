@@ -11,21 +11,22 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 //! Garbage collection tests for SurrealMX.
 //!
 //! Tests manual `run_gc()`, background GC behavior, and GC history modes.
 
 use bytes::Bytes;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 use surrealmx::{Database, DatabaseOptions};
 
 // =============================================================================
 // Manual GC Tests
 // =============================================================================
+
 #[test]
-
 fn manual_gc_removes_stale_versions() {
-
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_secs(3600)) // Disable background GC
@@ -35,11 +36,8 @@ fn manual_gc_removes_stale_versions() {
 
 	// Create multiple versions
 	for i in 0..10 {
-
 		let mut tx = db.transaction(true);
-
 		tx.set("key", format!("v{}", i)).unwrap();
-
 		tx.commit().unwrap();
 	}
 
@@ -48,20 +46,14 @@ fn manual_gc_removes_stale_versions() {
 
 	// Current value should still exist
 	let mut tx = db.transaction(false);
-
 	let current = tx.get("key").unwrap();
-
 	assert!(current.is_some(), "Current value should exist after GC");
-
 	assert_eq!(current.unwrap().as_ref(), b"v9", "Should have latest value");
-
 	tx.cancel().unwrap();
 }
 
 #[test]
-
 fn manual_gc_respects_active_transactions() {
-
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_secs(3600))
@@ -71,25 +63,18 @@ fn manual_gc_respects_active_transactions() {
 
 	// Create initial version
 	let mut tx = db.transaction(true);
-
 	tx.set("key", "v1").unwrap();
-
 	tx.commit().unwrap();
 
 	// Start long-lived read transaction
 	let read_tx = db.transaction(false);
-
 	let initial = read_tx.get("key").unwrap();
-
 	assert_eq!(initial, Some(Bytes::from("v1")));
 
 	// Update multiple times
 	for i in 2..10 {
-
 		let mut tx = db.transaction(true);
-
 		tx.set("key", format!("v{}", i)).unwrap();
-
 		tx.commit().unwrap();
 	}
 
@@ -98,7 +83,6 @@ fn manual_gc_respects_active_transactions() {
 
 	// Active read transaction should still see original value
 	let after_gc = read_tx.get("key").unwrap();
-
 	assert_eq!(
 		after_gc,
 		Some(Bytes::from("v1")),
@@ -107,9 +91,7 @@ fn manual_gc_respects_active_transactions() {
 }
 
 #[test]
-
 fn manual_gc_removes_deleted_keys() {
-
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_secs(3600))
@@ -119,15 +101,11 @@ fn manual_gc_removes_deleted_keys() {
 
 	// Create and delete key
 	let mut tx = db.transaction(true);
-
 	tx.set("deleted_key", "value").unwrap();
-
 	tx.commit().unwrap();
 
 	let mut tx = db.transaction(true);
-
 	tx.del("deleted_key").unwrap();
-
 	tx.commit().unwrap();
 
 	// Wait a tiny bit to ensure delete timestamp is old enough
@@ -138,19 +116,16 @@ fn manual_gc_removes_deleted_keys() {
 
 	// Key should not exist
 	let mut tx = db.transaction(false);
-
 	assert!(tx.get("deleted_key").unwrap().is_none());
-
 	tx.cancel().unwrap();
 }
 
 // =============================================================================
 // Background GC Tests
 // =============================================================================
+
 #[test]
-
 fn background_gc_runs_automatically() {
-
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(100))
@@ -160,11 +135,8 @@ fn background_gc_runs_automatically() {
 
 	// Create many versions quickly
 	for i in 0..20 {
-
 		let mut tx = db.transaction(true);
-
 		tx.set("gc_key", format!("value_{}", i)).unwrap();
-
 		tx.commit().unwrap();
 	}
 
@@ -173,46 +145,36 @@ fn background_gc_runs_automatically() {
 
 	// Current value should still be available
 	let mut tx = db.transaction(false);
-
 	let val = tx.get("gc_key").unwrap();
-
 	assert!(val.is_some());
-
 	tx.cancel().unwrap();
 }
 
 #[test]
-
 fn disabled_gc_preserves_all_versions() {
-
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
 			.with_cleanup_interval(Duration::from_millis(50)),
 	);
-
 	// Note: NOT calling .with_gc() or .with_gc_history() - no GC enabled
+
 	// Create v1
 	let mut tx = db.transaction(true);
-
 	tx.set("key", "v1").unwrap();
-
 	tx.commit().unwrap();
 
 	std::thread::sleep(Duration::from_millis(10));
 
 	// Capture version after v1 commits
 	let snapshot1 = db.transaction(false);
-
 	let version1 = snapshot1.version();
 
 	std::thread::sleep(Duration::from_millis(10));
 
 	// Create v2
 	let mut tx = db.transaction(true);
-
 	tx.set("key", "v2").unwrap();
-
 	tx.commit().unwrap();
 
 	// Wait for any potential GC
@@ -220,29 +182,25 @@ fn disabled_gc_preserves_all_versions() {
 
 	// Advance time with a dummy transaction
 	let mut tx = db.transaction(true);
-
 	tx.set("dummy", "value").unwrap();
-
 	tx.commit().unwrap();
 
 	std::thread::sleep(Duration::from_millis(10));
 
 	// Old version should still be readable (no GC to clean it up)
 	let tx = db.transaction(false);
-
 	let v1 = tx.get_at_version("key", version1).unwrap();
-
 	assert_eq!(v1, Some(Bytes::from("v1")), "Without GC, old versions should persist");
 }
 
 // =============================================================================
 // GC History Mode Tests
 // =============================================================================
+
 #[test]
-
 fn gc_history_mode_preserves_recent_versions() {
-
 	let history = Duration::from_secs(60); // 60 second history window
+
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
@@ -252,25 +210,20 @@ fn gc_history_mode_preserves_recent_versions() {
 
 	// Create v1
 	let mut tx = db.transaction(true);
-
 	tx.set("key", "v1").unwrap();
-
 	tx.commit().unwrap();
 
 	std::thread::sleep(Duration::from_millis(10));
 
 	// Capture version after v1 commits
 	let snapshot1 = db.transaction(false);
-
 	let version1 = snapshot1.version();
 
 	std::thread::sleep(Duration::from_millis(10));
 
 	// Update to v2
 	let mut tx = db.transaction(true);
-
 	tx.set("key", "v2").unwrap();
-
 	tx.commit().unwrap();
 
 	// Wait for GC
@@ -278,25 +231,19 @@ fn gc_history_mode_preserves_recent_versions() {
 
 	// Advance time with a dummy transaction
 	let mut tx = db.transaction(true);
-
 	tx.set("dummy", "value").unwrap();
-
 	tx.commit().unwrap();
 
 	std::thread::sleep(Duration::from_millis(10));
 
 	// Version1 should still be readable (within history window)
 	let tx = db.transaction(false);
-
 	let v1 = tx.get_at_version("key", version1).unwrap();
-
 	assert_eq!(v1, Some(Bytes::from("v1")), "Version within history window should be preserved");
 }
 
 #[test]
-
 fn gc_with_zero_history_cleans_aggressively() {
-
 	// with_gc() sets history to None/zero - most aggressive cleanup
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
@@ -307,11 +254,8 @@ fn gc_with_zero_history_cleans_aggressively() {
 
 	// Create versions quickly
 	for i in 0..10 {
-
 		let mut tx = db.transaction(true);
-
 		tx.set("key", format!("v{}", i)).unwrap();
-
 		tx.commit().unwrap();
 	}
 
@@ -320,21 +264,17 @@ fn gc_with_zero_history_cleans_aggressively() {
 
 	// Current should exist
 	let mut tx = db.transaction(false);
-
 	let current = tx.get("key").unwrap();
-
 	assert!(current.is_some());
-
 	tx.cancel().unwrap();
 }
 
 // =============================================================================
 // GC with Multiple Keys
 // =============================================================================
+
 #[test]
-
 fn gc_handles_multiple_keys() {
-
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(100))
@@ -344,13 +284,9 @@ fn gc_handles_multiple_keys() {
 
 	// Create multiple keys with multiple versions
 	for key_id in 0..10 {
-
 		for version in 0..5 {
-
 			let mut tx = db.transaction(true);
-
 			tx.set(format!("key_{}", key_id), format!("v{}", version)).unwrap();
-
 			tx.commit().unwrap();
 		}
 	}
@@ -360,21 +296,15 @@ fn gc_handles_multiple_keys() {
 
 	// All keys should still have their latest values
 	let mut tx = db.transaction(false);
-
 	for key_id in 0..10 {
-
 		let val = tx.get(format!("key_{}", key_id)).unwrap();
-
 		assert_eq!(val, Some(Bytes::from("v4")), "Key {} should have latest value", key_id);
 	}
-
 	tx.cancel().unwrap();
 }
 
 #[test]
-
 fn gc_with_mixed_deletes() {
-
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
@@ -384,24 +314,16 @@ fn gc_with_mixed_deletes() {
 
 	// Create some keys
 	let mut tx = db.transaction(true);
-
 	tx.set("keep1", "value1").unwrap();
-
 	tx.set("keep2", "value2").unwrap();
-
 	tx.set("delete1", "value").unwrap();
-
 	tx.set("delete2", "value").unwrap();
-
 	tx.commit().unwrap();
 
 	// Delete some
 	let mut tx = db.transaction(true);
-
 	tx.del("delete1").unwrap();
-
 	tx.del("delete2").unwrap();
-
 	tx.commit().unwrap();
 
 	// Wait for GC
@@ -409,25 +331,19 @@ fn gc_with_mixed_deletes() {
 
 	// Verify state
 	let mut tx = db.transaction(false);
-
 	assert_eq!(tx.get("keep1").unwrap(), Some(Bytes::from("value1")));
-
 	assert_eq!(tx.get("keep2").unwrap(), Some(Bytes::from("value2")));
-
 	assert!(tx.get("delete1").unwrap().is_none());
-
 	assert!(tx.get("delete2").unwrap().is_none());
-
 	tx.cancel().unwrap();
 }
 
 // =============================================================================
 // Transaction Cleanup Tests
 // =============================================================================
+
 #[test]
-
 fn transaction_cleanup_runs_automatically() {
-
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_secs(3600))
@@ -436,11 +352,8 @@ fn transaction_cleanup_runs_automatically() {
 
 	// Create and complete many transactions
 	for i in 0..50 {
-
 		let mut tx = db.transaction(true);
-
 		tx.set(format!("key_{}", i), "value").unwrap();
-
 		tx.commit().unwrap();
 	}
 
@@ -449,19 +362,14 @@ fn transaction_cleanup_runs_automatically() {
 
 	// New transactions should work fine
 	let mut tx = db.transaction(false);
-
 	for i in 0..50 {
-
 		assert!(tx.exists(format!("key_{}", i)).unwrap());
 	}
-
 	tx.cancel().unwrap();
 }
 
 #[test]
-
 fn manual_cleanup() {
-
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_secs(3600))
@@ -470,11 +378,8 @@ fn manual_cleanup() {
 
 	// Create transactions
 	for i in 0..20 {
-
 		let mut tx = db.transaction(true);
-
 		tx.set(format!("key_{}", i), "value").unwrap();
-
 		tx.commit().unwrap();
 	}
 
@@ -483,22 +388,18 @@ fn manual_cleanup() {
 
 	// Should still work
 	let mut tx = db.transaction(false);
-
 	for i in 0..20 {
-
 		assert!(tx.exists(format!("key_{}", i)).unwrap());
 	}
-
 	tx.cancel().unwrap();
 }
 
 // =============================================================================
 // Concurrent GC Tests
 // =============================================================================
+
 #[test]
-
 fn concurrent_gc_and_transactions() {
-
 	let db = Arc::new(
 		Database::new_with_options(
 			DatabaseOptions::default()
@@ -509,30 +410,23 @@ fn concurrent_gc_and_transactions() {
 	);
 
 	let num_threads = 4;
-
 	let ops_per_thread = 50;
 
 	let handles: Vec<_> = (0..num_threads)
 		.map(|thread_id| {
-
 			let db = Arc::clone(&db);
 
 			std::thread::spawn(move || {
-
 				for op in 0..ops_per_thread {
-
 					let key = format!("thread_{}_key_{}", thread_id, op % 10);
 
 					// Write
 					let mut tx = db.transaction(true);
-
 					tx.set(&key, format!("value_{}_{}", thread_id, op)).unwrap();
-
 					let _ = tx.commit();
 
 					// Read
 					let tx = db.transaction(false);
-
 					let _ = tx.get(&key);
 				}
 			})
@@ -540,35 +434,27 @@ fn concurrent_gc_and_transactions() {
 		.collect();
 
 	for handle in handles {
-
 		handle.join().unwrap();
 	}
 
 	// Verify integrity
 	let mut tx = db.transaction(false);
-
 	for thread_id in 0..num_threads {
-
 		for key_id in 0..10 {
-
 			let key = format!("thread_{}_key_{}", thread_id, key_id);
-
 			let val = tx.get(&key).unwrap();
-
 			assert!(val.is_some(), "Key {} should exist", key);
 		}
 	}
-
 	tx.cancel().unwrap();
 }
 
 // =============================================================================
 // Edge Cases
 // =============================================================================
+
 #[test]
-
 fn gc_with_only_deleted_keys() {
-
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
@@ -578,21 +464,15 @@ fn gc_with_only_deleted_keys() {
 
 	// Create and immediately delete
 	let mut tx = db.transaction(true);
-
 	for i in 0..10 {
-
 		tx.set(format!("temp_{}", i), "value").unwrap();
 	}
-
 	tx.commit().unwrap();
 
 	let mut tx = db.transaction(true);
-
 	for i in 0..10 {
-
 		tx.del(format!("temp_{}", i)).unwrap();
 	}
-
 	tx.commit().unwrap();
 
 	// Wait for GC
@@ -600,19 +480,14 @@ fn gc_with_only_deleted_keys() {
 
 	// All should be gone
 	let mut tx = db.transaction(false);
-
 	for i in 0..10 {
-
 		assert!(tx.get(format!("temp_{}", i)).unwrap().is_none());
 	}
-
 	tx.cancel().unwrap();
 }
 
 #[test]
-
 fn gc_empty_database() {
-
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
@@ -622,27 +497,20 @@ fn gc_empty_database() {
 
 	// Run GC on empty database
 	db.run_gc();
-
 	db.run_cleanup();
 
 	// Should work fine
 	let mut tx = db.transaction(true);
-
 	tx.set("key", "value").unwrap();
-
 	tx.commit().unwrap();
 
 	let mut tx = db.transaction(false);
-
 	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("value")));
-
 	tx.cancel().unwrap();
 }
 
 #[test]
-
 fn gc_preserves_tombstones_for_active_readers() {
-
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
@@ -652,21 +520,16 @@ fn gc_preserves_tombstones_for_active_readers() {
 
 	// Create and then delete a key
 	let mut tx = db.transaction(true);
-
 	tx.set("key", "original").unwrap();
-
 	tx.commit().unwrap();
 
 	// Start a read that sees the key
 	let read_tx = db.transaction(false);
-
 	assert_eq!(read_tx.get("key").unwrap(), Some(Bytes::from("original")));
 
 	// Delete the key
 	let mut tx = db.transaction(true);
-
 	tx.del("key").unwrap();
-
 	tx.commit().unwrap();
 
 	// Wait for GC
@@ -681,6 +544,5 @@ fn gc_preserves_tombstones_for_active_readers() {
 
 	// New reader should see deletion
 	let new_tx = db.transaction(false);
-
 	assert!(new_tx.get("key").unwrap().is_none());
 }

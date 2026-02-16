@@ -11,13 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 //! This module stores a MVCC versioned entry.
 
 use bytes::Bytes;
 use std::cmp::Ordering;
 
 #[derive(Clone, Eq, PartialEq)]
-
 pub struct Version {
 	/// The version of this entry
 	pub(crate) version: u64,
@@ -29,18 +29,14 @@ pub struct Version {
 
 impl Ord for Version {
 	#[inline]
-
 	fn cmp(&self, other: &Self) -> Ordering {
-
 		self.version.cmp(&other.version)
 	}
 }
 
 impl PartialOrd for Version {
 	#[inline]
-
 	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-
 		Some(self.cmp(other))
 	}
 }
