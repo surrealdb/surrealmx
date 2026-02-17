@@ -2,7 +2,7 @@
 name = "surrealmx"
 publish = true
 edition = "2021"
-version = "0.16.0"
+version = "0.17.0"
 readme = "CARGO.md"
 authors = ["Tobie Morgan Hitchcock <tobie@surrealdb.com>"]
 description = "An embedded, in-memory, lock-free, transaction-based, key-value database engine"
