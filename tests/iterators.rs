@@ -50,6 +50,7 @@ fn cursor_direction_switch_at_first_element() {
 	assert!(cursor.valid(), "After re-seek, cursor should be valid");
 	assert_eq!(cursor.key().unwrap().as_ref(), b"a");
 
+	drop(cursor);
 	tx.cancel().unwrap();
 }
 
@@ -74,6 +75,7 @@ fn cursor_direction_switch_at_last_element() {
 	cursor.next();
 	assert!(!cursor.valid(), "Next at last element should invalidate");
 
+	drop(cursor);
 	tx.cancel().unwrap();
 }
 
@@ -117,6 +119,7 @@ fn cursor_rapid_direction_changes() {
 	cursor.prev(); // k
 	assert_eq!(cursor.key().unwrap().as_ref(), b"k");
 
+	drop(cursor);
 	tx.cancel().unwrap();
 }
 

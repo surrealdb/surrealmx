@@ -15,7 +15,8 @@
 //! Iteration edge case tests for SurrealMX.
 //!
 //! Tests iterator and cursor behavior under edge conditions including
-//! modifications during iteration, transaction lifecycle, and concurrent access.
+//! modifications during iteration, transaction lifecycle, and concurrent
+//! access.
 
 use bytes::Bytes;
 use std::sync::{Arc, Barrier};
@@ -44,12 +45,13 @@ fn cursor_after_transaction_cancel() {
 	assert!(cursor.valid());
 	assert_eq!(cursor.key().unwrap().as_ref(), b"a");
 
-	// Cancel transaction
+	// Drop cursor before cancelling transaction
+	drop(cursor);
 	tx.cancel().unwrap();
 
-	// Cursor operations after cancel should fail gracefully or return invalid state
-	// The exact behavior depends on implementation - cursor may become invalid
-	// or operations may return errors
+	// Cursor operations after cancel should fail gracefully or return invalid
+	// state The exact behavior depends on implementation - cursor may become
+	// invalid or operations may return errors
 }
 
 // =============================================================================
@@ -161,6 +163,7 @@ fn seek_after_mutation() {
 	assert_eq!(cursor.key().unwrap().as_ref(), b"b");
 	assert_eq!(cursor.value().unwrap().as_ref(), b"2");
 
+	drop(cursor);
 	tx.commit().unwrap();
 }
 

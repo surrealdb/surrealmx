@@ -209,7 +209,8 @@ impl Persistence {
 	/// * `inner` - Reference to the database state
 	///
 	/// # Returns
-	/// * `Result<Self, PersistenceError>` - The created persistence layer or an error
+	/// * `Result<Self, PersistenceError>` - The created persistence layer or an
+	///   error
 	pub(crate) fn new_with_options(
 		options: PersistenceOptions,
 		inner: Arc<Inner>,
@@ -290,7 +291,8 @@ impl Persistence {
 	/// 1. Captures the current AOL file position as a cutoff point
 	/// 2. Creates a new snapshot file atomically using a temporary file
 	/// 3. Streams data to reduce memory usage
-	/// 4. Truncates AOL only up to the cutoff position, preserving newer entries
+	/// 4. Truncates AOL only up to the cutoff position, preserving newer
+	///    entries
 	///
 	/// # Returns
 	/// * `Result<(), PersistenceError>` - Success or an error
@@ -471,7 +473,8 @@ impl Persistence {
 		Ok(())
 	}
 
-	/// Truncate the AOL file up to the specified position, preserving any data after.
+	/// Truncate the AOL file up to the specified position, preserving any data
+	/// after.
 	fn truncate(
 		aol: &Option<Arc<Mutex<File>>>,
 		position: u64,
@@ -623,7 +626,8 @@ impl Persistence {
 						let file = File::create(&temp_path)?;
 						// Create compressed writer (handles buffering internally)
 						let mut writer = CompressedWriter::new(file, compression)?;
-						// Get the current position in the AOL file before snapshotting (if AOL enabled)
+						// Get the current position in the AOL file before snapshotting (if AOL
+						// enabled)
 						let aol_cutoff_position = if let Some(ref aol) = aol {
 							aol.lock()?.metadata()?.len()
 						} else {
@@ -673,7 +677,8 @@ impl Persistence {
 		}
 	}
 
-	/// Spawn the background worker thread for processing async append operations
+	/// Spawn the background worker thread for processing async append
+	/// operations
 	fn spawn_appender_worker(&self) {
 		// Check if asynchronous append mode is enabled
 		if self.aol_mode != AolMode::AsynchronousAfterCommit {
@@ -774,7 +779,8 @@ impl Persistence {
 											let should_sync = {
 												// Get the last fsync time
 												let mut last_fsync = last_fsync.lock()?;
-												// Check if the last fsync time is greater than the duration
+												// Check if the last fsync time is greater than the
+												// duration
 												if now.duration_since(*last_fsync) >= duration {
 													// Update the last fsync time
 													*last_fsync = now;

@@ -28,6 +28,7 @@ impl IntoBytes for &[u8] {
 		// Get the bytes reference
 		self
 	}
+
 	fn into_bytes(self) -> Bytes {
 		// Must copy from &[u8]
 		Bytes::copy_from_slice(self)
@@ -38,6 +39,7 @@ impl IntoBytes for Vec<u8> {
 	fn as_slice(&self) -> &[u8] {
 		self.as_slice()
 	}
+
 	fn into_bytes(self) -> Bytes {
 		// Zero-copy from Vec<u8>
 		Bytes::from(self)
@@ -49,6 +51,7 @@ impl IntoBytes for &Vec<u8> {
 		// Get the bytes reference
 		&self[..]
 	}
+
 	fn into_bytes(self) -> Bytes {
 		// Must copy from &Vec<u8>
 		Bytes::copy_from_slice(&self[..])
@@ -60,6 +63,7 @@ impl IntoBytes for Bytes {
 		// Get the bytes reference
 		self.as_ref()
 	}
+
 	fn into_bytes(self) -> Bytes {
 		// Zero-copy from self
 		self
@@ -71,6 +75,7 @@ impl IntoBytes for &Bytes {
 		// Get the bytes reference
 		self.as_ref()
 	}
+
 	fn into_bytes(self) -> Bytes {
 		// Zero-copy from self
 		self.clone()
@@ -82,6 +87,7 @@ impl IntoBytes for &str {
 		// Get the string bytes reference
 		self.as_bytes()
 	}
+
 	fn into_bytes(self) -> Bytes {
 		// Must copy from &str
 		Bytes::copy_from_slice(self.as_bytes())
@@ -93,6 +99,7 @@ impl IntoBytes for String {
 		// Get the string bytes reference
 		self.as_bytes()
 	}
+
 	fn into_bytes(self) -> Bytes {
 		// Zero-copy from String
 		Bytes::from(self.into_bytes())
@@ -104,6 +111,7 @@ impl IntoBytes for &String {
 		// Get the string bytes reference
 		self.as_bytes()
 	}
+
 	fn into_bytes(self) -> Bytes {
 		// Must copy from &String
 		Bytes::copy_from_slice(self.as_bytes())
@@ -115,6 +123,7 @@ impl IntoBytes for Box<[u8]> {
 		// Get the bytes reference
 		self.as_ref()
 	}
+
 	fn into_bytes(self) -> Bytes {
 		// Zero-copy from Box<[u8]>
 		Bytes::from(self)
@@ -126,6 +135,7 @@ impl<'a> IntoBytes for Cow<'a, [u8]> {
 		// Get the bytes reference
 		self.as_ref()
 	}
+
 	fn into_bytes(self) -> Bytes {
 		// Match the Cow variant
 		match self {

@@ -311,6 +311,124 @@ fn bench_total_operations(c: &mut Criterion) {
 	group.finish();
 }
 
+// Cursor-based iteration benchmarks (exercises persistent MergeIterator in
+// Cursor)
+fn bench_cursor_scan(c: &mut Criterion) {
+	let mut group = c.benchmark_group("cursor_scan");
+
+	for entry_count in [1000, 10_000, 100_000].iter() {
+		let db = setup_database_with_sequential_data(*entry_count, 100);
+
+		for scan_limit in [10, 100, 1000].iter() {
+			let limit = std::cmp::min(*scan_limit, *entry_count);
+
+			group.throughput(Throughput::Elements(limit as u64));
+
+			group.bench_with_input(
+				BenchmarkId::new("cursor_fwd", format!("{}entries_limit{}", entry_count, limit)),
+				&limit,
+				|b, &limit| {
+					b.iter(|| {
+						let tx = db.transaction(false);
+
+						let start_key = b"".to_vec();
+						let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
+
+						let mut cursor = tx.cursor(start_key..end_key).unwrap();
+						cursor.seek_to_first();
+
+						let mut count = 0;
+						while cursor.valid() && count < limit {
+							if cursor.exists() {
+								black_box(cursor.key());
+								black_box(cursor.value());
+								count += 1;
+							}
+							cursor.next();
+						}
+
+						black_box(count);
+					})
+				},
+			);
+		}
+	}
+
+	group.finish();
+}
+
+// Iterator-based scan benchmarks (ScanIterator wrapping Cursor)
+fn bench_scan_iter(c: &mut Criterion) {
+	let mut group = c.benchmark_group("scan_iter_ops");
+
+	for entry_count in [1000, 10_000, 100_000].iter() {
+		let db = setup_database_with_sequential_data(*entry_count, 100);
+
+		for scan_limit in [10, 100, 1000].iter() {
+			let limit = std::cmp::min(*scan_limit, *entry_count);
+
+			group.throughput(Throughput::Elements(limit as u64));
+
+			group.bench_with_input(
+				BenchmarkId::new("scan_iter", format!("{}entries_limit{}", entry_count, limit)),
+				&limit,
+				|b, &limit| {
+					b.iter(|| {
+						let tx = db.transaction(false);
+
+						let start_key = b"".to_vec();
+						let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
+
+						let iter = tx.scan_iter(start_key..end_key).unwrap();
+
+						let result: Vec<_> = iter.take(limit).collect();
+
+						black_box(result);
+					})
+				},
+			);
+		}
+	}
+
+	group.finish();
+}
+
+// Iterator-based keys benchmarks (KeyIterator wrapping Cursor)
+fn bench_keys_iter(c: &mut Criterion) {
+	let mut group = c.benchmark_group("keys_iter_ops");
+
+	for entry_count in [1000, 10_000, 100_000].iter() {
+		let db = setup_database_with_sequential_data(*entry_count, 100);
+
+		for scan_limit in [10, 100, 1000].iter() {
+			let limit = std::cmp::min(*scan_limit, *entry_count);
+
+			group.throughput(Throughput::Elements(limit as u64));
+
+			group.bench_with_input(
+				BenchmarkId::new("keys_iter", format!("{}entries_limit{}", entry_count, limit)),
+				&limit,
+				|b, &limit| {
+					b.iter(|| {
+						let tx = db.transaction(false);
+
+						let start_key = b"".to_vec();
+						let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
+
+						let iter = tx.keys_iter(start_key..end_key).unwrap();
+
+						let result: Vec<_> = iter.take(limit).collect();
+
+						black_box(result);
+					})
+				},
+			);
+		}
+	}
+
+	group.finish();
+}
+
 // Concurrent Operations Benchmarks
 fn bench_concurrent_readers(c: &mut Criterion) {
 	let mut group = c.benchmark_group("concurrent_readers");
@@ -323,7 +441,8 @@ fn bench_concurrent_readers(c: &mut Criterion) {
 		let db = Arc::new(setup_database_with_sequential_data(*entry_count, 100));
 		let mut rng = StdRng::seed_from_u64(SEED);
 
-		// Pre-generate keys for lookup (more keys for better distribution across threads)
+		// Pre-generate keys for lookup (more keys for better distribution across
+		// threads)
 		let lookup_keys: Vec<Bytes> =
 			(0..200).map(|_| generate_sequential_key(rng.random_range(0..*entry_count))).collect();
 
@@ -450,12 +569,14 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 										for (op_type, key, value) in thread_operations {
 											match op_type {
 												"insert" => {
-													// For inserts, use putc to ensure we're creating new entries
+													// For inserts, use putc to ensure we're
+													// creating new entries
 													let result = tx.putc(key, value, None::<&[u8]>);
 													results.push(result.is_ok());
 												}
 												"update" => {
-													// For updates, we don't check if key exists (simpler)
+													// For updates, we don't check if key exists
+													// (simpler)
 													let result = tx.put(key, value);
 													results.push(result.is_ok());
 												}
@@ -723,7 +844,10 @@ criterion_group!(
 	scan_benchmarks,
 	bench_scan_operations,
 	bench_keys_operations,
-	bench_total_operations
+	bench_total_operations,
+	bench_cursor_scan,
+	bench_scan_iter,
+	bench_keys_iter
 );
 
 criterion_group!(

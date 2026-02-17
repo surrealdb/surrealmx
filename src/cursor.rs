@@ -64,6 +64,8 @@ pub struct Cursor<'a> {
 	current: Option<(Bytes, Option<Bytes>)>,
 	/// Whether the cursor has been positioned
 	positioned: bool,
+	/// Persistent merge iterator, reused across sequential next/prev calls
+	iter: Option<MergeIterator<'a>>,
 }
 
 impl<'a> Cursor<'a> {
@@ -78,13 +80,20 @@ impl<'a> Cursor<'a> {
 		end: Bytes,
 		version: u64,
 	) -> Self {
-		// Build combined writeset from merge queue entries
-		let mut combined_writeset: BTreeMap<Bytes, Option<Bytes>> = BTreeMap::new();
-		for entry in database.transaction_merge_queue.range(..=version).rev() {
-			for (k, v) in entry.value().writeset.range::<Bytes, _>(&beg..&end) {
-				combined_writeset.entry(k.clone()).or_insert_with(|| v.clone());
-			}
-		}
+		// Build combined writeset from merge queue entries.
+		// Fast path: skip entirely when the merge queue is empty (common case).
+		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> =
+			if database.transaction_merge_queue.is_empty() {
+				BTreeMap::new()
+			} else {
+				let mut ws = BTreeMap::new();
+				for entry in database.transaction_merge_queue.range(..=version).rev() {
+					for (k, v) in entry.value().writeset.range::<Bytes, _>(&beg..&end) {
+						ws.entry(k.clone()).or_insert_with(|| v.clone());
+					}
+				}
+				ws
+			};
 
 		Cursor {
 			database,
@@ -96,6 +105,7 @@ impl<'a> Cursor<'a> {
 			direction: Direction::Forward,
 			current: None,
 			positioned: false,
+			iter: None,
 		}
 	}
 
@@ -111,7 +121,8 @@ impl<'a> Cursor<'a> {
 		self.current.as_ref().map(|(k, _)| k)
 	}
 
-	/// Get the current value, or None if the cursor is not valid or the entry is deleted.
+	/// Get the current value, or None if the cursor is not valid or the entry
+	/// is deleted.
 	#[inline]
 	pub fn value(&self) -> Option<&Bytes> {
 		self.current.as_ref().and_then(|(_, v)| v.as_ref())
@@ -127,14 +138,20 @@ impl<'a> Cursor<'a> {
 	pub fn seek_to_first(&mut self) {
 		self.direction = Direction::Forward;
 		self.positioned = true;
-		self.seek_internal(&self.beg.clone());
+		let beg = self.beg.clone();
+		let end = self.end.clone();
+		self.create_iterator(&beg, &end, Direction::Forward);
+		self.advance_current();
 	}
 
 	/// Move the cursor to the last entry in the range.
 	pub fn seek_to_last(&mut self) {
 		self.direction = Direction::Reverse;
 		self.positioned = true;
-		self.seek_for_prev_internal(&self.end.clone());
+		let beg = self.beg.clone();
+		let end = self.end.clone();
+		self.create_iterator(&beg, &end, Direction::Reverse);
+		self.advance_current();
 	}
 
 	/// Seek to the first entry with a key >= the given key.
@@ -148,11 +165,14 @@ impl<'a> Cursor<'a> {
 		} else if key_bytes >= self.end {
 			// Beyond range, invalidate
 			self.current = None;
+			self.iter = None;
 			return;
 		} else {
 			key_bytes
 		};
-		self.seek_internal(&seek_key);
+		let end = self.end.clone();
+		self.create_iterator(&seek_key, &end, Direction::Forward);
+		self.advance_current();
 	}
 
 	/// Seek to the last entry with a key <= the given key.
@@ -166,11 +186,14 @@ impl<'a> Cursor<'a> {
 		} else if key_bytes < self.beg {
 			// Before range, invalidate
 			self.current = None;
+			self.iter = None;
 			return;
 		} else {
 			key_bytes
 		};
-		self.seek_for_prev_internal(&seek_key);
+		let beg = self.beg.clone();
+		self.create_iterator(&beg, &seek_key, Direction::Reverse);
+		self.advance_current();
 	}
 
 	/// Move to the next entry (forward direction).
@@ -180,23 +203,27 @@ impl<'a> Cursor<'a> {
 			return;
 		}
 
-		// If direction changed, we need to handle it
+		// If direction changed, recreate the iterator from the current position
 		if matches!(self.direction, Direction::Reverse) {
 			self.direction = Direction::Forward;
-			// Continue from current position in forward direction
 			if let Some((ref key, _)) = self.current {
-				let next_key = key.clone();
-				self.advance_forward_from(&next_key);
-				return;
+				let next_start = next_key(key);
+				if next_start >= self.end {
+					self.current = None;
+					self.iter = None;
+					return;
+				}
+				let end = self.end.clone();
+				self.create_iterator(&next_start, &end, Direction::Forward);
+			} else {
+				self.iter = None;
 			}
+			self.advance_current();
+			return;
 		}
 
-		// Advance forward from current position
-		if let Some((ref key, _)) = self.current.clone() {
-			self.advance_forward_from(key);
-		} else {
-			// Already invalid, stay invalid
-		}
+		// Same direction (forward), reuse existing iterator
+		self.advance_current();
 	}
 
 	/// Move to the previous entry (reverse direction).
@@ -206,115 +233,61 @@ impl<'a> Cursor<'a> {
 			return;
 		}
 
-		// If direction changed, we need to handle it
+		// If direction changed, recreate the iterator from the current position
 		if matches!(self.direction, Direction::Forward) {
 			self.direction = Direction::Reverse;
-			// Continue from current position in reverse direction
 			if let Some((ref key, _)) = self.current {
-				let prev_key = key.clone();
-				self.advance_backward_from(&prev_key);
-				return;
+				if key <= &self.beg {
+					self.current = None;
+					self.iter = None;
+					return;
+				}
+				let beg = self.beg.clone();
+				let key_clone = key.clone();
+				self.create_iterator(&beg, &key_clone, Direction::Reverse);
+			} else {
+				self.iter = None;
 			}
+			self.advance_current();
+			return;
 		}
 
-		// Advance backward from current position
-		if let Some((ref key, _)) = self.current.clone() {
-			self.advance_backward_from(key);
-		} else {
-			// Already invalid, stay invalid
-		}
+		// Same direction (reverse), reuse existing iterator
+		self.advance_current();
 	}
 
 	// --------------------------------------------------
 	// Internal methods
 	// --------------------------------------------------
 
-	/// Internal seek to a key (forward direction).
-	fn seek_internal(&mut self, seek_key: &Bytes) {
-		// Create a new merge iterator starting from seek_key
-		let mut iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(seek_key), Bound::Excluded(&self.end))),
-			self.combined_writeset
-				.range::<Bytes, _>(seek_key..&self.end)
-				.map(|(k, v)| (k.clone(), v.clone()))
-				.collect(),
-			self.writeset.range::<Bytes, _>(seek_key..&self.end),
-			Direction::Forward,
-			self.version,
-			0,
-		);
+	/// Create a new merge iterator over the given range and direction.
+	/// Replaces any existing iterator.
+	fn create_iterator(&mut self, start: &Bytes, end: &Bytes, direction: Direction) {
+		let join: BTreeMap<Bytes, Option<Bytes>> = self
+			.combined_writeset
+			.range::<Bytes, _>(start..end)
+			.map(|(k, v)| (k.clone(), v.clone()))
+			.collect();
 
-		// Get the first entry
-		self.current = iter.next();
-	}
-
-	/// Internal seek for prev (reverse direction).
-	fn seek_for_prev_internal(&mut self, seek_key: &Bytes) {
-		// Create a new merge iterator for reverse iteration ending at seek_key
-		let mut iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(&self.beg), Bound::Excluded(seek_key))),
-			self.combined_writeset
-				.range::<Bytes, _>(&self.beg..seek_key)
-				.map(|(k, v)| (k.clone(), v.clone()))
-				.collect(),
-			self.writeset.range::<Bytes, _>(&self.beg..seek_key),
-			Direction::Reverse,
-			self.version,
-			0,
-		);
-
-		// Get the first entry (which is the last in the range due to reverse)
-		self.current = iter.next();
-	}
-
-	/// Advance forward from the given key (exclusive).
-	fn advance_forward_from(&mut self, from_key: &Bytes) {
-		// We need to find the next key after from_key
-		// Create an iterator starting just after from_key
-		let next_start = next_key(from_key);
-		if next_start >= self.end {
-			self.current = None;
-			return;
-		}
-
-		let mut iter = MergeIterator::new(
+		self.iter = Some(MergeIterator::new(
 			self.database
 				.datastore
-				.range((Bound::Included(&next_start), Bound::Excluded(&self.end))),
-			self.combined_writeset
-				.range::<Bytes, _>(&next_start..&self.end)
-				.map(|(k, v)| (k.clone(), v.clone()))
-				.collect(),
-			self.writeset.range::<Bytes, _>(&next_start..&self.end),
-			Direction::Forward,
+				.range((Bound::Included(start.clone()), Bound::Excluded(end.clone()))),
+			join,
+			self.writeset.range::<Bytes, _>(start..end),
+			direction,
 			self.version,
 			0,
-		);
-
-		self.current = iter.next();
+		));
 	}
 
-	/// Advance backward from the given key (exclusive).
-	fn advance_backward_from(&mut self, from_key: &Bytes) {
-		// We need to find the previous key before from_key
-		if from_key <= &self.beg {
-			self.current = None;
-			return;
-		}
-
-		let mut iter = MergeIterator::new(
-			self.database.datastore.range((Bound::Included(&self.beg), Bound::Excluded(from_key))),
-			self.combined_writeset
-				.range::<Bytes, _>(&self.beg..from_key)
-				.map(|(k, v)| (k.clone(), v.clone()))
-				.collect(),
-			self.writeset.range::<Bytes, _>(&self.beg..from_key),
-			Direction::Reverse,
-			self.version,
-			0,
-		);
-
-		self.current = iter.next();
+	/// Advance the persistent iterator and update the current entry.
+	#[inline]
+	fn advance_current(&mut self) {
+		self.current = match &mut self.iter {
+			Some(iter) => iter.next(),
+			None => None,
+		};
 	}
 }
 
@@ -420,7 +393,8 @@ impl<'a> DoubleEndedIterator for KeyIterator<'a> {
 
 /// An iterator over key-value pairs in a range.
 ///
-/// This iterator skips deleted entries and only yields existing key-value pairs.
+/// This iterator skips deleted entries and only yields existing key-value
+/// pairs.
 ///
 /// # Example
 ///

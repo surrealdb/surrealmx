@@ -86,18 +86,22 @@ impl Versions {
 		}
 	}
 
-	/// Determine if a new entry should be ignored, inserted, or update an existing entry.
+	/// Determine if a new entry should be ignored, inserted, or update an
+	/// existing entry.
 	///
 	/// This function works in the following way:
 	/// - Return IndexOrUpdate::Ignore if:
-	///   - The latest entry with a version <= value.version has the same value as the new value
-	///   - The latest entry with a version <= value.version is a delete and the new value is a delete
+	///   - The latest entry with a version <= value.version has the same value
+	///     as the new value
+	///   - The latest entry with a version <= value.version is a delete and the
+	///     new value is a delete
 	/// - Return IndexOrUpdate::Update(version) if:
-	///   - The new value version is the same as an existing version and we should update the entry
+	///   - The new value version is the same as an existing version and we
+	///     should update the entry
 	/// - Return IndexOrUpdate::Index(index) if:
 	///   - There is no entry with a version <= value.version
-	///   - The new value version is different to the latest entry with a version <= value.version
-	///
+	///   - The new value version is different to the latest entry with a
+	///     version <= value.version
 	#[inline]
 	pub(crate) fn fetch_index_or_update(&mut self, value: &Version) -> IndexOrUpdate<'_> {
 		// Find the index of the item where item.version <= value.version
@@ -261,7 +265,8 @@ mod tests {
 	use super::*;
 	use bytes::Bytes;
 
-	/// Helper function to create a Version from a version number and optional value
+	/// Helper function to create a Version from a version number and optional
+	/// value
 	fn make_version(version: u64, value: Option<&str>) -> Version {
 		Version {
 			version,
@@ -269,7 +274,8 @@ mod tests {
 		}
 	}
 
-	/// Helper function to create a Versions instance with the given version tuples
+	/// Helper function to create a Versions instance with the given version
+	/// tuples
 	fn make_versions(versions: Vec<(u64, Option<&str>)>) -> Versions {
 		let mut v = Versions::new();
 		for (version, value) in versions {
