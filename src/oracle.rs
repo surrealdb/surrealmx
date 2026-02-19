@@ -1,9 +1,11 @@
 use arc_swap::ArcSwap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
-use std::time::Duration;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use web_time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A timestamp oracle for monotonically increasing time
 pub(crate) struct Oracle {
@@ -26,6 +28,7 @@ pub(crate) struct Inner {
 	/// Specifies whether timestamp syncing is enabled in the background
 	pub(crate) resync_enabled: AtomicBool,
 	/// Stores a handle to the current timestamp syncing background thread
+	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) resync_handle: Mutex<Option<JoinHandle<()>>>,
 	/// Interval at which the oracle resyncs with the system clock
 	pub(crate) resync_interval: Duration,
@@ -44,11 +47,13 @@ impl Oracle {
 				timestamp: AtomicU64::new(reference_unix),
 				reference: ArcSwap::new(Arc::new((reference_unix, reference_time))),
 				resync_enabled: AtomicBool::new(true),
+				#[cfg(not(target_arch = "wasm32"))]
 				resync_handle: Mutex::new(None),
 				resync_interval,
 			}),
 		};
 		// Start up the resyncing thread
+		#[cfg(not(target_arch = "wasm32"))]
 		oracle.worker_resync();
 		// Return the oracle
 		Arc::new(oracle)
@@ -83,6 +88,7 @@ impl Oracle {
 		// Disable timestamp resyncing
 		self.inner.resync_enabled.store(false, Ordering::Release);
 		// Wait for the timestamp resyncing thread to exit
+		#[cfg(not(target_arch = "wasm32"))]
 		if let Some(handle) = self.inner.resync_handle.lock().unwrap().take() {
 			handle.thread().unpark();
 			handle.join().unwrap();
@@ -90,6 +96,7 @@ impl Oracle {
 	}
 
 	/// Start the resyncing thread after creating the oracle
+	#[cfg(not(target_arch = "wasm32"))]
 	fn worker_resync(&self) {
 		// Clone the underlying oracle inner
 		let oracle = self.inner.clone();

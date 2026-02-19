@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 /// Represents a pending asynchronous append operation
 #[derive(Debug, Clone)]
