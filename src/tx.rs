@@ -2032,23 +2032,23 @@ impl TransactionInner {
 				self.database.transaction_commit_id.fetch_add(1, Ordering::Release);
 				return (version, entry.value().clone());
 			}
-		// Ensure the thread backs off when under contention
-		if spins < 10 {
-			std::hint::spin_loop();
-		} else {
-			#[cfg(not(target_arch = "wasm32"))]
-			if spins < 100 {
-				std::thread::yield_now();
+			// Ensure the thread backs off when under contention
+			if spins < 10 {
+				std::hint::spin_loop();
 			} else {
-				std::thread::park_timeout(Duration::from_micros(10));
+				#[cfg(not(target_arch = "wasm32"))]
+				if spins < 100 {
+					std::thread::yield_now();
+				} else {
+					std::thread::park_timeout(Duration::from_micros(10));
+				}
+				#[cfg(target_arch = "wasm32")]
+				std::hint::spin_loop();
 			}
-			#[cfg(target_arch = "wasm32")]
-			std::hint::spin_loop();
+			// Increase the number loop spins we have attempted
+			spins += 1;
 		}
-		// Increase the number loop spins we have attempted
-		spins += 1;
 	}
-}
 
 	/// Atomimcally inserts the transaction into the merge queue
 	#[inline(always)]
@@ -2080,19 +2080,19 @@ impl TransactionInner {
 				oracle.inner.timestamp.fetch_max(version, Ordering::Release);
 				return (version, entry.value().clone());
 			}
-		// Ensure the thread backs off when under contention
-		if spins < 10 {
-			std::hint::spin_loop();
-		} else {
-			#[cfg(not(target_arch = "wasm32"))]
-			if spins < 100 {
-				std::thread::yield_now();
+			// Ensure the thread backs off when under contention
+			if spins < 10 {
+				std::hint::spin_loop();
 			} else {
-				std::thread::park_timeout(Duration::from_micros(10));
+				#[cfg(not(target_arch = "wasm32"))]
+				if spins < 100 {
+					std::thread::yield_now();
+				} else {
+					std::thread::park_timeout(Duration::from_micros(10));
+				}
+				#[cfg(target_arch = "wasm32")]
+				std::hint::spin_loop();
 			}
-			#[cfg(target_arch = "wasm32")]
-			std::hint::spin_loop();
-		}
 			// Increase the number loop spins we have attempted
 			spins += 1;
 		}
