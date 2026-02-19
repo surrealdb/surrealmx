@@ -20,10 +20,14 @@
 use bytes::Bytes;
 use surrealmx::{Database, Error};
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::*;
+
 // =============================================================================
 // put() Tests (Insert if not exists)
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn put_succeeds_for_new_key() {
 	let db = Database::new();
@@ -35,6 +39,7 @@ fn put_succeeds_for_new_key() {
 	tx.commit().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn put_fails_for_existing_key() {
 	let db = Database::new();
@@ -54,6 +59,7 @@ fn put_fails_for_existing_key() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn put_fails_for_key_set_in_same_transaction() {
 	let db = Database::new();
@@ -70,6 +76,7 @@ fn put_fails_for_key_set_in_same_transaction() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn put_succeeds_after_delete_in_same_transaction() {
 	let db = Database::new();
@@ -99,6 +106,7 @@ fn put_succeeds_after_delete_in_same_transaction() {
 // putc() Tests (Conditional put)
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn putc_succeeds_when_value_matches() {
 	let db = Database::new();
@@ -121,6 +129,7 @@ fn putc_succeeds_when_value_matches() {
 	verify.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn putc_fails_when_value_differs() {
 	let db = Database::new();
@@ -143,6 +152,7 @@ fn putc_fails_when_value_differs() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn putc_with_none_check_succeeds_for_non_existent_key() {
 	let db = Database::new();
@@ -155,6 +165,7 @@ fn putc_with_none_check_succeeds_for_non_existent_key() {
 	tx.commit().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn putc_with_none_check_fails_for_existing_key() {
 	let db = Database::new();
@@ -174,6 +185,7 @@ fn putc_with_none_check_fails_for_existing_key() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn putc_in_same_transaction_with_matching_value() {
 	let db = Database::new();
@@ -191,6 +203,7 @@ fn putc_in_same_transaction_with_matching_value() {
 	tx.commit().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn putc_in_same_transaction_with_non_matching_value() {
 	let db = Database::new();
@@ -212,6 +225,7 @@ fn putc_in_same_transaction_with_non_matching_value() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn putc_after_delete_with_none_check() {
 	let db = Database::new();
@@ -236,6 +250,7 @@ fn putc_after_delete_with_none_check() {
 // delc() Tests (Conditional delete)
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn delc_succeeds_when_value_matches() {
 	let db = Database::new();
@@ -260,6 +275,7 @@ fn delc_succeeds_when_value_matches() {
 	verify.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn delc_fails_when_value_differs() {
 	let db = Database::new();
@@ -282,6 +298,7 @@ fn delc_fails_when_value_differs() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn delc_with_none_check_succeeds_for_non_existent_key() {
 	let db = Database::new();
@@ -293,6 +310,7 @@ fn delc_with_none_check_succeeds_for_non_existent_key() {
 	tx.commit().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn delc_with_none_check_fails_for_existing_key() {
 	let db = Database::new();
@@ -312,6 +330,7 @@ fn delc_with_none_check_fails_for_existing_key() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn delc_in_same_transaction_with_matching_value() {
 	let db = Database::new();
@@ -330,6 +349,7 @@ fn delc_in_same_transaction_with_matching_value() {
 	tx.commit().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn delc_in_same_transaction_with_non_matching_value() {
 	let db = Database::new();
@@ -355,6 +375,7 @@ fn delc_in_same_transaction_with_non_matching_value() {
 // Combined / Edge Case Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn conditional_operations_chain() {
 	let db = Database::new();
@@ -389,6 +410,7 @@ fn conditional_operations_chain() {
 	verify.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn conditional_operations_across_transactions() {
 	let db = Database::new();
@@ -420,6 +442,7 @@ fn conditional_operations_across_transactions() {
 	verify.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn conditional_with_empty_value() {
 	let db = Database::new();
@@ -441,6 +464,7 @@ fn conditional_with_empty_value() {
 	verify.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn conditional_with_binary_data() {
 	let db = Database::new();
@@ -464,6 +488,7 @@ fn conditional_with_binary_data() {
 	verify.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn putc_concurrent_conflict() {
 	let db = Database::new();

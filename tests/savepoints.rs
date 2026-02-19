@@ -20,10 +20,14 @@
 use bytes::Bytes;
 use surrealmx::{Database, Error};
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::*;
+
 // =============================================================================
 // Basic Savepoint Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_basic_rollback() {
 	let db = Database::new();
@@ -67,6 +71,7 @@ fn savepoint_basic_rollback() {
 	verify_tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_rollback_restores_deleted_keys() {
 	let db = Database::new();
@@ -108,6 +113,7 @@ fn savepoint_rollback_restores_deleted_keys() {
 // Nested Savepoint Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_nested_multiple_levels() {
 	let db = Database::new();
@@ -161,6 +167,7 @@ fn savepoint_nested_multiple_levels() {
 	verify.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_partial_nested_rollback() {
 	let db = Database::new();
@@ -205,6 +212,7 @@ fn savepoint_partial_nested_rollback() {
 // Savepoint Edge Cases
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_rollback_without_savepoint_errors() {
 	let db = Database::new();
@@ -221,6 +229,7 @@ fn savepoint_rollback_without_savepoint_errors() {
 	tx.commit().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_on_read_transaction() {
 	let db = Database::new();
@@ -245,6 +254,7 @@ fn savepoint_on_read_transaction() {
 	read_tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_modify_after_rollback_then_commit() {
 	let db = Database::new();
@@ -270,6 +280,7 @@ fn savepoint_modify_after_rollback_then_commit() {
 	verify.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_set_same_key_multiple_times() {
 	let db = Database::new();
@@ -294,6 +305,7 @@ fn savepoint_set_same_key_multiple_times() {
 	tx.commit().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_empty_savepoint_rollback() {
 	let db = Database::new();
@@ -318,6 +330,7 @@ fn savepoint_empty_savepoint_rollback() {
 	verify.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_with_scan_operations() {
 	let db = Database::new();
@@ -350,6 +363,7 @@ fn savepoint_with_scan_operations() {
 	tx.commit().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_delete_then_recreate_key() {
 	let db = Database::new();
@@ -373,6 +387,7 @@ fn savepoint_delete_then_recreate_key() {
 	tx.commit().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_stress_many_savepoints() {
 	let db = Database::new();
@@ -410,6 +425,7 @@ fn savepoint_stress_many_savepoints() {
 	tx.commit().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_preserves_existing_data() {
 	let db = Database::new();
@@ -442,6 +458,7 @@ fn savepoint_preserves_existing_data() {
 	tx.commit().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn savepoint_with_conditional_operations() {
 	let db = Database::new();

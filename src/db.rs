@@ -15,7 +15,10 @@
 //! This module stores the core in-memory database type.
 
 use crate::inner::Inner;
-use crate::options::{DatabaseOptions, DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
+use crate::options::DatabaseOptions;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
@@ -36,10 +39,13 @@ pub struct Database {
 	/// The database transaction pool
 	pool: Arc<Pool>,
 	/// Optional persistence configuration
+	#[cfg(not(target_arch = "wasm32"))]
 	persistence: Option<Persistence>,
 	/// Interval used by the garbage collector thread
+	#[cfg(not(target_arch = "wasm32"))]
 	gc_interval: Duration,
 	/// Interval used by the cleanup thread
+	#[cfg(not(target_arch = "wasm32"))]
 	cleanup_interval: Duration,
 }
 
@@ -50,8 +56,11 @@ impl Default for Database {
 		Database {
 			inner,
 			pool,
+			#[cfg(not(target_arch = "wasm32"))]
 			persistence: None,
+			#[cfg(not(target_arch = "wasm32"))]
 			gc_interval: DEFAULT_GC_INTERVAL,
+			#[cfg(not(target_arch = "wasm32"))]
 			cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
 		}
 	}
@@ -87,16 +96,22 @@ impl Database {
 		let db = Database {
 			inner,
 			pool,
+			#[cfg(not(target_arch = "wasm32"))]
 			persistence: None,
+			#[cfg(not(target_arch = "wasm32"))]
 			gc_interval: opts.gc_interval,
+			#[cfg(not(target_arch = "wasm32"))]
 			cleanup_interval: opts.cleanup_interval,
 		};
 		// Start background tasks when enabled
-		if opts.enable_cleanup {
-			db.initialise_cleanup_worker();
-		}
-		if opts.enable_gc {
-			db.initialise_garbage_worker();
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			if opts.enable_cleanup {
+				db.initialise_cleanup_worker();
+			}
+			if opts.enable_gc {
+				db.initialise_garbage_worker();
+			}
 		}
 		// Return the database
 		db
@@ -104,6 +119,7 @@ impl Database {
 
 	/// Create a new persistent database with custom options and persistence
 	/// settings
+	#[cfg(not(target_arch = "wasm32"))]
 	pub fn new_with_persistence(
 		opts: DatabaseOptions,
 		persistence_opts: crate::PersistenceOptions,
@@ -174,6 +190,7 @@ impl Database {
 	}
 
 	/// Get a reference to the persistence layer if enabled
+	#[cfg(not(target_arch = "wasm32"))]
 	pub fn persistence(&self) -> Option<&Persistence> {
 		self.persistence.as_ref()
 	}
@@ -232,40 +249,47 @@ impl Database {
 
 	/// Shutdown the datastore, waiting for background threads to exit
 	fn shutdown(&self) {
-		// First, disable Persistence background workers if present
-		if let Some(ref persistence) = self.persistence {
-			// Disable the persistence background workers
-			persistence.background_threads_enabled.store(false, Ordering::Release);
-			// Wait for persistence threads to exit
-			if let Some(handle) = persistence.fsync_handle.write().take() {
-				handle.thread().unpark();
-				let _ = handle.join();
-			}
-			if let Some(handle) = persistence.snapshot_handle.write().take() {
-				handle.thread().unpark();
-				let _ = handle.join();
-			}
-			if let Some(handle) = persistence.appender_handle.write().take() {
-				handle.thread().unpark();
-				let _ = handle.join();
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			// First, disable Persistence background workers if present
+			if let Some(ref persistence) = self.persistence {
+				// Disable the persistence background workers
+				persistence.background_threads_enabled.store(false, Ordering::Release);
+				// Wait for persistence threads to exit
+				if let Some(handle) = persistence.fsync_handle.write().take() {
+					handle.thread().unpark();
+					let _ = handle.join();
+				}
+				if let Some(handle) = persistence.snapshot_handle.write().take() {
+					handle.thread().unpark();
+					let _ = handle.join();
+				}
+				if let Some(handle) = persistence.appender_handle.write().take() {
+					handle.thread().unpark();
+					let _ = handle.join();
+				}
 			}
 		}
 		// Then disable Database background workers
 		self.background_threads_enabled.store(false, Ordering::Relaxed);
-		// Wait for the transaction cleanup thread to exit
-		if let Some(handle) = self.transaction_cleanup_handle.write().take() {
-			handle.thread().unpark();
-			let _ = handle.join();
-		}
-		// Wait for the garbage collector thread to exit
-		if let Some(handle) = self.garbage_collection_handle.write().take() {
-			handle.thread().unpark();
-			let _ = handle.join();
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			// Wait for the transaction cleanup thread to exit
+			if let Some(handle) = self.transaction_cleanup_handle.write().take() {
+				handle.thread().unpark();
+				let _ = handle.join();
+			}
+			// Wait for the garbage collector thread to exit
+			if let Some(handle) = self.garbage_collection_handle.write().take() {
+				handle.thread().unpark();
+				let _ = handle.join();
+			}
 		}
 	}
 
 	/// Start the transaction commit queue cleanup thread after creating the
 	/// database
+	#[cfg(not(target_arch = "wasm32"))]
 	fn initialise_cleanup_worker(&self) {
 		// Clone the underlying datastore inner
 		let db = self.inner.clone();
@@ -301,6 +325,7 @@ impl Database {
 	}
 
 	/// Start the garbage collection thread after creating the database
+	#[cfg(not(target_arch = "wasm32"))]
 	fn initialise_garbage_worker(&self) {
 		// Clone the underlying datastore inner
 		let db = self.inner.clone();

@@ -31,6 +31,7 @@ pub(crate) struct Inner {
 	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) resync_handle: Mutex<Option<JoinHandle<()>>>,
 	/// Interval at which the oracle resyncs with the system clock
+	#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 	pub(crate) resync_interval: Duration,
 }
 

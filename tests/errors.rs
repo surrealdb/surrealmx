@@ -18,10 +18,14 @@
 
 use surrealmx::{Database, Error};
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::*;
+
 // =============================================================================
 // Transaction Closed Errors
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn operations_after_commit_fail() {
 	let db = Database::new();
@@ -40,6 +44,7 @@ fn operations_after_commit_fail() {
 	assert!(matches!(tx.cancel(), Err(Error::TxClosed)));
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn operations_after_cancel_fail() {
 	let db = Database::new();
@@ -55,6 +60,7 @@ fn operations_after_cancel_fail() {
 	assert!(matches!(tx.cancel(), Err(Error::TxClosed)));
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn double_commit_fails() {
 	let db = Database::new();
@@ -66,6 +72,7 @@ fn double_commit_fails() {
 	assert!(matches!(tx.commit(), Err(Error::TxClosed)), "Second commit should fail with TxClosed");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn double_cancel_fails() {
 	let db = Database::new();
@@ -77,6 +84,7 @@ fn double_cancel_fails() {
 	assert!(matches!(tx.cancel(), Err(Error::TxClosed)), "Second cancel should fail with TxClosed");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn commit_after_cancel_fails() {
 	let db = Database::new();
@@ -88,6 +96,7 @@ fn commit_after_cancel_fails() {
 	assert!(matches!(tx.commit(), Err(Error::TxClosed)), "Commit after cancel should fail");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn cancel_after_commit_fails() {
 	let db = Database::new();
@@ -103,6 +112,7 @@ fn cancel_after_commit_fails() {
 // Not Writable Errors
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn write_operations_on_read_transaction_fail() {
 	let db = Database::new();
@@ -150,6 +160,7 @@ fn write_operations_on_read_transaction_fail() {
 // Key Already Exists Errors
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn put_existing_key_fails() {
 	let db = Database::new();
@@ -166,6 +177,7 @@ fn put_existing_key_fails() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn put_key_in_same_transaction_fails() {
 	let db = Database::new();
@@ -182,6 +194,7 @@ fn put_key_in_same_transaction_fails() {
 // Value Not Expected Errors
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn putc_wrong_check_value_fails() {
 	let db = Database::new();
@@ -198,6 +211,7 @@ fn putc_wrong_check_value_fails() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn delc_wrong_check_value_fails() {
 	let db = Database::new();
@@ -214,6 +228,7 @@ fn delc_wrong_check_value_fails() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn putc_none_check_on_existing_key_fails() {
 	let db = Database::new();
@@ -233,6 +248,7 @@ fn putc_none_check_on_existing_key_fails() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn delc_none_check_on_existing_key_fails() {
 	let db = Database::new();
@@ -256,6 +272,7 @@ fn delc_none_check_on_existing_key_fails() {
 // No Savepoint Errors
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn rollback_without_savepoint_fails() {
 	let db = Database::new();
@@ -268,6 +285,7 @@ fn rollback_without_savepoint_fails() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn rollback_after_all_savepoints_consumed_fails() {
 	let db = Database::new();
@@ -291,6 +309,7 @@ fn rollback_after_all_savepoints_consumed_fails() {
 // Conflict Errors
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn write_conflict_error() {
 	let db = Database::new();
@@ -313,6 +332,7 @@ fn write_conflict_error() {
 	);
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn read_conflict_error_ssi() {
 	let db = Database::new();
@@ -342,6 +362,7 @@ fn read_conflict_error_ssi() {
 // Version In Future Error
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn get_at_future_version_fails() {
 	let db = Database::new();
@@ -362,6 +383,7 @@ fn get_at_future_version_fails() {
 	assert!(matches!(result, Err(Error::VersionInFuture)), "reading future version should fail");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn exists_at_future_version_fails() {
 	let db = Database::new();
@@ -381,6 +403,7 @@ fn exists_at_future_version_fails() {
 // Iterator/Cursor with Closed Transaction
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn cursor_after_cancel_fails() {
 	let db = Database::new();
@@ -393,6 +416,7 @@ fn cursor_after_cancel_fails() {
 	assert!(matches!(result, Err(Error::TxClosed)));
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn keys_iter_after_commit_fails() {
 	let db = Database::new();
@@ -405,6 +429,7 @@ fn keys_iter_after_commit_fails() {
 	assert!(matches!(result, Err(Error::TxClosed)));
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn scan_iter_after_cancel_fails() {
 	let db = Database::new();
@@ -420,6 +445,7 @@ fn scan_iter_after_cancel_fails() {
 // Getm with Closed Transaction
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn getm_after_close_fails() {
 	let db = Database::new();
@@ -435,6 +461,7 @@ fn getm_after_close_fails() {
 // Edge Cases
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn operations_on_dropped_transaction() {
 	let db = Database::new();
@@ -452,6 +479,7 @@ fn operations_on_dropped_transaction() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn set_savepoint_on_closed_transaction() {
 	let db = Database::new();
@@ -463,6 +491,7 @@ fn set_savepoint_on_closed_transaction() {
 	assert!(matches!(result, Err(Error::TxClosed)));
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn rollback_on_closed_transaction() {
 	let db = Database::new();

@@ -14,6 +14,7 @@
 
 #![allow(clippy::bool_comparison)]
 
+#[cfg(not(target_arch = "wasm32"))]
 mod compression;
 mod cursor;
 mod db;
@@ -24,6 +25,7 @@ mod iter;
 mod kv;
 mod options;
 mod oracle;
+#[cfg(not(target_arch = "wasm32"))]
 mod persistence;
 mod pool;
 mod queue;
@@ -34,6 +36,7 @@ mod versions;
 #[doc(inline)]
 pub use bytes::Bytes;
 
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(inline)]
 pub use self::compression::*;
 #[doc(inline)]
@@ -48,6 +51,7 @@ pub use self::err::*;
 pub use self::kv::*;
 #[doc(inline)]
 pub use self::options::*;
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(inline)]
 pub use self::persistence::*;
 #[doc(inline)]

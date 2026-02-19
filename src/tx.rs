@@ -34,6 +34,7 @@ use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 /// The isolation level of a database transaction
@@ -907,6 +908,7 @@ impl TransactionInner {
 			}
 		}
 		// Append the transaction to the persistence layer
+		#[cfg(not(target_arch = "wasm32"))]
 		if let Some(p) = self.database.persistence.read().clone() {
 			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
 				// Remove this transaction from the merge queue
@@ -2030,18 +2032,23 @@ impl TransactionInner {
 				self.database.transaction_commit_id.fetch_add(1, Ordering::Release);
 				return (version, entry.value().clone());
 			}
-			// Ensure the thread backs off when under contention
-			if spins < 10 {
-				std::hint::spin_loop();
-			} else if spins < 100 {
+		// Ensure the thread backs off when under contention
+		if spins < 10 {
+			std::hint::spin_loop();
+		} else {
+			#[cfg(not(target_arch = "wasm32"))]
+			if spins < 100 {
 				std::thread::yield_now();
 			} else {
 				std::thread::park_timeout(Duration::from_micros(10));
 			}
-			// Increase the number loop spins we have attempted
-			spins += 1;
+			#[cfg(target_arch = "wasm32")]
+			std::hint::spin_loop();
 		}
+		// Increase the number loop spins we have attempted
+		spins += 1;
 	}
+}
 
 	/// Atomimcally inserts the transaction into the merge queue
 	#[inline(always)]
@@ -2073,14 +2080,19 @@ impl TransactionInner {
 				oracle.inner.timestamp.fetch_max(version, Ordering::Release);
 				return (version, entry.value().clone());
 			}
-			// Ensure the thread backs off when under contention
-			if spins < 10 {
-				std::hint::spin_loop();
-			} else if spins < 100 {
+		// Ensure the thread backs off when under contention
+		if spins < 10 {
+			std::hint::spin_loop();
+		} else {
+			#[cfg(not(target_arch = "wasm32"))]
+			if spins < 100 {
 				std::thread::yield_now();
 			} else {
 				std::thread::park_timeout(Duration::from_micros(10));
 			}
+			#[cfg(target_arch = "wasm32")]
+			std::hint::spin_loop();
+		}
 			// Increase the number loop spins we have attempted
 			spins += 1;
 		}
