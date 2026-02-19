@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 // Test to demonstrate memory usage improvement with the GC fix
 
 use bytes::Bytes;

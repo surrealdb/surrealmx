@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 use bytes::Bytes;
 use std::time::Duration;
 use surrealmx::{AolMode, Database, DatabaseOptions, FsyncMode, PersistenceOptions, SnapshotMode};

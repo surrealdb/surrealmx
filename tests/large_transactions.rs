@@ -20,10 +20,14 @@
 use bytes::Bytes;
 use surrealmx::Database;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::*;
+
 // =============================================================================
 // Transaction With Thousands of Keys Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn transaction_with_thousands_of_keys() {
 	let db = Database::new();
@@ -50,6 +54,7 @@ fn transaction_with_thousands_of_keys() {
 	assert_eq!(tx.get("key_009999").unwrap(), Some(Bytes::from("value_9999")));
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn large_value_handling() {
 	let db = Database::new();
@@ -77,6 +82,7 @@ fn large_value_handling() {
 	}
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn many_small_writes() {
 	let db = Database::new();
@@ -105,6 +111,7 @@ fn many_small_writes() {
 	);
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn large_scan_results() {
 	let db = Database::new();
@@ -141,6 +148,7 @@ fn large_scan_results() {
 	assert_eq!(partial_results.len(), 500, "Should return exactly 500 results");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn memory_under_write_pressure() {
 	let db = Database::new();
@@ -177,6 +185,7 @@ fn memory_under_write_pressure() {
 	}
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn large_batch_getm() {
 	let db = Database::new();

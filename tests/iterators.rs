@@ -20,10 +20,14 @@
 use bytes::Bytes;
 use surrealmx::Database;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::*;
+
 // =============================================================================
 // Cursor Direction Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn cursor_direction_switch_at_first_element() {
 	let db = Database::new();
@@ -54,6 +58,7 @@ fn cursor_direction_switch_at_first_element() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn cursor_direction_switch_at_last_element() {
 	let db = Database::new();
@@ -79,6 +84,7 @@ fn cursor_direction_switch_at_last_element() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn cursor_rapid_direction_changes() {
 	let db = Database::new();
@@ -127,6 +133,7 @@ fn cursor_rapid_direction_changes() {
 // Empty Range Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn cursor_empty_range_no_data() {
 	let db = Database::new();
@@ -141,6 +148,7 @@ fn cursor_empty_range_no_data() {
 	assert!(!cursor.valid(), "Empty database should have no entries");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn cursor_empty_range_with_data_outside() {
 	let db = Database::new();
@@ -161,6 +169,7 @@ fn cursor_empty_range_with_data_outside() {
 	assert!(!cursor.valid(), "No keys in range m..n");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn keys_iterator_empty_range() {
 	let db = Database::new();
@@ -175,6 +184,7 @@ fn keys_iterator_empty_range() {
 	assert!(keys.is_empty(), "Should return empty iterator");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn scan_iterator_empty_range() {
 	let db = Database::new();
@@ -192,6 +202,7 @@ fn scan_iterator_empty_range() {
 // Double-Ended Iterator Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn keys_iterator_double_ended_meets_in_middle() {
 	let db = Database::new();
@@ -219,6 +230,7 @@ fn keys_iterator_double_ended_meets_in_middle() {
 	assert!(!remaining.is_empty(), "Should have remaining elements");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn scan_iterator_double_ended() {
 	let db = Database::new();
@@ -249,6 +261,7 @@ fn scan_iterator_double_ended() {
 // Seek Edge Cases
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn cursor_seek_beyond_range_end() {
 	let db = Database::new();
@@ -271,6 +284,7 @@ fn cursor_seek_beyond_range_end() {
 	assert!(!cursor.valid(), "Seek for prev before range should invalidate");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn cursor_seek_to_non_existent_key() {
 	let db = Database::new();
@@ -299,6 +313,7 @@ fn cursor_seek_to_non_existent_key() {
 // Writeset and Merge Queue Interaction Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn iterator_sees_uncommitted_writes() {
 	let db = Database::new();
@@ -318,6 +333,7 @@ fn iterator_sees_uncommitted_writes() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn iterator_sees_uncommitted_deletes() {
 	let db = Database::new();
@@ -342,6 +358,7 @@ fn iterator_sees_uncommitted_deletes() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn iterator_merge_queue_and_writeset() {
 	let db = Database::new();
@@ -373,6 +390,7 @@ fn iterator_merge_queue_and_writeset() {
 // Iterator with Skip and Limit
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn scan_with_skip_beyond_data() {
 	let db = Database::new();
@@ -388,6 +406,7 @@ fn scan_with_skip_beyond_data() {
 	assert!(result.is_empty(), "Skip beyond data should return empty");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn scan_with_limit_one() {
 	let db = Database::new();
@@ -404,6 +423,7 @@ fn scan_with_limit_one() {
 	assert_eq!(result[0].0.as_ref(), b"a");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn scan_with_skip_and_limit() {
 	let db = Database::new();
@@ -428,6 +448,7 @@ fn scan_with_skip_and_limit() {
 // Reverse Iterator Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn keys_reverse_iterator() {
 	let db = Database::new();
@@ -447,6 +468,7 @@ fn keys_reverse_iterator() {
 	assert_eq!(keys[2].as_ref(), b"a");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn scan_reverse_iterator() {
 	let db = Database::new();
@@ -470,6 +492,7 @@ fn scan_reverse_iterator() {
 // Binary Key Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn iterator_with_binary_keys() {
 	let db = Database::new();
@@ -496,6 +519,7 @@ fn iterator_with_binary_keys() {
 // Single Element Range Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn cursor_single_element_range() {
 	let db = Database::new();

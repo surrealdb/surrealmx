@@ -15,6 +15,7 @@
 //! This module stores the inner in-memory database type.
 
 use crate::oracle::Oracle;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::persistence::Persistence;
 use crate::queue::{Commit, Merge};
 use crate::versions::Versions;
@@ -24,6 +25,7 @@ use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -50,12 +52,15 @@ pub struct Inner {
 	/// The epoch duration to determine how long to store versioned data
 	pub(crate) garbage_collection_epoch: RwLock<Option<Duration>>,
 	/// Optional persistence handler
+	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) persistence: RwLock<Option<Arc<Persistence>>>,
 	/// Specifies whether background worker threads are enabled
 	pub(crate) background_threads_enabled: AtomicBool,
 	/// Stores a handle to the current transaction cleanup background thread
+	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) transaction_cleanup_handle: RwLock<Option<JoinHandle<()>>>,
 	/// Stores a handle to the current garbage collection background thread
+	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) garbage_collection_handle: RwLock<Option<JoinHandle<()>>>,
 	/// Threshold after which transaction state is reset
 	pub(crate) reset_threshold: usize,
@@ -75,9 +80,12 @@ impl Inner {
 			transaction_commit_queue: SkipMap::new(),
 			transaction_merge_queue: SkipMap::new(),
 			garbage_collection_epoch: RwLock::new(None),
+			#[cfg(not(target_arch = "wasm32"))]
 			persistence: RwLock::new(None),
 			background_threads_enabled: AtomicBool::new(true),
+			#[cfg(not(target_arch = "wasm32"))]
 			transaction_cleanup_handle: RwLock::new(None),
+			#[cfg(not(target_arch = "wasm32"))]
 			garbage_collection_handle: RwLock::new(None),
 			reset_threshold: opts.reset_threshold,
 		}

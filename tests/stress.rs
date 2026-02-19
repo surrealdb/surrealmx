@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 use bytes::Bytes;
 use rand::Rng;
 use std::collections::BTreeMap;

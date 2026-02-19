@@ -20,10 +20,14 @@
 use bytes::Bytes;
 use surrealmx::Database;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::*;
+
 // =============================================================================
 // Snapshot Isolation Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn snapshot_isolation_read_sees_consistent_snapshot() {
 	let db = Database::new();
@@ -67,6 +71,7 @@ fn snapshot_isolation_read_sees_consistent_snapshot() {
 	new_tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn snapshot_isolation_allows_concurrent_writes_to_different_keys() {
 	let db = Database::new();
@@ -102,6 +107,7 @@ fn snapshot_isolation_allows_concurrent_writes_to_different_keys() {
 // Serializable Snapshot Isolation (SSI) Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn ssi_detects_write_write_conflict_on_same_key() {
 	let db = Database::new();
@@ -130,6 +136,7 @@ fn ssi_detects_write_write_conflict_on_same_key() {
 	verify_tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn ssi_detects_read_write_conflict() {
 	let db = Database::new();
@@ -155,6 +162,7 @@ fn ssi_detects_read_write_conflict() {
 	assert!(tx1.commit().is_err(), "tx1 should fail due to read-write conflict");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn ssi_allows_concurrent_writes_to_disjoint_keys() {
 	let db = Database::new();
@@ -178,6 +186,7 @@ fn ssi_allows_concurrent_writes_to_disjoint_keys() {
 	verify_tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn ssi_phantom_read_prevention_on_range_scan() {
 	let db = Database::new();
@@ -206,6 +215,7 @@ fn ssi_phantom_read_prevention_on_range_scan() {
 	assert!(tx1.commit().is_err(), "tx1 should fail due to phantom read");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn ssi_read_on_non_existent_key_then_concurrent_insert() {
 	let db = Database::new();
@@ -226,6 +236,7 @@ fn ssi_read_on_non_existent_key_then_concurrent_insert() {
 	assert!(tx1.commit().is_err(), "tx1 should fail due to read-write conflict on new_key");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn ssi_exists_check_creates_read_dependency() {
 	let db = Database::new();
@@ -244,6 +255,7 @@ fn ssi_exists_check_creates_read_dependency() {
 	assert!(tx1.commit().is_err(), "tx1 should fail due to exists check conflict");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn ssi_delete_conflict() {
 	let db = Database::new();
@@ -267,6 +279,7 @@ fn ssi_delete_conflict() {
 	assert!(tx1.commit().is_err(), "tx1 should fail because key was deleted");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn ssi_scan_conflict_on_update() {
 	let db = Database::new();
@@ -293,6 +306,7 @@ fn ssi_scan_conflict_on_update() {
 	assert!(tx1.commit().is_err(), "tx1 should fail due to scan conflict");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn ssi_multiple_readers_one_writer() {
 	let db = Database::new();
@@ -323,6 +337,7 @@ fn ssi_multiple_readers_one_writer() {
 // Mixed Isolation Level Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn default_transaction_uses_ssi() {
 	let db = Database::new();
@@ -345,6 +360,7 @@ fn default_transaction_uses_ssi() {
 	assert!(tx1.commit().is_err(), "Default SSI should detect read conflict");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn si_mode_allows_read_write_anomaly() {
 	let db = Database::new();
@@ -370,6 +386,7 @@ fn si_mode_allows_read_write_anomaly() {
 	assert!(tx1.commit().is_ok(), "SI should not track read-write conflicts");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn concurrent_counter_increment_conflict() {
 	let db = Database::new();

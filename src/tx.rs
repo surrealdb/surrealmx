@@ -34,7 +34,6 @@ use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// The isolation level of a database transaction
 #[derive(PartialEq, PartialOrd)]
@@ -907,6 +906,7 @@ impl TransactionInner {
 			}
 		}
 		// Append the transaction to the persistence layer
+		#[cfg(not(target_arch = "wasm32"))]
 		if let Some(p) = self.database.persistence.read().clone() {
 			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
 				// Remove this transaction from the merge queue
@@ -2031,13 +2031,7 @@ impl TransactionInner {
 				return (version, entry.value().clone());
 			}
 			// Ensure the thread backs off when under contention
-			if spins < 10 {
-				std::hint::spin_loop();
-			} else if spins < 100 {
-				std::thread::yield_now();
-			} else {
-				std::thread::park_timeout(Duration::from_micros(10));
-			}
+			backoff(spins);
 			// Increase the number loop spins we have attempted
 			spins += 1;
 		}
@@ -2074,16 +2068,27 @@ impl TransactionInner {
 				return (version, entry.value().clone());
 			}
 			// Ensure the thread backs off when under contention
-			if spins < 10 {
-				std::hint::spin_loop();
-			} else if spins < 100 {
-				std::thread::yield_now();
-			} else {
-				std::thread::park_timeout(Duration::from_micros(10));
-			}
+			backoff(spins);
 			// Increase the number loop spins we have attempted
 			spins += 1;
 		}
+	}
+}
+
+/// Progressive backoff strategy for contention in atomic queues.
+#[inline(always)]
+fn backoff(spins: usize) {
+	if spins < 10 {
+		std::hint::spin_loop();
+	} else {
+		#[cfg(not(target_arch = "wasm32"))]
+		if spins < 100 {
+			std::thread::yield_now();
+		} else {
+			std::thread::park_timeout(std::time::Duration::from_micros(10));
+		}
+		#[cfg(target_arch = "wasm32")]
+		std::hint::spin_loop();
 	}
 }
 

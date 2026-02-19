@@ -20,10 +20,14 @@
 use bytes::Bytes;
 use surrealmx::Database;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::*;
+
 // =============================================================================
 // Increment Pattern Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn increment_pattern_ssi() {
 	let db = Database::new();
@@ -61,6 +65,7 @@ fn increment_pattern_ssi() {
 // Compare and Swap Pattern Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn compare_and_swap_pattern() {
 	let db = Database::new();
@@ -105,6 +110,7 @@ fn compare_and_swap_pattern() {
 // Conditional Update Chain Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn conditional_update_chain() {
 	let db = Database::new();
@@ -144,6 +150,7 @@ fn conditional_update_chain() {
 // Optimistic Locking Pattern Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn optimistic_locking_pattern() {
 	let db = Database::new();
@@ -184,6 +191,7 @@ fn optimistic_locking_pattern() {
 // Retry on Conflict Pattern Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn retry_on_conflict() {
 	let db = Database::new();

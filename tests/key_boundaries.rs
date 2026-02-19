@@ -20,10 +20,14 @@
 use bytes::Bytes;
 use surrealmx::Database;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::*;
+
 // =============================================================================
 // Empty Value Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn empty_value() {
 	let db = Database::new();
@@ -51,6 +55,7 @@ fn empty_value() {
 // Null Bytes Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn null_bytes_in_key() {
 	let db = Database::new();
@@ -85,6 +90,7 @@ fn null_bytes_in_key() {
 	);
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn null_bytes_in_value() {
 	let db = Database::new();
@@ -116,6 +122,7 @@ fn null_bytes_in_value() {
 // Byte Boundary Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn max_byte_key() {
 	let db = Database::new();
@@ -138,6 +145,7 @@ fn max_byte_key() {
 	assert_eq!(tx.get(&key_high).unwrap(), Some(Bytes::from("high")), "High byte key");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn single_byte_keys() {
 	let db = Database::new();
@@ -169,6 +177,7 @@ fn single_byte_keys() {
 // Unicode and UTF-8 Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn unicode_keys() {
 	let db = Database::new();
@@ -209,6 +218,7 @@ fn unicode_keys() {
 // Key Ordering Tests
 // =============================================================================
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn binary_key_ordering() {
 	let db = Database::new();
@@ -252,6 +262,7 @@ fn binary_key_ordering() {
 	}
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[test]
 fn key_prefix_edge_cases() {
 	let db = Database::new();
