@@ -14,10 +14,12 @@
 
 //! This module stores the transaction commit and merge queues.
 
+use crate::LOG_TARGET_CONFLICTS;
 use bytes::Bytes;
 use papaya::HashSet;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use tracing::debug;
 
 /// A transaction entry in the transaction commit queue
 pub struct Commit {
@@ -47,6 +49,9 @@ impl Commit {
 				// Check if any key in readset exists in the writeset
 				for key in other.iter() {
 					if self.writeset.contains_key(key) {
+						// Log the error for debug purposes
+						#[cfg(debug_assertions)]
+						debug!(target: LOG_TARGET_CONFLICTS, "KeyReadConflict involving {:?}", key);
 						return false;
 					}
 				}
@@ -54,6 +59,9 @@ impl Commit {
 				// Check if any key in writeset exists in the readset
 				for key in self.writeset.keys() {
 					if other.contains(key) {
+						// Log the error for debug purposes
+						#[cfg(debug_assertions)]
+						debug!(target: LOG_TARGET_CONFLICTS, "KeyReadConflict involving {:?}", key);
 						return false;
 					}
 				}
@@ -76,7 +84,12 @@ impl Commit {
 			match ka.cmp(kb) {
 				std::cmp::Ordering::Less => next_a = a.next(),
 				std::cmp::Ordering::Greater => next_b = b.next(),
-				std::cmp::Ordering::Equal => return false,
+				std::cmp::Ordering::Equal => {
+					// Log the error for debug purposes
+					#[cfg(debug_assertions)]
+					debug!(target: LOG_TARGET_CONFLICTS, "KeyWriteConflict involving {:?}", ka);
+					return false;
+				}
 			}
 		}
 		// No overlap was found

@@ -24,6 +24,7 @@ use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::versions::Versions;
+use crate::LOG_TARGET_CONFLICTS;
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
@@ -34,6 +35,7 @@ use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tracing::debug;
 
 /// The isolation level of a database transaction
 #[derive(PartialEq, PartialOrd)]
@@ -849,6 +851,9 @@ impl TransactionInner {
 								self.writeset.clear();
 								// Clear savepoint stack
 								self.savepoint_stack.clear();
+								// Log the error for debug purposes
+								#[cfg(debug_assertions)]
+								debug!(target: LOG_TARGET_CONFLICTS, "KeyReadConflict involving {:?}", k);
 								// Return the error for this transaction
 								return Err(Error::KeyReadConflict);
 							}

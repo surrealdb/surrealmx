@@ -413,6 +413,37 @@ fn main() {
 - **Snapshot Isolation**: Most applications, high-performance scenarios, read-heavy workloads
 - **Serializable Snapshot Isolation**: Financial applications, inventory management, any scenario requiring strict serializability
 
+##### Conflict diagnostics
+
+When a transaction is aborted due to a conflict (`KeyReadConflict` or `KeyWriteConflict`), SurrealMX can log the conflicting key for debugging purposes. These logs are emitted at the `DEBUG` level using the [`tracing`](https://docs.rs/tracing) crate, and are only included in debug builds (`#[cfg(debug_assertions)]`).
+
+All conflict logs are emitted under a dedicated tracing target, exposed as the public constant [`LOG_TARGET_CONFLICTS`]:
+
+```rust
+use surrealmx::LOG_TARGET_CONFLICTS;
+// Value: "surrealmx::conflicts"
+```
+
+This allows you to selectively enable conflict diagnostics with a [`tracing_subscriber`](https://docs.rs/tracing-subscriber) filter, without enabling all `DEBUG` output from the crate:
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+tracing_subscriber::fmt()
+    .with_env_filter(
+        EnvFilter::builder()
+            .parse("info,surrealmx::conflicts=debug")
+            .unwrap(),
+    )
+    .init();
+```
+
+Or via the `RUST_LOG` environment variable:
+
+```sh
+RUST_LOG="info,surrealmx::conflicts=debug" cargo run
+```
+
 #### Range operations
 
 SurrealMX provides powerful range-based operations for scanning, counting, and iterating over keys. All range operations support:
