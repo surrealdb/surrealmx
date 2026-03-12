@@ -808,7 +808,7 @@ impl TransactionInner {
 			// Retrieve all transactions committed since we began
 			for tx in self.database.transaction_commit_queue.range(self.commit + 1..version) {
 				// Check if a previous transaction conflicts against writes
-				if !tx.value().is_disjoint_writeset(&entry) {
+				if let Some(key) = tx.value().is_disjoint_writeset(&entry) {
 					// Remove the transaction from the commit queue
 					self.database.transaction_commit_queue.remove(&version);
 					// Clear the transaction state
@@ -818,12 +818,12 @@ impl TransactionInner {
 					// Clear savepoint stack
 					self.savepoint_stack.clear();
 					// Return the error for this transaction
-					return Err(Error::KeyWriteConflict);
+					return Err(Error::KeyWriteConflict(key));
 				}
 				// Check if we should check for conflicting read keys
 				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 					// Check if a previous transaction conflicts against reads
-					if !tx.value().is_disjoint_readset(&self.readset) {
+					if let Some(key) = tx.value().is_disjoint_readset(&self.readset) {
 						// Remove the transaction from the commit queue
 						self.database.transaction_commit_queue.remove(&version);
 						// Clear the transaction state
@@ -833,7 +833,7 @@ impl TransactionInner {
 						// Clear savepoint stack
 						self.savepoint_stack.clear();
 						// Return the error for this transaction
-						return Err(Error::KeyReadConflict);
+						return Err(Error::KeyReadConflict(key));
 					}
 					// A previous transaction has conflicts against scans
 					for k in tx.value().writeset.keys() {
@@ -850,7 +850,7 @@ impl TransactionInner {
 								// Clear savepoint stack
 								self.savepoint_stack.clear();
 								// Return the error for this transaction
-								return Err(Error::KeyReadConflict);
+								return Err(Error::KeyReadConflict(k.clone()));
 							}
 						}
 					}
@@ -3704,7 +3704,7 @@ mod tests {
 		// Commit should detect the SCAN conflict (tx2 wrote to a key tx1 scanned)
 		let result = tx1.commit();
 		assert!(
-			matches!(result, Err(Error::KeyReadConflict)),
+			matches!(result, Err(Error::KeyReadConflict(_))),
 			"Should detect scan conflict even with savepoint, got: {:?}",
 			result
 		);
@@ -3762,7 +3762,7 @@ mod tests {
 		// Should still detect conflict from the preserved scan
 		let result = tx.commit();
 		assert!(
-			matches!(result, Err(Error::KeyReadConflict)),
+			matches!(result, Err(Error::KeyReadConflict(_))),
 			"Should detect conflict from scan before savepoint, got: {:?}",
 			result
 		);

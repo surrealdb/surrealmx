@@ -36,8 +36,8 @@ pub struct Merge {
 }
 
 impl Commit {
-	/// Returns true if self has no elements in common with other
-	pub fn is_disjoint_readset(&self, other: &HashSet<Bytes>) -> bool {
+	/// Returns the first conflicting key, or None if disjoint
+	pub fn is_disjoint_readset(&self, other: &HashSet<Bytes>) -> Option<Bytes> {
 		// Pin the readset for access
 		let other = other.pin();
 		// Check if the readset is not empty
@@ -47,24 +47,24 @@ impl Commit {
 				// Check if any key in readset exists in the writeset
 				for key in other.iter() {
 					if self.writeset.contains_key(key) {
-						return false;
+						return Some(key.clone());
 					}
 				}
 			} else {
 				// Check if any key in writeset exists in the readset
 				for key in self.writeset.keys() {
 					if other.contains(key) {
-						return false;
+						return Some(key.clone());
 					}
 				}
 			}
 		}
 		// No overlap was found
-		true
+		None
 	}
 
-	/// Returns true if self has no elements in common with other
-	pub fn is_disjoint_writeset(&self, other: &Arc<Commit>) -> bool {
+	/// Returns the first conflicting key, or None if disjoint
+	pub fn is_disjoint_writeset(&self, other: &Arc<Commit>) -> Option<Bytes> {
 		// Create a key iterator for each writeset
 		let mut a = self.writeset.keys();
 		let mut b = other.writeset.keys();
@@ -76,10 +76,10 @@ impl Commit {
 			match ka.cmp(kb) {
 				std::cmp::Ordering::Less => next_a = a.next(),
 				std::cmp::Ordering::Greater => next_b = b.next(),
-				std::cmp::Ordering::Equal => return false,
+				std::cmp::Ordering::Equal => return Some(ka.clone()),
 			}
 		}
 		// No overlap was found
-		true
+		None
 	}
 }

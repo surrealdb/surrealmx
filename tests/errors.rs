@@ -327,7 +327,7 @@ fn write_conflict_error() {
 	// Second should fail with write conflict
 	let result = tx2.commit();
 	assert!(
-		matches!(result, Err(Error::KeyWriteConflict)),
+		matches!(result, Err(Error::KeyWriteConflict(_))),
 		"concurrent write to same key should conflict"
 	);
 }
@@ -355,7 +355,7 @@ fn read_conflict_error_ssi() {
 	tx1.set("other", "data").unwrap();
 	let result = tx1.commit();
 
-	assert!(matches!(result, Err(Error::KeyReadConflict)), "SSI should detect read conflict");
+	assert!(matches!(result, Err(Error::KeyReadConflict(_))), "SSI should detect read conflict");
 }
 
 // =============================================================================

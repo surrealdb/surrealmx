@@ -400,7 +400,7 @@ fn main() {
     
     // Second transaction detects conflict and aborts
     match tx2.commit() {
-        Err(Error::KeyReadConflict) => {
+        Err(Error::KeyReadConflict(key)) => {
             // Transaction must be retried
             println!("Transaction aborted due to read conflict, retrying...");
         }

@@ -16,6 +16,7 @@
 
 use bincode::error::DecodeError as BincodeDecodeError;
 use bincode::error::EncodeError as BincodeEncodeError;
+use bytes::Bytes;
 use std::io::Error as IoError;
 use std::sync::PoisonError;
 use thiserror::Error;
@@ -40,12 +41,12 @@ pub enum Error {
 	ValNotExpectedValue,
 
 	/// A read conflict, retry the transaction.
-	#[error("Read conflict, retry the transaction")]
-	KeyReadConflict,
+	#[error("Read conflict on key '{0:?}', retry the transaction")]
+	KeyReadConflict(Bytes),
 
 	/// A write conflict, retry the transaction.
-	#[error("Write conflict, retry the transaction")]
-	KeyWriteConflict,
+	#[error("Write conflict on key '{0:?}', retry the transaction")]
+	KeyWriteConflict(Bytes),
 
 	/// Can not fetch value at a future version.
 	#[error("Can not fetch value at a future version")]
