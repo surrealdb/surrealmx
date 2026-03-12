@@ -24,6 +24,7 @@ use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::versions::Versions;
+use crate::LOG_TARGET_CONFLICTS;
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
@@ -34,6 +35,7 @@ use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tracing::debug;
 
 /// The isolation level of a database transaction
 #[derive(PartialEq, PartialOrd)]
@@ -808,7 +810,7 @@ impl TransactionInner {
 			// Retrieve all transactions committed since we began
 			for tx in self.database.transaction_commit_queue.range(self.commit + 1..version) {
 				// Check if a previous transaction conflicts against writes
-				if let Some(key) = tx.value().is_disjoint_writeset(&entry) {
+				if !tx.value().is_disjoint_writeset(&entry) {
 					// Remove the transaction from the commit queue
 					self.database.transaction_commit_queue.remove(&version);
 					// Clear the transaction state
@@ -818,12 +820,12 @@ impl TransactionInner {
 					// Clear savepoint stack
 					self.savepoint_stack.clear();
 					// Return the error for this transaction
-					return Err(Error::KeyWriteConflict(key));
+					return Err(Error::KeyWriteConflict);
 				}
 				// Check if we should check for conflicting read keys
 				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 					// Check if a previous transaction conflicts against reads
-					if let Some(key) = tx.value().is_disjoint_readset(&self.readset) {
+					if !tx.value().is_disjoint_readset(&self.readset) {
 						// Remove the transaction from the commit queue
 						self.database.transaction_commit_queue.remove(&version);
 						// Clear the transaction state
@@ -833,7 +835,7 @@ impl TransactionInner {
 						// Clear savepoint stack
 						self.savepoint_stack.clear();
 						// Return the error for this transaction
-						return Err(Error::KeyReadConflict(key));
+						return Err(Error::KeyReadConflict);
 					}
 					// A previous transaction has conflicts against scans
 					for k in tx.value().writeset.keys() {
@@ -849,8 +851,11 @@ impl TransactionInner {
 								self.writeset.clear();
 								// Clear savepoint stack
 								self.savepoint_stack.clear();
+								// Log the error for debug purposes
+								#[cfg(debug_assertions)]
+								debug!(target: LOG_TARGET_CONFLICTS, "KeyReadConflict involving {:?}", k);
 								// Return the error for this transaction
-								return Err(Error::KeyReadConflict(k.clone()));
+								return Err(Error::KeyReadConflict);
 							}
 						}
 					}
@@ -3704,7 +3709,7 @@ mod tests {
 		// Commit should detect the SCAN conflict (tx2 wrote to a key tx1 scanned)
 		let result = tx1.commit();
 		assert!(
-			matches!(result, Err(Error::KeyReadConflict(_))),
+			matches!(result, Err(Error::KeyReadConflict)),
 			"Should detect scan conflict even with savepoint, got: {:?}",
 			result
 		);
@@ -3762,7 +3767,7 @@ mod tests {
 		// Should still detect conflict from the preserved scan
 		let result = tx.commit();
 		assert!(
-			matches!(result, Err(Error::KeyReadConflict(_))),
+			matches!(result, Err(Error::KeyReadConflict)),
 			"Should detect conflict from scan before savepoint, got: {:?}",
 			result
 		);
