@@ -21,6 +21,7 @@ use crate::queue::{Commit, Merge};
 use crate::versions::Versions;
 use crate::DatabaseOptions;
 use bytes::Bytes;
+use crossbeam_queue::SegQueue;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -62,6 +63,8 @@ pub struct Inner {
 	/// Stores a handle to the current garbage collection background thread
 	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) garbage_collection_handle: RwLock<Option<JoinHandle<()>>>,
+	/// Keys with stale versions pending incremental garbage collection
+	pub(crate) gc_dirty_keys: SegQueue<Bytes>,
 	/// Threshold after which transaction state is reset
 	pub(crate) reset_threshold: usize,
 }
@@ -87,6 +90,7 @@ impl Inner {
 			transaction_cleanup_handle: RwLock::new(None),
 			#[cfg(not(target_arch = "wasm32"))]
 			garbage_collection_handle: RwLock::new(None),
+			gc_dirty_keys: SegQueue::new(),
 			reset_threshold: opts.reset_threshold,
 		}
 	}

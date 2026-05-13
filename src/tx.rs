@@ -938,6 +938,10 @@ impl TransactionInner {
 						version,
 						value,
 					});
+					// If stale versions remain, mark this key for background GC
+					if len > 1 {
+						self.database.gc_dirty_keys.push(key.clone());
+					}
 				}
 			} else {
 				self.database.datastore.insert(

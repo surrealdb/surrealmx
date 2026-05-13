@@ -213,12 +213,14 @@ impl Database {
 
 	/// Manually perform garbage collection of stale record versions.
 	///
-	/// This function performs a full datastore scan to clean up old versions
-	/// across all keys. Note that inline garbage collection happens
-	/// automatically during transaction commits, but only for keys being
-	/// modified. This function is useful for cleaning up stale versions on
-	/// keys that haven't been recently modified, or when automatic background
-	/// GC is disabled via [`DatabaseOptions::enable_gc`].
+	/// This function first processes keys that are known to have stale
+	/// versions (tracked during transaction commits), then performs a full
+	/// datastore scan to clean up any remaining old versions. Note that
+	/// inline garbage collection happens automatically during transaction
+	/// commits, but only for keys being modified. This function is useful
+	/// for cleaning up stale versions on keys that haven't been recently
+	/// modified, or when automatic background GC is disabled via
+	/// [`DatabaseOptions::enable_gc`].
 	pub fn run_gc(&self) {
 		// Get the current time in nanoseconds
 		let now = self.oracle.current_time_ns();
@@ -231,11 +233,55 @@ impl Database {
 		// Use the earlier of history cutoff or earliest transaction to protect active
 		// transactions
 		let cleanup_ts = history_cutoff.min(earliest_tx);
-		// Iterate over the entire tree
+		// First, process keys known to have stale versions
+		self.run_gc_dirty_inner(cleanup_ts);
+		// Then perform a full datastore scan for any remaining stale versions
+		self.run_gc_full(cleanup_ts);
+	}
+
+	/// Process only dirty keys that are known to have stale versions.
+	///
+	/// This is a lightweight alternative to a full datastore scan, useful
+	/// for frequent incremental cleanup between full GC passes.
+	pub fn run_gc_dirty(&self) {
+		// Get the current time in nanoseconds
+		let now = self.oracle.current_time_ns();
+		// Get the garbage collection epoch as nanoseconds
+		let history = self.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
+		// Calculate the history cutoff (current time - history duration)
+		let history_cutoff = now.saturating_sub(history as u64);
+		// Get the earliest active transaction version
+		let earliest_tx = self.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(now);
+		// Use the earlier of history cutoff or earliest transaction to protect active
+		// transactions
+		let cleanup_ts = history_cutoff.min(earliest_tx);
+		// Process dirty keys
+		self.run_gc_dirty_inner(cleanup_ts);
+	}
+
+	fn run_gc_dirty_inner(&self, cleanup_ts: u64) {
+		// Drain all keys from the dirty queue
+		while let Some(key) = self.gc_dirty_keys.pop() {
+			// Check if this key still exists in the datastore
+			if let Some(entry) = self.datastore.get(&key) {
+				// Get a mutable reference to the versions list
+				let mut versions = entry.value().write();
+				// Clean up unnecessary older versions
+				if versions.gc_older_versions(cleanup_ts) == 0 {
+					// Drop the version reference
+					drop(versions);
+					// Remove the entry from the datastore
+					self.datastore.remove(&key);
+				}
+			}
+		}
+	}
+
+	fn run_gc_full(&self, cleanup_ts: u64) {
+		// Iterate over the entire datastore
 		for entry in self.datastore.iter() {
-			// Fetch the entry value
+			// Get a mutable reference to the versions list
 			let versions = entry.value();
-			// Modify the version entries
 			let mut versions = versions.write();
 			// Clean up unnecessary older versions
 			if versions.gc_older_versions(cleanup_ts) == 0 {
@@ -333,8 +379,11 @@ impl Database {
 		if db.garbage_collection_handle.read().is_none() {
 			// Get the specified interval
 			let interval = self.gc_interval;
+			// Full scan runs every 4th wake cycle; dirty-key pass runs every cycle
+			const FULL_SCAN_FREQUENCY: u64 = 4;
 			// Spawn a new thread to handle periodic garbage collection
 			let handle = std::thread::spawn(move || {
+				let mut cycle: u64 = 0;
 				// Check whether the garbage collection process is enabled
 				while db.background_threads_enabled.load(Ordering::Relaxed) {
 					// Wait for a specified time interval
@@ -354,18 +403,36 @@ impl Database {
 					// Use the earlier of history cutoff or earliest transaction to protect active
 					// transactions
 					let cleanup_ts = history_cutoff.min(earliest_tx);
-					// Iterate over the entire tree
-					for entry in db.datastore.iter() {
-						// Fetch the entry value
-						let versions = entry.value();
-						// Modify the version entries
-						let mut versions = versions.write();
-						// Clean up unnecessary older versions
-						if versions.gc_older_versions(cleanup_ts) == 0 {
-							// Drop the version reference
-							drop(versions);
-							// Remove the entry from the datastore
-							db.datastore.remove(entry.key());
+					// Drain all keys from the dirty queue (incremental GC)
+					while let Some(key) = db.gc_dirty_keys.pop() {
+						// Check if this key still exists in the datastore
+						if let Some(entry) = db.datastore.get(&key) {
+							// Get a mutable reference to the versions list
+							let mut versions = entry.value().write();
+							// Clean up unnecessary older versions
+							if versions.gc_older_versions(cleanup_ts) == 0 {
+								// Drop the version reference
+								drop(versions);
+								// Remove the entry from the datastore
+								db.datastore.remove(&key);
+							}
+						}
+					}
+					// Periodically do a full datastore scan
+					cycle += 1;
+					if cycle.is_multiple_of(FULL_SCAN_FREQUENCY) {
+						// Iterate over the entire datastore
+						for entry in db.datastore.iter() {
+							// Get a mutable reference to the versions list
+							let versions = entry.value();
+							let mut versions = versions.write();
+							// Clean up unnecessary older versions
+							if versions.gc_older_versions(cleanup_ts) == 0 {
+								// Drop the version reference
+								drop(versions);
+								// Remove the entry from the datastore
+								db.datastore.remove(entry.key());
+							}
 						}
 					}
 				}
