@@ -378,6 +378,70 @@ impl Transaction {
 	}
 
 	// --------------------------------------------------
+	// Callback and buffer-based scan API
+	// --------------------------------------------------
+
+	/// Call a closure for each key-value pair in a range, avoiding intermediate
+	/// Vec allocation. Return `false` from the closure to stop iteration early.
+	pub fn scan_for_each<K, F>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		f: F,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+		F: FnMut(&Bytes, &Bytes) -> bool,
+	{
+		self.inner.as_ref().unwrap().scan_for_each(rng, skip, limit, f)
+	}
+
+	/// Call a closure for each key in a range, avoiding intermediate Vec
+	/// allocation. Return `false` from the closure to stop iteration early.
+	pub fn keys_for_each<K, F>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		f: F,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+		F: FnMut(&Bytes) -> bool,
+	{
+		self.inner.as_ref().unwrap().keys_for_each(rng, skip, limit, f)
+	}
+
+	/// Scan key-value pairs into a caller-provided Vec, reusing its capacity.
+	pub fn scan_into<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		buf: &mut Vec<(Bytes, Bytes)>,
+	) -> Result<(), Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().scan_into(rng, skip, limit, buf)
+	}
+
+	/// Scan keys into a caller-provided Vec, reusing its capacity.
+	pub fn keys_into<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		buf: &mut Vec<Bytes>,
+	) -> Result<(), Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_ref().unwrap().keys_into(rng, skip, limit, buf)
+	}
+
+	// --------------------------------------------------
 	// Cursor and Iterator API
 	// --------------------------------------------------
 
@@ -862,8 +926,9 @@ impl TransactionInner {
 						// Return the error for this transaction
 						return Err(Error::KeyReadConflict);
 					}
-					// Check if the committed transaction's key range overlaps any scan range
+					// Check if the committed writeset may overlap any scan range
 					let scan_overlap = if let Some(scan_front) = self.scanset.front() {
+						// Get the upper bound of the last scan range
 						if let Some(scan_back) = self.scanset.back() {
 							let scan_max_end = Arc::clone(&scan_back.value().load());
 							tx.value().may_overlap_range(scan_front.key(), &scan_max_end)
@@ -873,30 +938,31 @@ impl TransactionInner {
 					} else {
 						false
 					};
-					// A previous transaction has conflicts against scans
+					// Only iterate writeset keys if ranges may overlap
 					if scan_overlap {
-					for k in tx.value().writeset.keys() {
-						// Check if this key may be within a scan range
-						if let Some(entry) = self.scanset.range::<Bytes, _>(..=k).next_back() {
-							// Check if the range includes this key (load from ArcSwap)
-							if **entry.value().load() > *k {
-								// Remove the transaction from the commit queue
-								self.database.transaction_commit_queue.remove(&version);
-								// Clear the transaction state
-								self.readset.pin().clear();
-								self.readset_bloom.borrow_mut().clear();
-								self.scanset.clear();
-								self.writeset.clear();
-								// Clear savepoint stack
-								self.savepoint_stack.clear();
-								// Log the error for debug purposes
-								#[cfg(debug_assertions)]
-								debug!(target: LOG_TARGET_CONFLICTS, "KeyReadConflict involving {:?}", k);
-								// Return the error for this transaction
-								return Err(Error::KeyReadConflict);
+						// A previous transaction has conflicts against scans
+						for k in tx.value().writeset.keys() {
+							// Check if this key may be within a scan range
+							if let Some(entry) = self.scanset.range::<Bytes, _>(..=k).next_back() {
+								// Check if the range includes this key (load from ArcSwap)
+								if **entry.value().load() > *k {
+									// Remove the transaction from the commit queue
+									self.database.transaction_commit_queue.remove(&version);
+									// Clear the transaction state
+									self.readset.pin().clear();
+									self.readset_bloom.borrow_mut().clear();
+									self.scanset.clear();
+									self.writeset.clear();
+									// Clear savepoint stack
+									self.savepoint_stack.clear();
+									// Log the error for debug purposes
+									#[cfg(debug_assertions)]
+									debug!(target: LOG_TARGET_CONFLICTS, "KeyReadConflict involving {:?}", k);
+									// Return the error for this transaction
+									return Err(Error::KeyReadConflict);
+								}
 							}
 						}
-					}
 					}
 				}
 			}
@@ -1496,6 +1562,286 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		self.scan_all_versions_any(rng, skip, limit, self.version)
+	}
+
+	/// Call a closure for each key-value pair in a range
+	pub fn scan_for_each<K, F>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		mut f: F,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+		F: FnMut(&Bytes, &Bytes) -> bool,
+	{
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Initialise the entry counter
+		let mut count = 0;
+		// Compute the range
+		let beg = &rng.start.into_bytes();
+		let end = &rng.end.into_bytes();
+		// Calculate how many items to skip
+		let skip = skip.unwrap_or_default();
+		// Check whether we should track range scan reads
+		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			self.track_scan_range(beg, end);
+		}
+		// Build combined writeset from merge queue entries only.
+		// Fast path: skip entirely when the merge queue is empty (common case).
+		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> =
+			if self.database.transaction_merge_queue.is_empty() {
+				BTreeMap::new()
+			} else {
+				let mut ws = BTreeMap::new();
+				for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
+					for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
+						ws.entry(k.clone()).or_insert_with(|| v.clone());
+					}
+				}
+				ws
+			};
+		// Create the 3-way merge iterator
+		let iter = MergeIterator::new(
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			combined_writeset,
+			self.writeset.range::<Bytes, _>(beg..end),
+			Direction::Forward,
+			self.version,
+			skip,
+		);
+		// Process entries, calling the closure for each pair
+		for (key, val) in iter {
+			// Only include non-deleted entries
+			if let Some(val) = &val {
+				count += 1;
+				// Call the closure and stop if it returns false
+				if !f(&key, val) {
+					break;
+				}
+				// Check limit
+				if let Some(l) = limit {
+					if count >= l {
+						break;
+					}
+				}
+			}
+		}
+		// Return the number of entries processed
+		Ok(count)
+	}
+
+	/// Call a closure for each key in a range
+	pub fn keys_for_each<K, F>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		mut f: F,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+		F: FnMut(&Bytes) -> bool,
+	{
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Initialise the entry counter
+		let mut count = 0;
+		// Compute the range
+		let beg = &rng.start.into_bytes();
+		let end = &rng.end.into_bytes();
+		// Calculate how many items to skip
+		let skip = skip.unwrap_or_default();
+		// Check whether we should track range scan reads
+		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			self.track_scan_range(beg, end);
+		}
+		// Build combined writeset from merge queue entries only.
+		// Fast path: skip entirely when the merge queue is empty (common case).
+		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> =
+			if self.database.transaction_merge_queue.is_empty() {
+				BTreeMap::new()
+			} else {
+				let mut ws = BTreeMap::new();
+				for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
+					for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
+						ws.entry(k.clone()).or_insert_with(|| v.clone());
+					}
+				}
+				ws
+			};
+		// Create the 3-way merge iterator
+		let mut iter = MergeIterator::new(
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			combined_writeset,
+			self.writeset.range::<Bytes, _>(beg..end),
+			Direction::Forward,
+			self.version,
+			skip,
+		);
+		// Process entries, calling the closure for each key
+		while let Some((key, exists)) = iter.next_key() {
+			if exists {
+				count += 1;
+				// Call the closure and stop if it returns false
+				if !f(&key) {
+					break;
+				}
+				// Check limit
+				if let Some(l) = limit {
+					if count >= l {
+						break;
+					}
+				}
+			}
+		}
+		// Return the number of entries processed
+		Ok(count)
+	}
+
+	/// Scan key-value pairs into a caller-provided Vec
+	pub fn scan_into<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		buf: &mut Vec<(Bytes, Bytes)>,
+	) -> Result<(), Error>
+	where
+		K: IntoBytes,
+	{
+		// Clear the output buffer, reusing its capacity
+		buf.clear();
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Compute the range
+		let beg = &rng.start.into_bytes();
+		let end = &rng.end.into_bytes();
+		// Calculate how many items to skip
+		let skip = skip.unwrap_or_default();
+		// Check whether we should track range scan reads
+		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			self.track_scan_range(beg, end);
+		}
+		// Build combined writeset from merge queue entries only.
+		// Fast path: skip entirely when the merge queue is empty (common case).
+		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> =
+			if self.database.transaction_merge_queue.is_empty() {
+				BTreeMap::new()
+			} else {
+				let mut ws = BTreeMap::new();
+				for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
+					for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
+						ws.entry(k.clone()).or_insert_with(|| v.clone());
+					}
+				}
+				ws
+			};
+		// Create the 3-way merge iterator
+		let iter = MergeIterator::new(
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			combined_writeset,
+			self.writeset.range::<Bytes, _>(beg..end),
+			Direction::Forward,
+			self.version,
+			skip,
+		);
+		// Process entries into the output buffer
+		for (key, val) in iter {
+			// Only include non-deleted entries
+			if let Some(val) = val {
+				buf.push((key, val));
+				// Check limit
+				if let Some(l) = limit {
+					if buf.len() >= l {
+						break;
+					}
+				}
+			}
+		}
+		// Continue
+		Ok(())
+	}
+
+	/// Scan keys into a caller-provided Vec
+	pub fn keys_into<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		buf: &mut Vec<Bytes>,
+	) -> Result<(), Error>
+	where
+		K: IntoBytes,
+	{
+		// Clear the output buffer, reusing its capacity
+		buf.clear();
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Compute the range
+		let beg = &rng.start.into_bytes();
+		let end = &rng.end.into_bytes();
+		// Calculate how many items to skip
+		let skip = skip.unwrap_or_default();
+		// Check whether we should track range scan reads
+		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			self.track_scan_range(beg, end);
+		}
+		// Build combined writeset from merge queue entries only.
+		// Fast path: skip entirely when the merge queue is empty (common case).
+		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> =
+			if self.database.transaction_merge_queue.is_empty() {
+				BTreeMap::new()
+			} else {
+				let mut ws = BTreeMap::new();
+				for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
+					for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
+						ws.entry(k.clone()).or_insert_with(|| v.clone());
+					}
+				}
+				ws
+			};
+		// Create the 3-way merge iterator
+		let mut iter = MergeIterator::new(
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			combined_writeset,
+			self.writeset.range::<Bytes, _>(beg..end),
+			Direction::Forward,
+			self.version,
+			skip,
+		);
+		// Process entries into the output buffer
+		while let Some((key, exists)) = iter.next_key() {
+			if exists {
+				buf.push(key);
+				// Check limit
+				if let Some(l) = limit {
+					if buf.len() >= l {
+						break;
+					}
+				}
+			}
+		}
+		// Continue
+		Ok(())
 	}
 
 	/// Helper to track a scan range in the scanset (optimized to minimize
