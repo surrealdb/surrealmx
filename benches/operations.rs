@@ -14,7 +14,7 @@
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt, SeedableRng};
 use std::hint::black_box;
 use std::sync::Arc;
 use surrealmx::bench_internals::{ReadsetConflictScenario, WritesetConflictScenario};

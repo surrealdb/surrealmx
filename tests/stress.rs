@@ -1,7 +1,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use bytes::Bytes;
-use rand::Rng;
+use rand::RngExt;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
