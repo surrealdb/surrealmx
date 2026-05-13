@@ -42,8 +42,6 @@ pub mod bench_internals;
 pub use bytes::Bytes;
 
 #[doc(inline)]
-pub use self::compression::*;
-#[doc(inline)]
 pub use self::cursor::*;
 #[doc(inline)]
 pub use self::db::*;
@@ -56,6 +54,11 @@ pub use self::kv::*;
 #[doc(inline)]
 pub use self::options::*;
 #[doc(inline)]
-pub use self::persistence::*;
-#[doc(inline)]
 pub use self::tx::*;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(inline)]
+pub use self::compression::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(inline)]
+pub use self::persistence::*;
