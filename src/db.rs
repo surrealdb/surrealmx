@@ -261,17 +261,15 @@ impl Database {
 
 	fn run_gc_dirty_inner(&self, cleanup_ts: u64) {
 		// Drain all keys from the dirty queue
+		let mut iter = self.datastore.raw_iter_mut();
 		while let Some(key) = self.gc_dirty_keys.pop() {
 			// Check if this key still exists in the datastore
-			if let Some(entry) = self.datastore.get(&key) {
-				// Get a mutable reference to the versions list
-				let mut versions = entry.value().write();
+			if iter.seek_exact(&key) {
+				let (_, versions) = iter.next().expect("seek_exact returned true");
 				// Clean up unnecessary older versions
 				if versions.gc_older_versions(cleanup_ts) == 0 {
-					// Drop the version reference
-					drop(versions);
-					// Remove the entry from the datastore
-					self.datastore.remove(&key);
+					// Remove the entry just yielded by next()
+					iter.remove_here();
 				}
 			}
 		}
@@ -279,16 +277,13 @@ impl Database {
 
 	fn run_gc_full(&self, cleanup_ts: u64) {
 		// Iterate over the entire datastore
-		for entry in self.datastore.iter() {
-			// Get a mutable reference to the versions list
-			let versions = entry.value();
-			let mut versions = versions.write();
+		let mut iter = self.datastore.raw_iter_mut();
+		iter.seek_to_first();
+		while let Some((_, versions)) = iter.next() {
 			// Clean up unnecessary older versions
 			if versions.gc_older_versions(cleanup_ts) == 0 {
-				// Drop the version reference
-				drop(versions);
-				// Remove the entry from the datastore
-				self.datastore.remove(entry.key());
+				// Remove the entry just yielded by next()
+				iter.remove_here();
 			}
 		}
 	}
@@ -404,17 +399,18 @@ impl Database {
 					// transactions
 					let cleanup_ts = history_cutoff.min(earliest_tx);
 					// Drain all keys from the dirty queue (incremental GC)
-					while let Some(key) = db.gc_dirty_keys.pop() {
-						// Check if this key still exists in the datastore
-						if let Some(entry) = db.datastore.get(&key) {
-							// Get a mutable reference to the versions list
-							let mut versions = entry.value().write();
-							// Clean up unnecessary older versions
-							if versions.gc_older_versions(cleanup_ts) == 0 {
-								// Drop the version reference
-								drop(versions);
-								// Remove the entry from the datastore
-								db.datastore.remove(&key);
+					{
+						let mut iter = db.datastore.raw_iter_mut();
+						while let Some(key) = db.gc_dirty_keys.pop() {
+							// Check if this key still exists in the datastore
+							if iter.seek_exact(&key) {
+								let (_, versions) =
+									iter.next().expect("seek_exact returned true");
+								// Clean up unnecessary older versions
+								if versions.gc_older_versions(cleanup_ts) == 0 {
+									// Remove the entry just yielded by next()
+									iter.remove_here();
+								}
 							}
 						}
 					}
@@ -422,16 +418,13 @@ impl Database {
 					cycle += 1;
 					if cycle.is_multiple_of(FULL_SCAN_FREQUENCY) {
 						// Iterate over the entire datastore
-						for entry in db.datastore.iter() {
-							// Get a mutable reference to the versions list
-							let versions = entry.value();
-							let mut versions = versions.write();
+						let mut iter = db.datastore.raw_iter_mut();
+						iter.seek_to_first();
+						while let Some((_, versions)) = iter.next() {
 							// Clean up unnecessary older versions
 							if versions.gc_older_versions(cleanup_ts) == 0 {
-								// Drop the version reference
-								drop(versions);
-								// Remove the entry from the datastore
-								db.datastore.remove(entry.key());
+								// Remove the entry just yielded by next()
+								iter.remove_here();
 							}
 						}
 					}

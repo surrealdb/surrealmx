@@ -19,7 +19,7 @@ use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
 use crate::inner::Inner;
-use crate::iter::MergeIterator;
+use crate::iter::{MergeIterator, TreeIterState};
 use crate::kv::IntoBytes;
 use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
@@ -30,7 +30,6 @@ use arc_swap::ArcSwap;
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
-use parking_lot::RwLock;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -980,22 +979,25 @@ impl TransactionInner {
 		let history = version.saturating_sub(history as u64);
 		// Use the earlier of history or earliest transaction
 		let cleanup_ts = history.min(earliest);
-		// Loop over the updates in the writeset
+		// Apply each writeset entry independently. A fresh `raw_iter_mut` is
+		// opened per key so the exclusive leaf guard is scoped to a single
+		// update — this keeps concurrent commits from holding leaf locks
+		// across unrelated keys.
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
-			// Check if this key already exists
-			if let Some(entry) = self.database.datastore.get(key) {
-				// Get a mutable reference to the versions list
-				let mut versions = entry.value().write();
+			// Open an exclusive iterator scoped to this key
+			let mut iter = self.database.datastore.raw_iter_mut();
+			// Check if this key already exists in the tree
+			if iter.seek_exact(key) {
+				// Yield the entry at the cursor to obtain a mutable reference
+				let (_, versions) = iter.next().expect("seek_exact returned true");
 				// Clean up unnecessary older versions
 				let len = versions.gc_older_versions(cleanup_ts);
 				// If no versions remain and the value is none, remove the entry fully
 				if len == 0 && value.is_none() {
-					// Drop the version reference
-					drop(versions);
-					// Remove the entry from the datastore
-					self.database.datastore.remove(key);
+					// Remove the entry just yielded by next()
+					iter.remove_here();
 				}
 				// If a value is set, add the new version entry
 				else {
@@ -1010,12 +1012,13 @@ impl TransactionInner {
 					}
 				}
 			} else {
-				self.database.datastore.insert(
+				// Insert a new entry at the cursor's current position
+				iter.insert_here(
 					key.clone(),
-					RwLock::new(Versions::from(Version {
+					Versions::from(Version {
 						version,
 						value,
-					})),
+					}),
 				);
 			}
 		}
@@ -1636,9 +1639,7 @@ impl TransactionInner {
 		};
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -1738,9 +1739,7 @@ impl TransactionInner {
 		};
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -1835,9 +1834,7 @@ impl TransactionInner {
 		};
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -1929,9 +1926,7 @@ impl TransactionInner {
 		};
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -2058,9 +2053,7 @@ impl TransactionInner {
 		};
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIterState::build(&self.database.datastore, beg, end, direction),
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -2165,9 +2158,7 @@ impl TransactionInner {
 		};
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIterState::build(&self.database.datastore, beg, end, direction),
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -2272,9 +2263,7 @@ impl TransactionInner {
 		};
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIterState::build(&self.database.datastore, beg, end, direction),
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -2343,9 +2332,9 @@ impl TransactionInner {
 			};
 		// Create the 3-way merge iterator to iterate over keys
 		let iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIterState::Forward(
+				self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end)),
+			),
 			combined_writeset,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -2359,9 +2348,10 @@ impl TransactionInner {
 			// Use a BTreeMap to collect and merge versions by version number
 			let mut all_versions: BTreeMap<u64, Option<Bytes>> = BTreeMap::new();
 			// Collect all versions from the datastore
-			if let Some(entry) = self.database.datastore.get(&key) {
-				let versions = entry.value().read();
-				for (ver, val) in versions.all_versions() {
+			let collected: Option<Vec<(u64, Option<Bytes>)>> =
+				self.database.datastore.lookup(&key, |v| v.all_versions());
+			if let Some(versions) = collected {
+				for (ver, val) in versions {
 					if ver <= version {
 						all_versions.insert(ver, val);
 					}
@@ -2540,10 +2530,7 @@ impl TransactionInner {
 			}
 		}
 		// Check the key in the datastore
-		self.database.datastore.get(key).and_then(|e| match e.value().try_read() {
-			Some(guard) => guard.fetch_version(version),
-			None => e.value().read().fetch_version(version),
-		})
+		self.database.datastore.lookup(key, |v| v.fetch_version(version)).flatten()
 	}
 
 	/// Check if a key exists in the datastore only
@@ -2569,12 +2556,8 @@ impl TransactionInner {
 		// Check the key in the datastore
 		self.database
 			.datastore
-			.get(key)
-			.map(|e| match e.value().try_read() {
-				Some(guard) => guard.exists_version(version),
-				None => e.value().read().exists_version(version),
-			})
-			.is_some_and(|v| v)
+			.lookup(key, |v| v.exists_version(version))
+			.unwrap_or(false)
 	}
 
 	/// Check if a key equals a value in the datastore only
@@ -2603,17 +2586,8 @@ impl TransactionInner {
 			}
 		}
 		// Check the key in the datastore
-		match (
-			chk.as_ref(),
-			self.database
-				.datastore
-				.get(key)
-				.and_then(|e| match e.value().try_read() {
-					Some(guard) => guard.fetch_version(version),
-					None => e.value().read().fetch_version(version),
-				})
-				.as_ref(),
-		) {
+		let stored = self.database.datastore.lookup(key, |v| v.fetch_version(version)).flatten();
+		match (chk.as_ref(), stored.as_ref()) {
 			(Some(x), Some(y)) => x.as_slice() == y,
 			(None, None) => true,
 			_ => false,
