@@ -17,6 +17,7 @@
 /// Tracing target for transaction conflict diagnostics
 pub const LOG_TARGET_CONFLICTS: &str = "surrealmx::conflicts";
 
+mod bloom;
 #[cfg(not(target_arch = "wasm32"))]
 mod compression;
 mod cursor;
