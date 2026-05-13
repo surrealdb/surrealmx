@@ -14,6 +14,7 @@
 
 //! This module stores the database transaction logic.
 
+use crate::bloom::BloomFilter;
 use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
@@ -30,6 +31,7 @@ use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
 use parking_lot::RwLock;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::Range;
@@ -546,6 +548,8 @@ pub(crate) struct TransactionInner {
 	pub(crate) version: u64,
 	/// The local set of key reads
 	pub(crate) readset: HashSet<Bytes>,
+	/// Bloom filter over the readset for fast conflict pre-checks
+	pub(crate) readset_bloom: RefCell<BloomFilter>,
 	/// The local set of key scans
 	pub(crate) scanset: SkipMap<Bytes, ArcSwap<Bytes>>,
 	/// The local set of updates and deletes
@@ -603,6 +607,7 @@ impl TransactionInner {
 			commit,
 			version,
 			readset: HashSet::new(),
+			readset_bloom: RefCell::new(BloomFilter::new()),
 			scanset: SkipMap::new(),
 			writeset: BTreeMap::new(),
 			database: db,
@@ -659,6 +664,8 @@ impl TransactionInner {
 		self.scanset.clear();
 		// Clear the transaction readset
 		self.readset.pin().clear();
+		// Clear the readset bloom filter
+		self.readset_bloom.borrow_mut().clear();
 		// Clear or completely reset the allocated writeset
 		match self.writeset.len() > threshold {
 			true => self.writeset = BTreeMap::new(),
@@ -697,6 +704,7 @@ impl TransactionInner {
 		self.done = true;
 		// Clear the transaction state
 		self.readset.pin().clear();
+		self.readset_bloom.borrow_mut().clear();
 		self.scanset.clear();
 		self.writeset.clear();
 		// Clear savepoint stack
@@ -793,6 +801,7 @@ impl TransactionInner {
 			// Clear the transaction state
 			self.scanset.clear();
 			self.readset.pin().clear();
+			self.readset_bloom.borrow_mut().clear();
 			// Clear savepoint stack
 			self.savepoint_stack.clear();
 			// Continue
@@ -800,22 +809,34 @@ impl TransactionInner {
 		}
 		// Take ownership over the local modifications
 		let writeset = Arc::new(std::mem::take(&mut self.writeset));
+		// Build a bloom filter over the writeset keys
+		let mut writeset_bloom = BloomFilter::new();
+		for key in writeset.keys() {
+			writeset_bloom.insert(key);
+		}
+		// Extract the min and max keys from the writeset
+		let min_key = writeset.keys().next().cloned().unwrap_or_default();
+		let max_key = writeset.keys().next_back().cloned().unwrap_or_default();
 		// Insert this transaction into the commit queue
 		let (version, entry) = self.atomic_commit(Commit {
 			writeset: writeset.clone(),
 			id: self.database.transaction_queue_id.fetch_add(1, Ordering::AcqRel) + 1,
+			writeset_bloom,
+			min_key,
+			max_key,
 		});
 		// Check wether we should check reads conflicts on commit
 		if self.mode >= IsolationLevel::SnapshotIsolation {
 			// Retrieve all transactions committed since we began
 			for tx in self.database.transaction_commit_queue.range(self.commit + 1..version) {
 				// Check if a previous transaction conflicts against writes
-				if !tx.value().is_disjoint_writeset(&entry) {
+				if !tx.value().is_disjoint_writeset_bloom(&entry) {
 					// Remove the transaction from the commit queue
 					self.database.transaction_commit_queue.remove(&version);
 					// Clear the transaction state
 					self.scanset.clear();
 					self.readset.pin().clear();
+					self.readset_bloom.borrow_mut().clear();
 					self.writeset.clear();
 					// Clear savepoint stack
 					self.savepoint_stack.clear();
@@ -825,19 +846,35 @@ impl TransactionInner {
 				// Check if we should check for conflicting read keys
 				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 					// Check if a previous transaction conflicts against reads
-					if !tx.value().is_disjoint_readset(&self.readset) {
+					if !tx
+						.value()
+						.is_disjoint_readset_bloom(&self.readset, &self.readset_bloom.borrow())
+					{
 						// Remove the transaction from the commit queue
 						self.database.transaction_commit_queue.remove(&version);
 						// Clear the transaction state
 						self.scanset.clear();
 						self.readset.pin().clear();
+						self.readset_bloom.borrow_mut().clear();
 						self.writeset.clear();
 						// Clear savepoint stack
 						self.savepoint_stack.clear();
 						// Return the error for this transaction
 						return Err(Error::KeyReadConflict);
 					}
+					// Check if the committed transaction's key range overlaps any scan range
+					let scan_overlap = if let Some(scan_front) = self.scanset.front() {
+						if let Some(scan_back) = self.scanset.back() {
+							let scan_max_end = Arc::clone(&scan_back.value().load());
+							tx.value().may_overlap_range(scan_front.key(), &scan_max_end)
+						} else {
+							false
+						}
+					} else {
+						false
+					};
 					// A previous transaction has conflicts against scans
+					if scan_overlap {
 					for k in tx.value().writeset.keys() {
 						// Check if this key may be within a scan range
 						if let Some(entry) = self.scanset.range::<Bytes, _>(..=k).next_back() {
@@ -847,6 +884,7 @@ impl TransactionInner {
 								self.database.transaction_commit_queue.remove(&version);
 								// Clear the transaction state
 								self.readset.pin().clear();
+								self.readset_bloom.borrow_mut().clear();
 								self.scanset.clear();
 								self.writeset.clear();
 								// Clear savepoint stack
@@ -858,6 +896,7 @@ impl TransactionInner {
 								return Err(Error::KeyReadConflict);
 							}
 						}
+					}
 					}
 				}
 			}
@@ -919,6 +958,7 @@ impl TransactionInner {
 				// Clear the transaction state
 				self.scanset.clear();
 				self.readset.pin().clear();
+				self.readset_bloom.borrow_mut().clear();
 				self.writeset.clear();
 				// Clear savepoint stack
 				self.savepoint_stack.clear();
@@ -931,6 +971,7 @@ impl TransactionInner {
 		// Clear the transaction state
 		self.scanset.clear();
 		self.readset.pin().clear();
+		self.readset_bloom.borrow_mut().clear();
 		self.writeset.clear();
 		// Clear savepoint stack
 		self.savepoint_stack.clear();
@@ -961,6 +1002,7 @@ impl TransactionInner {
 					let res = self.exists_in_datastore(lookup, self.version);
 					// Check whether we should track key reads
 					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+						self.readset_bloom.borrow_mut().insert(lookup);
 						self.readset.pin().insert(key.into_bytes());
 					}
 					// Return the result
@@ -1020,6 +1062,7 @@ impl TransactionInner {
 					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 						let guard = self.readset.pin();
 						if !guard.contains(lookup) {
+							self.readset_bloom.borrow_mut().insert(lookup);
 							guard.insert(key.into_bytes());
 						}
 					}
@@ -1085,6 +1128,7 @@ impl TransactionInner {
 							if self.mode >= IsolationLevel::SerializableSnapshotIsolation
 								&& !self.readset.pin().contains(lookup)
 							{
+								self.readset_bloom.borrow_mut().insert(lookup);
 								self.readset.pin().insert(key.into_bytes());
 							}
 							// Return the result
