@@ -35,6 +35,9 @@ mod tx;
 mod version;
 mod versions;
 
+#[doc(hidden)]
+pub mod bench_internals;
+
 #[doc(inline)]
 pub use bytes::Bytes;
 
