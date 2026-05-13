@@ -17,7 +17,7 @@
 /// Tracing target for transaction conflict diagnostics
 pub const LOG_TARGET_CONFLICTS: &str = "surrealmx::conflicts";
 
-#[cfg(not(target_arch = "wasm32"))]
+mod bloom;
 mod compression;
 mod cursor;
 mod db;
@@ -28,7 +28,6 @@ mod iter;
 mod kv;
 mod options;
 mod oracle;
-#[cfg(not(target_arch = "wasm32"))]
 mod persistence;
 mod pool;
 mod queue;
@@ -36,12 +35,12 @@ mod tx;
 mod version;
 mod versions;
 
+#[doc(hidden)]
+pub mod bench_internals;
+
 #[doc(inline)]
 pub use bytes::Bytes;
 
-#[cfg(not(target_arch = "wasm32"))]
-#[doc(inline)]
-pub use self::compression::*;
 #[doc(inline)]
 pub use self::cursor::*;
 #[doc(inline)]
@@ -54,8 +53,12 @@ pub use self::err::*;
 pub use self::kv::*;
 #[doc(inline)]
 pub use self::options::*;
+#[doc(inline)]
+pub use self::tx::*;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(inline)]
+pub use self::compression::*;
 #[cfg(not(target_arch = "wasm32"))]
 #[doc(inline)]
 pub use self::persistence::*;
-#[doc(inline)]
-pub use self::tx::*;

@@ -14,6 +14,8 @@
 
 //! This module stores the compression logic.
 
+#![cfg(not(target_arch = "wasm32"))]
+
 use lz4::{Decoder as Lz4Decoder, EncoderBuilder as Lz4EncoderBuilder};
 use std::io::{self, Read, Write};
 use std::io::{BufRead, BufReader, BufWriter};

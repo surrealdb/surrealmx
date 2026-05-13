@@ -14,6 +14,7 @@
 
 //! This module stores the transaction commit and merge queues.
 
+use crate::bloom::BloomFilter;
 use crate::LOG_TARGET_CONFLICTS;
 use bytes::Bytes;
 use papaya::HashSet;
@@ -27,6 +28,12 @@ pub struct Commit {
 	pub(crate) id: u64,
 	/// The local set of updates and deletes
 	pub(crate) writeset: Arc<BTreeMap<Bytes, Option<Bytes>>>,
+	/// Bloom filter over writeset keys for fast conflict pre-checks
+	pub(crate) writeset_bloom: BloomFilter,
+	/// The smallest key in the writeset (for range overlap checks)
+	pub(crate) min_key: Bytes,
+	/// The largest key in the writeset (for range overlap checks)
+	pub(crate) max_key: Bytes,
 }
 
 /// A transaction entry in the transaction merge queue
@@ -38,6 +45,29 @@ pub struct Merge {
 }
 
 impl Commit {
+	/// Returns true if self has no elements in common with other.
+	/// Uses a bloom filter for a fast pre-check before the exact intersection.
+	pub fn is_disjoint_readset_bloom(&self, other: &HashSet<Bytes>, bloom: &BloomFilter) -> bool {
+		// Fast path: if the bloom filter is empty, there are no reads to conflict with
+		if bloom.is_empty() {
+			return true;
+		}
+		// Check writeset keys against the bloom filter first
+		let mut any_possible = false;
+		for key in self.writeset.keys() {
+			if bloom.may_contain(key) {
+				any_possible = true;
+				break;
+			}
+		}
+		// If no writeset key passes the bloom filter, there is definitely no overlap
+		if !any_possible {
+			return true;
+		}
+		// Fall through to exact check
+		self.is_disjoint_readset(other)
+	}
+
 	/// Returns true if self has no elements in common with other
 	pub fn is_disjoint_readset(&self, other: &HashSet<Bytes>) -> bool {
 		// Pin the readset for access
@@ -69,6 +99,38 @@ impl Commit {
 		}
 		// No overlap was found
 		true
+	}
+
+	/// Returns true if self has no elements in common with other.
+	/// Uses bloom filters and key bounds for fast pre-checks before the
+	/// exact sorted merge.
+	pub fn is_disjoint_writeset_bloom(&self, other: &Arc<Commit>) -> bool {
+		// Fast path: check if the key ranges overlap at all
+		if self.max_key < other.min_key || other.max_key < self.min_key {
+			return true;
+		}
+		// Check our writeset keys against the other's bloom filter
+		let mut any_possible = false;
+		for key in self.writeset.keys() {
+			if other.writeset_bloom.may_contain(key) {
+				any_possible = true;
+				break;
+			}
+		}
+		// If no key passes the bloom filter, there is definitely no overlap
+		if !any_possible {
+			return true;
+		}
+		// Fall through to exact check
+		self.is_disjoint_writeset(other)
+	}
+
+	/// Returns true if this commit's writeset may contain keys within the
+	/// given range. Uses the min/max key bounds for a fast range overlap
+	/// check before iterating writeset keys for scan conflict detection.
+	pub fn may_overlap_range(&self, range_start: &Bytes, range_end: &Bytes) -> bool {
+		// Check if the writeset key range overlaps the scan range
+		self.min_key < *range_end && self.max_key >= *range_start
 	}
 
 	/// Returns true if self has no elements in common with other

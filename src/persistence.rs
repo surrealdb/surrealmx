@@ -14,6 +14,8 @@
 
 //! This module stores the database persistence logic.
 
+#![cfg(not(target_arch = "wasm32"))]
+
 use crate::compression::CompressedReader;
 use crate::compression::CompressedWriter;
 use crate::compression::CompressionMode;

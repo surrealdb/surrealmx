@@ -17,6 +17,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::hint::black_box;
 use std::sync::Arc;
+use surrealmx::bench_internals::{ReadsetConflictScenario, WritesetConflictScenario};
 use surrealmx::{Database, DatabaseOptions};
 
 const SEED: u64 = 42;
@@ -831,6 +832,503 @@ fn bench_database_options(c: &mut Criterion) {
 	group.finish();
 }
 
+// Callback-based scan benchmarks (scan_for_each vs scan)
+fn bench_scan_for_each(c: &mut Criterion) {
+	let mut group = c.benchmark_group("scan_for_each_vs_vec");
+
+	for entry_count in [1000, 10_000, 100_000].iter() {
+		let db = setup_database_with_sequential_data(*entry_count, 100);
+		let mut seen_limits = std::collections::HashSet::new();
+
+		for scan_limit in [100, 1000, 10_000].iter() {
+			let limit = std::cmp::min(*scan_limit, *entry_count);
+			if !seen_limits.insert(limit) {
+				continue;
+			}
+			let id = format!("{}entries_limit{}", entry_count, limit);
+
+			group.throughput(Throughput::Elements(limit as u64));
+
+			group.bench_with_input(BenchmarkId::new("scan_vec", &id), &limit, |b, &limit| {
+				b.iter(|| {
+					let mut tx = db.transaction(false);
+					let start_key = b"".to_vec();
+					let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
+					let result = tx.scan(start_key..end_key, None, Some(limit)).unwrap();
+					black_box(result);
+					tx.cancel().unwrap();
+				})
+			});
+
+			group.bench_with_input(BenchmarkId::new("scan_for_each", &id), &limit, |b, &limit| {
+				b.iter(|| {
+					let tx = db.transaction(false);
+					let start_key = b"".to_vec();
+					let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
+					let mut count = 0usize;
+					tx.scan_for_each(start_key..end_key, None, Some(limit), |k, v| {
+						black_box((k, v));
+						count += 1;
+						true
+					})
+					.unwrap();
+					black_box(count);
+				})
+			});
+
+			group.bench_with_input(
+				BenchmarkId::new("scan_into_reuse", &id),
+				&limit,
+				|b, &limit| {
+					let mut buf = Vec::with_capacity(limit);
+					b.iter(|| {
+						let tx = db.transaction(false);
+						let start_key = b"".to_vec();
+						let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
+						tx.scan_into(start_key..end_key, None, Some(limit), &mut buf).unwrap();
+						black_box(buf.len());
+					})
+				},
+			);
+		}
+	}
+	group.finish();
+}
+
+// Keys callback benchmarks
+fn bench_keys_for_each(c: &mut Criterion) {
+	let mut group = c.benchmark_group("keys_for_each_vs_vec");
+
+	for entry_count in [1000, 10_000, 100_000].iter() {
+		let db = setup_database_with_sequential_data(*entry_count, 100);
+		let mut seen_limits = std::collections::HashSet::new();
+
+		for scan_limit in [100, 1000, 10_000].iter() {
+			let limit = std::cmp::min(*scan_limit, *entry_count);
+			if !seen_limits.insert(limit) {
+				continue;
+			}
+			let id = format!("{}entries_limit{}", entry_count, limit);
+
+			group.throughput(Throughput::Elements(limit as u64));
+
+			group.bench_with_input(BenchmarkId::new("keys_vec", &id), &limit, |b, &limit| {
+				b.iter(|| {
+					let mut tx = db.transaction(false);
+					let start_key = b"".to_vec();
+					let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
+					let result = tx.keys(start_key..end_key, None, Some(limit)).unwrap();
+					black_box(result);
+					tx.cancel().unwrap();
+				})
+			});
+
+			group.bench_with_input(BenchmarkId::new("keys_for_each", &id), &limit, |b, &limit| {
+				b.iter(|| {
+					let tx = db.transaction(false);
+					let start_key = b"".to_vec();
+					let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
+					let mut count = 0usize;
+					tx.keys_for_each(start_key..end_key, None, Some(limit), |k| {
+						black_box(k);
+						count += 1;
+						true
+					})
+					.unwrap();
+					black_box(count);
+				})
+			});
+
+			group.bench_with_input(
+				BenchmarkId::new("keys_into_reuse", &id),
+				&limit,
+				|b, &limit| {
+					let mut buf = Vec::with_capacity(limit);
+					b.iter(|| {
+						let tx = db.transaction(false);
+						let start_key = b"".to_vec();
+						let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
+						tx.keys_into(start_key..end_key, None, Some(limit), &mut buf).unwrap();
+						black_box(buf.len());
+					})
+				},
+			);
+		}
+	}
+	group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// GC benchmarks: incremental dirty-key GC vs full scan
+// ---------------------------------------------------------------------------
+
+// Sparse dirty keys: large datastore, only a small number of keys updated.
+// Dirty-key GC should be much faster than a full scan because it only visits
+// the keys that were modified, while the full scan iterates the entire
+// datastore.
+fn bench_gc_sparse_dirty(c: &mut Criterion) {
+	let mut group = c.benchmark_group("gc_sparse_dirty");
+	// Fixed number of dirty keys
+	let dirty_count = 100;
+
+	for total_keys in [1_000, 10_000, 100_000].iter() {
+		// Setup helper: create datastore, then overwrite a small subset
+		let setup = || {
+			let db =
+				Database::new_with_options(DatabaseOptions::default().with_all_workers_disabled());
+			// Insert initial data
+			{
+				let mut tx = db.transaction(true);
+				for i in 0..*total_keys {
+					let key = generate_sequential_key(i);
+					let value = generate_sequential_value(i, 100);
+					tx.put(key, value).unwrap();
+				}
+				tx.commit().unwrap();
+			}
+			// Overwrite a small fixed number of keys to create stale versions
+			{
+				let mut tx = db.transaction(true);
+				for i in 0..dirty_count {
+					let key = generate_sequential_key(i);
+					let value = Bytes::from(format!("updated_{:08}", i).into_bytes());
+					tx.set(key, value).unwrap();
+				}
+				tx.commit().unwrap();
+			}
+			db
+		};
+
+		// Dirty-key GC: should stay roughly constant regardless of total keys
+		group.bench_function(
+			BenchmarkId::new("dirty_gc", format!("{}total_{}dirty", total_keys, dirty_count)),
+			|b| {
+				b.iter_batched(
+					setup,
+					|db| {
+						db.run_gc_dirty();
+					},
+					criterion::BatchSize::LargeInput,
+				)
+			},
+		);
+
+		// Full-scan GC: should grow linearly with total keys
+		group.bench_function(
+			BenchmarkId::new("full_gc", format!("{}total_{}dirty", total_keys, dirty_count)),
+			|b| {
+				b.iter_batched(
+					setup,
+					|db| {
+						db.run_gc();
+					},
+					criterion::BatchSize::LargeInput,
+				)
+			},
+		);
+	}
+	group.finish();
+}
+
+// Scaling with dirty ratio: fixed datastore size, varying the fraction of
+// keys that have been updated. Dirty-key GC should scale proportionally to
+// the number of dirty keys, while full scan stays constant.
+fn bench_gc_dirty_ratio(c: &mut Criterion) {
+	let mut group = c.benchmark_group("gc_dirty_ratio");
+	// Fixed datastore size
+	let total_keys = 10_000;
+
+	for dirty_pct in [1, 10, 50].iter() {
+		let dirty_count = total_keys * dirty_pct / 100;
+
+		// Setup helper
+		let setup = || {
+			let db =
+				Database::new_with_options(DatabaseOptions::default().with_all_workers_disabled());
+			// Insert initial data
+			{
+				let mut tx = db.transaction(true);
+				for i in 0..total_keys {
+					let key = generate_sequential_key(i);
+					let value = generate_sequential_value(i, 100);
+					tx.put(key, value).unwrap();
+				}
+				tx.commit().unwrap();
+			}
+			// Overwrite a percentage of keys
+			{
+				let mut tx = db.transaction(true);
+				for i in 0..dirty_count {
+					let key = generate_sequential_key(i);
+					let value = Bytes::from(format!("updated_{:08}", i).into_bytes());
+					tx.set(key, value).unwrap();
+				}
+				tx.commit().unwrap();
+			}
+			db
+		};
+
+		// Dirty-key GC
+		group.bench_function(
+			BenchmarkId::new("dirty_gc", format!("{}pct_dirty", dirty_pct)),
+			|b| {
+				b.iter_batched(
+					setup,
+					|db| {
+						db.run_gc_dirty();
+					},
+					criterion::BatchSize::LargeInput,
+				)
+			},
+		);
+
+		// Full-scan GC
+		group.bench_function(BenchmarkId::new("full_gc", format!("{}pct_dirty", dirty_pct)), |b| {
+			b.iter_batched(
+				setup,
+				|db| {
+					db.run_gc();
+				},
+				criterion::BatchSize::LargeInput,
+			)
+		});
+	}
+	group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Bloom filter impact: direct with-bloom vs without-bloom comparison
+// ---------------------------------------------------------------------------
+
+// Readset conflict detection: bloom filter vs exact HashSet intersection.
+// Isolates just the conflict check cost with disjoint keys (no conflict).
+fn bench_readset_bloom_impact(c: &mut Criterion) {
+	let mut group = c.benchmark_group("readset_bloom_impact");
+
+	for readset_size in [100, 1_000, 10_000].iter() {
+		// Committed transaction wrote 10 keys in the high range
+		let writeset_keys: Vec<Bytes> = (90_000..90_010).map(generate_sequential_key).collect();
+		// Current transaction read keys in the low range (no overlap)
+		let readset_keys: Vec<Bytes> = (0..*readset_size).map(generate_sequential_key).collect();
+		// Build the scenario once
+		let scenario = ReadsetConflictScenario::new(&writeset_keys, &readset_keys);
+
+		// With bloom filter pre-check
+		group.bench_function(
+			BenchmarkId::new("with_bloom", format!("{}reads", readset_size)),
+			|b| {
+				b.iter(|| {
+					black_box(scenario.check_with_bloom());
+				})
+			},
+		);
+
+		// Without bloom filter (exact HashSet intersection)
+		group.bench_function(
+			BenchmarkId::new("without_bloom", format!("{}reads", readset_size)),
+			|b| {
+				b.iter(|| {
+					black_box(scenario.check_without_bloom());
+				})
+			},
+		);
+	}
+	group.finish();
+}
+
+// Readset conflict detection with actual conflict present.
+// The bloom filter says "maybe" and falls through to the exact check.
+fn bench_readset_bloom_conflict_path(c: &mut Criterion) {
+	let mut group = c.benchmark_group("readset_bloom_conflict_path");
+
+	for readset_size in [100, 1_000, 10_000].iter() {
+		// Committed transaction wrote 10 keys that overlap the readset
+		let writeset_keys: Vec<Bytes> = (0..10).map(generate_sequential_key).collect();
+		// Current transaction read keys 0..readset_size (overlap on 0..10)
+		let readset_keys: Vec<Bytes> = (0..*readset_size).map(generate_sequential_key).collect();
+		// Build the scenario once
+		let scenario = ReadsetConflictScenario::new(&writeset_keys, &readset_keys);
+
+		// With bloom (bloom says "maybe", falls through)
+		group.bench_function(
+			BenchmarkId::new("with_bloom", format!("{}reads", readset_size)),
+			|b| {
+				b.iter(|| {
+					black_box(scenario.check_with_bloom());
+				})
+			},
+		);
+
+		// Without bloom (exact check directly)
+		group.bench_function(
+			BenchmarkId::new("without_bloom", format!("{}reads", readset_size)),
+			|b| {
+				b.iter(|| {
+					black_box(scenario.check_without_bloom());
+				})
+			},
+		);
+	}
+	group.finish();
+}
+
+// Writeset conflict detection: bloom + min/max vs sorted merge.
+// Isolates just the conflict check cost with disjoint keys (no conflict).
+fn bench_writeset_bloom_impact(c: &mut Criterion) {
+	let mut group = c.benchmark_group("writeset_bloom_impact");
+
+	for writeset_size in [10, 100, 1_000].iter() {
+		// Committed transaction wrote keys in the high range
+		let committed_keys: Vec<Bytes> =
+			(90_000..(90_000 + *writeset_size)).map(generate_sequential_key).collect();
+		// Current transaction wrote keys in the low range (no overlap)
+		let current_keys: Vec<Bytes> = (0..*writeset_size).map(generate_sequential_key).collect();
+		// Build the scenario once
+		let scenario = WritesetConflictScenario::new(&committed_keys, &current_keys);
+
+		// With bloom filter + min/max pre-check
+		group.bench_function(
+			BenchmarkId::new("with_bloom", format!("{}writes", writeset_size)),
+			|b| {
+				b.iter(|| {
+					black_box(scenario.check_with_bloom());
+				})
+			},
+		);
+
+		// Without bloom (sorted merge only)
+		group.bench_function(
+			BenchmarkId::new("without_bloom", format!("{}writes", writeset_size)),
+			|b| {
+				b.iter(|| {
+					black_box(scenario.check_without_bloom());
+				})
+			},
+		);
+	}
+	group.finish();
+}
+
+// Writeset conflict detection with actual conflict present.
+fn bench_writeset_bloom_conflict_path(c: &mut Criterion) {
+	let mut group = c.benchmark_group("writeset_bloom_conflict_path");
+
+	for writeset_size in [10, 100, 1_000].iter() {
+		// Both write to overlapping ranges
+		let committed_keys: Vec<Bytes> = (0..10).map(generate_sequential_key).collect();
+		let current_keys: Vec<Bytes> = (0..*writeset_size).map(generate_sequential_key).collect();
+		// Build the scenario once
+		let scenario = WritesetConflictScenario::new(&committed_keys, &current_keys);
+
+		// With bloom (bloom says "maybe", falls through to sorted merge)
+		group.bench_function(
+			BenchmarkId::new("with_bloom", format!("{}writes", writeset_size)),
+			|b| {
+				b.iter(|| {
+					black_box(scenario.check_with_bloom());
+				})
+			},
+		);
+
+		// Without bloom (sorted merge only)
+		group.bench_function(
+			BenchmarkId::new("without_bloom", format!("{}writes", writeset_size)),
+			|b| {
+				b.iter(|| {
+					black_box(scenario.check_without_bloom());
+				})
+			},
+		);
+	}
+	group.finish();
+}
+
+// Concurrent SSI throughput: N threads each reading and writing disjoint
+// key ranges, all under SSI. The bloom filter speeds up the conflict-check
+// loop over the commit queue because each thread's writeset is disjoint
+// from every other thread's readset.
+fn bench_bloom_concurrent_throughput(c: &mut Criterion) {
+	let mut group = c.benchmark_group("bloom_concurrent_throughput");
+	// Use a reasonable thread count
+	let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+	let thread_counts = [2, 4, cpu_cores.min(8)];
+
+	for &thread_count in thread_counts.iter() {
+		// Each thread gets a disjoint key range of 1000 keys
+		let keys_per_thread = 1000;
+		let total_keys = thread_count * keys_per_thread;
+		let db = Arc::new(setup_database_with_sequential_data(total_keys, 64));
+
+		// SSI mode
+		group.throughput(Throughput::Elements(thread_count as u64));
+		group.bench_function(BenchmarkId::new("ssi", format!("{}threads", thread_count)), |b| {
+			b.iter(|| {
+				let handles: Vec<_> = (0..thread_count)
+					.map(|t| {
+						let db = Arc::clone(&db);
+						std::thread::spawn(move || {
+							let range_start = t * keys_per_thread;
+							let mut tx =
+								db.transaction(true).with_serializable_snapshot_isolation();
+							// Read 100 keys in our range
+							for i in range_start..(range_start + 100) {
+								tx.get(generate_sequential_key(i)).unwrap();
+							}
+							// Write 10 keys in our range
+							for i in range_start..(range_start + 10) {
+								tx.set(
+									generate_sequential_key(i),
+									Bytes::from("updated".as_bytes().to_vec()),
+								)
+								.unwrap();
+							}
+							tx.commit().unwrap();
+						})
+					})
+					.collect();
+				for h in handles {
+					h.join().unwrap();
+				}
+			})
+		});
+
+		// SI baseline for comparison
+		group.bench_function(
+			BenchmarkId::new("si_baseline", format!("{}threads", thread_count)),
+			|b| {
+				b.iter(|| {
+					let handles: Vec<_> = (0..thread_count)
+						.map(|t| {
+							let db = Arc::clone(&db);
+							std::thread::spawn(move || {
+								let range_start = t * keys_per_thread;
+								let mut tx = db.transaction(true).with_snapshot_isolation();
+								// Read 100 keys in our range
+								for i in range_start..(range_start + 100) {
+									tx.get(generate_sequential_key(i)).unwrap();
+								}
+								// Write 10 keys in our range
+								for i in range_start..(range_start + 10) {
+									tx.set(
+										generate_sequential_key(i),
+										Bytes::from("updated".as_bytes().to_vec()),
+									)
+									.unwrap();
+								}
+								tx.commit().unwrap();
+							})
+						})
+						.collect();
+					for h in handles {
+						h.join().unwrap();
+					}
+				})
+			},
+		);
+	}
+	group.finish();
+}
+
 criterion_group!(
 	database_benchmarks,
 	bench_transaction_creation,
@@ -860,9 +1358,23 @@ criterion_group!(
 
 criterion_group!(configuration_benchmarks, bench_database_options);
 
+criterion_group!(
+	optimization_benchmarks,
+	bench_scan_for_each,
+	bench_keys_for_each,
+	bench_gc_sparse_dirty,
+	bench_gc_dirty_ratio,
+	bench_readset_bloom_impact,
+	bench_readset_bloom_conflict_path,
+	bench_writeset_bloom_impact,
+	bench_writeset_bloom_conflict_path,
+	bench_bloom_concurrent_throughput
+);
+
 criterion_main!(
 	database_benchmarks,
 	scan_benchmarks,
 	concurrent_benchmarks,
-	configuration_benchmarks
+	configuration_benchmarks,
+	optimization_benchmarks
 );
