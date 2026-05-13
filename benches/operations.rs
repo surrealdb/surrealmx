@@ -1107,11 +1107,9 @@ fn bench_readset_bloom_impact(c: &mut Criterion) {
 
 	for readset_size in [100, 1_000, 10_000].iter() {
 		// Committed transaction wrote 10 keys in the high range
-		let writeset_keys: Vec<Bytes> =
-			(90_000..90_010).map(generate_sequential_key).collect();
+		let writeset_keys: Vec<Bytes> = (90_000..90_010).map(generate_sequential_key).collect();
 		// Current transaction read keys in the low range (no overlap)
-		let readset_keys: Vec<Bytes> =
-			(0..*readset_size).map(generate_sequential_key).collect();
+		let readset_keys: Vec<Bytes> = (0..*readset_size).map(generate_sequential_key).collect();
 		// Build the scenario once
 		let scenario = ReadsetConflictScenario::new(&writeset_keys, &readset_keys);
 
@@ -1147,8 +1145,7 @@ fn bench_readset_bloom_conflict_path(c: &mut Criterion) {
 		// Committed transaction wrote 10 keys that overlap the readset
 		let writeset_keys: Vec<Bytes> = (0..10).map(generate_sequential_key).collect();
 		// Current transaction read keys 0..readset_size (overlap on 0..10)
-		let readset_keys: Vec<Bytes> =
-			(0..*readset_size).map(generate_sequential_key).collect();
+		let readset_keys: Vec<Bytes> = (0..*readset_size).map(generate_sequential_key).collect();
 		// Build the scenario once
 		let scenario = ReadsetConflictScenario::new(&writeset_keys, &readset_keys);
 
@@ -1185,8 +1182,7 @@ fn bench_writeset_bloom_impact(c: &mut Criterion) {
 		let committed_keys: Vec<Bytes> =
 			(90_000..(90_000 + *writeset_size)).map(generate_sequential_key).collect();
 		// Current transaction wrote keys in the low range (no overlap)
-		let current_keys: Vec<Bytes> =
-			(0..*writeset_size).map(generate_sequential_key).collect();
+		let current_keys: Vec<Bytes> = (0..*writeset_size).map(generate_sequential_key).collect();
 		// Build the scenario once
 		let scenario = WritesetConflictScenario::new(&committed_keys, &current_keys);
 
@@ -1220,8 +1216,7 @@ fn bench_writeset_bloom_conflict_path(c: &mut Criterion) {
 	for writeset_size in [10, 100, 1_000].iter() {
 		// Both write to overlapping ranges
 		let committed_keys: Vec<Bytes> = (0..10).map(generate_sequential_key).collect();
-		let current_keys: Vec<Bytes> =
-			(0..*writeset_size).map(generate_sequential_key).collect();
+		let current_keys: Vec<Bytes> = (0..*writeset_size).map(generate_sequential_key).collect();
 		// Build the scenario once
 		let scenario = WritesetConflictScenario::new(&committed_keys, &current_keys);
 
