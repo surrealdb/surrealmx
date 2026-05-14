@@ -56,10 +56,13 @@ impl<'a> TreeIterState<'a> {
 	}
 }
 
-/// Cached entry from the tree iterator: (key, exists_at_version, value_at_version).
-/// We resolve the version once per advance to avoid repeated peek() lookups
-/// and locks while merging across sources.
-type CachedTreeEntry = Option<(Bytes, bool, Option<Bytes>)>;
+/// Cached entry from the tree iterator: (key, exists_at_version).
+/// Only the key and existence flag are precomputed — the value at the current
+/// version is fetched lazily at emit time, while the tree iterator is still
+/// parked at this entry (so `peek()` still returns it). This avoids cloning a
+/// value byte slice for entries that get skipped or that the caller only needs
+/// existence for (`next_count`, `next_key`).
+type CachedTreeEntry = Option<(Bytes, bool)>;
 
 /// Three-way merge iterator over tree, merge queue, and current transaction
 /// writesets.
@@ -134,24 +137,34 @@ impl<'a> MergeIterator<'a> {
 		me
 	}
 
-	/// Peek at the next tree entry and resolve its value at the current MVCC
-	/// version, caching the key/exists/value triple to avoid repeated work.
+	/// Peek at the next tree entry and cache its key + existence at the
+	/// current MVCC version. Value resolution is deferred to `peek_tree_value`
+	/// so paths that only need keys or counts don't pay the byte clone.
 	#[inline]
 	fn fetch_tree_entry(tree_iter: &mut TreeIterState<'_>, version: u64) -> CachedTreeEntry {
-		// `Versions::fetch_version` returns `Some` iff the resolved version
-		// is a non-tombstone, which is exactly the predicate `exists_version`
-		// would compute, so we derive existence directly from the value.
 		match tree_iter {
-			TreeIterState::Forward(range) => range.peek().map(|(k, v)| {
-				let value = v.fetch_version(version);
-				let exists = value.is_some();
-				(k.clone(), exists, value)
-			}),
-			TreeIterState::Reverse(range) => range.peek().map(|(k, v)| {
-				let value = v.fetch_version(version);
-				let exists = value.is_some();
-				(k.clone(), exists, value)
-			}),
+			TreeIterState::Forward(range) => {
+				range.peek().map(|(k, v)| (k.clone(), v.exists_version(version)))
+			}
+			TreeIterState::Reverse(range) => {
+				range.peek().map(|(k, v)| (k.clone(), v.exists_version(version)))
+			}
+		}
+	}
+
+	/// Fetch the value at the current MVCC version for the entry that the
+	/// tree iterator is currently parked on. Call this in `Iterator::next`
+	/// right before advancing past the entry.
+	#[inline]
+	fn peek_tree_value(&mut self) -> Option<Bytes> {
+		let version = self.version;
+		match &mut self.tree_iter {
+			TreeIterState::Forward(range) => {
+				range.peek().and_then(|(_, v)| v.fetch_version(version))
+			}
+			TreeIterState::Reverse(range) => {
+				range.peek().and_then(|(_, v)| v.fetch_version(version))
+			}
 		}
 	}
 
@@ -186,12 +199,12 @@ impl<'a> MergeIterator<'a> {
 
 	#[inline]
 	fn tree_key(&self) -> Option<&Bytes> {
-		self.tree_next.as_ref().map(|(k, _, _)| k)
+		self.tree_next.as_ref().map(|(k, _)| k)
 	}
 
 	#[inline]
 	fn tree_exists(&self) -> bool {
-		self.tree_next.as_ref().map(|(_, e, _)| *e).unwrap_or(false)
+		self.tree_next.as_ref().map(|(_, e)| *e).unwrap_or(false)
 	}
 
 	/// Decide which source has the next key to process. Pure inspection,
@@ -348,7 +361,7 @@ impl<'a> MergeIterator<'a> {
 						continue;
 					}
 
-					let key = self.tree_next.as_ref().map(|(k, _, _)| k.clone()).unwrap();
+					let key = self.tree_next.as_ref().map(|(k, _)| k.clone()).unwrap();
 					self.advance_tree();
 					return Some((key, exists));
 				}
@@ -419,8 +432,14 @@ impl<'a> Iterator for MergeIterator<'a> {
 						continue;
 					}
 
-					let (key, value) =
-						self.tree_next.as_ref().map(|(k, _, v)| (k.clone(), v.clone())).unwrap();
+					// Resolve the value lazily while the tree iter is still
+					// parked on this entry, then clone the key and advance.
+					let value = if exists {
+						self.peek_tree_value()
+					} else {
+						None
+					};
+					let key = self.tree_next.as_ref().map(|(k, _)| k.clone()).unwrap();
 					self.advance_tree();
 					return Some((key, value));
 				}
