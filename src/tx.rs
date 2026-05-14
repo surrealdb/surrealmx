@@ -1595,28 +1595,19 @@ impl TransactionInner {
 			self.track_scan_range(beg, end);
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the datastore directly.
+		// range — walk the tree range directly.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			for entry in datastore_range {
-				let value = match entry.value().try_read() {
-					Some(g) => g.fetch_version(self.version),
-					None => entry.value().read().fetch_version(self.version),
-				};
-				let Some(value) = value else {
-					continue;
-				};
+			let mut range = self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end));
+			while let Some((k, v)) = range.next() {
+				let Some(value) = v.fetch_version(self.version) else { continue };
 				if skip > 0 {
 					skip -= 1;
 					continue;
 				}
 				count += 1;
-				if !f(entry.key(), &value) {
+				if !f(k, &value) {
 					break;
 				}
 				if let Some(l) = limit {
@@ -1695,20 +1686,13 @@ impl TransactionInner {
 			self.track_scan_range(beg, end);
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the datastore directly.
+		// range — walk the tree range directly.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			for entry in datastore_range {
-				let exists = match entry.value().try_read() {
-					Some(g) => g.exists_version(self.version),
-					None => entry.value().read().exists_version(self.version),
-				};
-				if !exists {
+			let mut range = self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end));
+			while let Some((k, v)) = range.next() {
+				if !v.exists_version(self.version) {
 					continue;
 				}
 				if skip > 0 {
@@ -1716,7 +1700,7 @@ impl TransactionInner {
 					continue;
 				}
 				count += 1;
-				if !f(entry.key()) {
+				if !f(k) {
 					break;
 				}
 				if let Some(l) = limit {
@@ -1793,27 +1777,18 @@ impl TransactionInner {
 			self.track_scan_range(beg, end);
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the datastore directly into the buffer.
+		// range — walk the tree range directly into the buffer.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			for entry in datastore_range {
-				let value = match entry.value().try_read() {
-					Some(g) => g.fetch_version(self.version),
-					None => entry.value().read().fetch_version(self.version),
-				};
-				let Some(value) = value else {
-					continue;
-				};
+			let mut range = self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end));
+			while let Some((k, v)) = range.next() {
+				let Some(value) = v.fetch_version(self.version) else { continue };
 				if skip > 0 {
 					skip -= 1;
 					continue;
 				}
-				buf.push((entry.key().clone(), value));
+				buf.push((k.clone(), value));
 				if let Some(l) = limit {
 					if buf.len() >= l {
 						break;
@@ -1885,27 +1860,20 @@ impl TransactionInner {
 			self.track_scan_range(beg, end);
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the datastore directly into the buffer.
+		// range — walk the tree range directly into the buffer.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			for entry in datastore_range {
-				let exists = match entry.value().try_read() {
-					Some(g) => g.exists_version(self.version),
-					None => entry.value().read().exists_version(self.version),
-				};
-				if !exists {
+			let mut range = self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end));
+			while let Some((k, v)) = range.next() {
+				if !v.exists_version(self.version) {
 					continue;
 				}
 				if skip > 0 {
 					skip -= 1;
 					continue;
 				}
-				buf.push(entry.key().clone());
+				buf.push(k.clone());
 				if let Some(l) = limit {
 					if buf.len() >= l {
 						break;
