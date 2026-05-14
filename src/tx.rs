@@ -1586,25 +1586,52 @@ impl TransactionInner {
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
 		// Calculate how many items to skip
-		let skip = skip.unwrap_or_default();
+		let mut skip = skip.unwrap_or_default();
 		// Check whether we should track range scan reads
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.track_scan_range(beg, end);
 		}
-		// Build combined writeset from merge queue entries only.
-		// Fast path: skip entirely when the merge queue is empty (common case).
-		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> =
-			if self.database.transaction_merge_queue.is_empty() {
-				BTreeMap::new()
-			} else {
-				let mut ws = BTreeMap::new();
-				for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
-					for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
-						ws.entry(k.clone()).or_insert_with(|| v.clone());
+		// Fast path: no merge queue entries and no transaction writes in this
+		// range — walk the datastore directly.
+		if self.database.transaction_merge_queue.is_empty()
+			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
+		{
+			let datastore_range = self
+				.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			for entry in datastore_range {
+				let value = match entry.value().try_read() {
+					Some(g) => g.fetch_version(self.version),
+					None => entry.value().read().fetch_version(self.version),
+				};
+				let Some(value) = value else { continue };
+				if skip > 0 {
+					skip -= 1;
+					continue;
+				}
+				count += 1;
+				if !f(entry.key(), &value) {
+					break;
+				}
+				if let Some(l) = limit {
+					if count >= l {
+						break;
 					}
 				}
-				ws
-			};
+			}
+			return Ok(count);
+		}
+		// Build combined writeset from merge queue entries only.
+		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> = {
+			let mut ws = BTreeMap::new();
+			for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
+				for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
+					ws.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+			ws
+		};
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
 			self.database
@@ -1659,25 +1686,54 @@ impl TransactionInner {
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
 		// Calculate how many items to skip
-		let skip = skip.unwrap_or_default();
+		let mut skip = skip.unwrap_or_default();
 		// Check whether we should track range scan reads
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.track_scan_range(beg, end);
 		}
-		// Build combined writeset from merge queue entries only.
-		// Fast path: skip entirely when the merge queue is empty (common case).
-		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> =
-			if self.database.transaction_merge_queue.is_empty() {
-				BTreeMap::new()
-			} else {
-				let mut ws = BTreeMap::new();
-				for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
-					for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
-						ws.entry(k.clone()).or_insert_with(|| v.clone());
+		// Fast path: no merge queue entries and no transaction writes in this
+		// range — walk the datastore directly.
+		if self.database.transaction_merge_queue.is_empty()
+			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
+		{
+			let datastore_range = self
+				.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			for entry in datastore_range {
+				let exists = match entry.value().try_read() {
+					Some(g) => g.exists_version(self.version),
+					None => entry.value().read().exists_version(self.version),
+				};
+				if !exists {
+					continue;
+				}
+				if skip > 0 {
+					skip -= 1;
+					continue;
+				}
+				count += 1;
+				if !f(entry.key()) {
+					break;
+				}
+				if let Some(l) = limit {
+					if count >= l {
+						break;
 					}
 				}
-				ws
-			};
+			}
+			return Ok(count);
+		}
+		// Build combined writeset from merge queue entries only.
+		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> = {
+			let mut ws = BTreeMap::new();
+			for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
+				for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
+					ws.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+			ws
+		};
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database
@@ -1730,25 +1786,49 @@ impl TransactionInner {
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
 		// Calculate how many items to skip
-		let skip = skip.unwrap_or_default();
+		let mut skip = skip.unwrap_or_default();
 		// Check whether we should track range scan reads
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.track_scan_range(beg, end);
 		}
-		// Build combined writeset from merge queue entries only.
-		// Fast path: skip entirely when the merge queue is empty (common case).
-		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> =
-			if self.database.transaction_merge_queue.is_empty() {
-				BTreeMap::new()
-			} else {
-				let mut ws = BTreeMap::new();
-				for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
-					for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
-						ws.entry(k.clone()).or_insert_with(|| v.clone());
+		// Fast path: no merge queue entries and no transaction writes in this
+		// range — walk the datastore directly into the buffer.
+		if self.database.transaction_merge_queue.is_empty()
+			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
+		{
+			let datastore_range = self
+				.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			for entry in datastore_range {
+				let value = match entry.value().try_read() {
+					Some(g) => g.fetch_version(self.version),
+					None => entry.value().read().fetch_version(self.version),
+				};
+				let Some(value) = value else { continue };
+				if skip > 0 {
+					skip -= 1;
+					continue;
+				}
+				buf.push((entry.key().clone(), value));
+				if let Some(l) = limit {
+					if buf.len() >= l {
+						break;
 					}
 				}
-				ws
-			};
+			}
+			return Ok(());
+		}
+		// Build combined writeset from merge queue entries only.
+		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> = {
+			let mut ws = BTreeMap::new();
+			for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
+				for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
+					ws.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+			ws
+		};
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
 			self.database
@@ -1798,25 +1878,51 @@ impl TransactionInner {
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
 		// Calculate how many items to skip
-		let skip = skip.unwrap_or_default();
+		let mut skip = skip.unwrap_or_default();
 		// Check whether we should track range scan reads
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.track_scan_range(beg, end);
 		}
-		// Build combined writeset from merge queue entries only.
-		// Fast path: skip entirely when the merge queue is empty (common case).
-		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> =
-			if self.database.transaction_merge_queue.is_empty() {
-				BTreeMap::new()
-			} else {
-				let mut ws = BTreeMap::new();
-				for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
-					for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
-						ws.entry(k.clone()).or_insert_with(|| v.clone());
+		// Fast path: no merge queue entries and no transaction writes in this
+		// range — walk the datastore directly into the buffer.
+		if self.database.transaction_merge_queue.is_empty()
+			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
+		{
+			let datastore_range = self
+				.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			for entry in datastore_range {
+				let exists = match entry.value().try_read() {
+					Some(g) => g.exists_version(self.version),
+					None => entry.value().read().exists_version(self.version),
+				};
+				if !exists {
+					continue;
+				}
+				if skip > 0 {
+					skip -= 1;
+					continue;
+				}
+				buf.push(entry.key().clone());
+				if let Some(l) = limit {
+					if buf.len() >= l {
+						break;
 					}
 				}
-				ws
-			};
+			}
+			return Ok(());
+		}
+		// Build combined writeset from merge queue entries only.
+		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> = {
+			let mut ws = BTreeMap::new();
+			for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
+				for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
+					ws.entry(k.clone()).or_insert_with(|| v.clone());
+				}
+			}
+			ws
+		};
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database
