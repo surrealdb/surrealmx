@@ -1605,7 +1605,9 @@ impl TransactionInner {
 					Some(g) => g.fetch_version(self.version),
 					None => entry.value().read().fetch_version(self.version),
 				};
-				let Some(value) = value else { continue };
+				let Some(value) = value else {
+					continue;
+				};
 				if skip > 0 {
 					skip -= 1;
 					continue;
@@ -1805,7 +1807,9 @@ impl TransactionInner {
 					Some(g) => g.fetch_version(self.version),
 					None => entry.value().read().fetch_version(self.version),
 				};
-				let Some(value) = value else { continue };
+				let Some(value) = value else {
+					continue;
+				};
 				if skip > 0 {
 					skip -= 1;
 					continue;
@@ -2234,7 +2238,9 @@ impl TransactionInner {
 							Some(g) => g.fetch_version(version),
 							None => entry.value().read().fetch_version(version),
 						};
-						let Some(value) = value else { continue };
+						let Some(value) = value else {
+							continue;
+						};
 						if skip > 0 {
 							skip -= 1;
 							continue;
