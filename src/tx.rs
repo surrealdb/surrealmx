@@ -2002,24 +2002,16 @@ impl TransactionInner {
 				self.track_scan_range(beg, end);
 			}
 		}
-		// Fast path: when there are no in-flight committed transactions and no
-		// uncommitted writes in this range, the merge iterator has nothing to
-		// merge — read straight from the datastore range.
+		// Fast path: no merge queue entries and no transaction writes in this
+		// range — walk the tree range directly.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
 			macro_rules! consume_fast_path {
-				($iter:expr) => {
-					for entry in $iter {
-						let exists = match entry.value().try_read() {
-							Some(g) => g.exists_version(version),
-							None => entry.value().read().exists_version(version),
-						};
-						if !exists {
+				($iter:expr) => {{
+					let mut range = $iter;
+					while let Some((_, v)) = range.next() {
+						if !v.exists_version(version) {
 							continue;
 						}
 						if skip > 0 {
@@ -2033,11 +2025,20 @@ impl TransactionInner {
 							}
 						}
 					}
-				};
+				}};
 			}
 			match direction {
-				Direction::Forward => consume_fast_path!(datastore_range),
-				Direction::Reverse => consume_fast_path!(datastore_range.rev()),
+				Direction::Forward => {
+					consume_fast_path!(
+						self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end))
+					)
+				}
+				Direction::Reverse => {
+					consume_fast_path!(self
+						.database
+						.datastore
+						.range_rev(Bound::Included(beg), Bound::Excluded(end)))
+				}
 			}
 			return Ok(res);
 		}
@@ -2109,40 +2110,42 @@ impl TransactionInner {
 			}
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — read keys straight from the datastore range.
+		// range — walk the tree range directly.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
 			macro_rules! consume_fast_path {
-				($iter:expr) => {
-					for entry in $iter {
-						let exists = match entry.value().try_read() {
-							Some(g) => g.exists_version(version),
-							None => entry.value().read().exists_version(version),
-						};
-						if !exists {
+				($iter:expr) => {{
+					let mut range = $iter;
+					while let Some((k, v)) = range.next() {
+						if !v.exists_version(version) {
 							continue;
 						}
 						if skip > 0 {
 							skip -= 1;
 							continue;
 						}
-						res.push(entry.key().clone());
+						res.push(k.clone());
 						if let Some(l) = limit {
 							if res.len() >= l {
 								break;
 							}
 						}
 					}
-				};
+				}};
 			}
 			match direction {
-				Direction::Forward => consume_fast_path!(datastore_range),
-				Direction::Reverse => consume_fast_path!(datastore_range.rev()),
+				Direction::Forward => {
+					consume_fast_path!(
+						self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end))
+					)
+				}
+				Direction::Reverse => {
+					consume_fast_path!(self
+						.database
+						.datastore
+						.range_rev(Bound::Included(beg), Bound::Excluded(end)))
+				}
 			}
 			return Ok(res);
 		}
@@ -2214,40 +2217,40 @@ impl TransactionInner {
 			}
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — read key/value pairs straight from the datastore range.
+		// range — walk the tree range directly.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
 			macro_rules! consume_fast_path {
-				($iter:expr) => {
-					for entry in $iter {
-						let value = match entry.value().try_read() {
-							Some(g) => g.fetch_version(version),
-							None => entry.value().read().fetch_version(version),
-						};
-						let Some(value) = value else {
-							continue;
-						};
+				($iter:expr) => {{
+					let mut range = $iter;
+					while let Some((k, v)) = range.next() {
+						let Some(value) = v.fetch_version(version) else { continue };
 						if skip > 0 {
 							skip -= 1;
 							continue;
 						}
-						res.push((entry.key().clone(), value));
+						res.push((k.clone(), value));
 						if let Some(l) = limit {
 							if res.len() >= l {
 								break;
 							}
 						}
 					}
-				};
+				}};
 			}
 			match direction {
-				Direction::Forward => consume_fast_path!(datastore_range),
-				Direction::Reverse => consume_fast_path!(datastore_range.rev()),
+				Direction::Forward => {
+					consume_fast_path!(
+						self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end))
+					)
+				}
+				Direction::Reverse => {
+					consume_fast_path!(self
+						.database
+						.datastore
+						.range_rev(Bound::Included(beg), Bound::Excluded(end)))
+				}
 			}
 			return Ok(res);
 		}
