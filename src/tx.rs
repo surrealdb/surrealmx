@@ -2247,7 +2247,9 @@ impl TransactionInner {
 						.datastore
 						.range_rev(Bound::Included(beg), Bound::Excluded(end));
 					while let Some((k, v)) = range.next() {
-						let Some(value) = v.fetch_version(version) else { continue };
+						let Some(value) = v.fetch_version(version) else {
+							continue;
+						};
 						if skip > 0 {
 							skip -= 1;
 							continue;
@@ -2566,10 +2568,7 @@ impl TransactionInner {
 			}
 		}
 		// Check the key in the datastore
-		self.database
-			.datastore
-			.lookup(key, |v| v.exists_version(version))
-			.unwrap_or(false)
+		self.database.datastore.lookup(key, |v| v.exists_version(version)).unwrap_or(false)
 	}
 
 	/// Check if a key equals a value in the datastore only

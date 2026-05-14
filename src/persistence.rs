@@ -444,8 +444,7 @@ impl Persistence {
 							// Update existing key, or insert a new one
 							let mut iter = self.inner.datastore.raw_iter_mut();
 							if iter.seek_exact(&k) {
-								let (_, versions) =
-									iter.next().expect("seek_exact returned true");
+								let (_, versions) = iter.next().expect("seek_exact returned true");
 								versions.push(Version {
 									version,
 									value: val,

@@ -67,12 +67,8 @@ impl<'a> TreeIterState<'a> {
 /// regular `next()` path, so one entry per leaf boundary pays the normal
 /// iterator-advance cost.
 #[inline]
-pub(crate) fn for_each_in_range<F>(
-	tree: &Tree<Bytes, Versions>,
-	beg: &Bytes,
-	end: &Bytes,
-	mut f: F,
-) where
+pub(crate) fn for_each_in_range<F>(tree: &Tree<Bytes, Versions>, beg: &Bytes, end: &Bytes, mut f: F)
+where
 	F: FnMut(&Bytes, &Versions) -> ControlFlow<()>,
 {
 	let mut iter = tree.raw_iter();
@@ -96,7 +92,9 @@ pub(crate) fn for_each_in_range<F>(
 		}
 		// Advance into the next leaf. `next()` yields its first entry, which
 		// would otherwise be skipped by `for_each_in_leaf`'s cursor handling.
-		let Some((k, v)) = iter.next() else { break };
+		let Some((k, v)) = iter.next() else {
+			break;
+		};
 		if k >= end {
 			break;
 		}
@@ -324,8 +322,7 @@ impl<'a> MergeIterator<'a> {
 				}
 				KeySource::Committed => {
 					let exists = self.join_next.as_ref().unwrap().1.is_some();
-					let skip_tree =
-						self.tree_key() == self.join_next.as_ref().map(|(jk, _)| jk);
+					let skip_tree = self.tree_key() == self.join_next.as_ref().map(|(jk, _)| jk);
 
 					self.advance_join();
 					if skip_tree {

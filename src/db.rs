@@ -404,8 +404,7 @@ impl Database {
 						while let Some(key) = db.gc_dirty_keys.pop() {
 							// Check if this key still exists in the datastore
 							if iter.seek_exact(&key) {
-								let (_, versions) =
-									iter.next().expect("seek_exact returned true");
+								let (_, versions) = iter.next().expect("seek_exact returned true");
 								// Clean up unnecessary older versions
 								if versions.gc_older_versions(cleanup_ts) == 0 {
 									// Remove the entry just yielded by next()
