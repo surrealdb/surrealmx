@@ -19,7 +19,7 @@ use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
 use crate::inner::Inner;
-use crate::iter::{MergeIterator, TreeIterState};
+use crate::iter::{for_each_in_range, MergeIterator, TreeIterState};
 use crate::kv::IntoBytes;
 use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
@@ -33,6 +33,7 @@ use papaya::HashSet;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::Bound;
+use std::ops::ControlFlow;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1595,27 +1596,30 @@ impl TransactionInner {
 			self.track_scan_range(beg, end);
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly.
+		// range — walk the tree range directly via bulk leaf iteration.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let mut range = self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end));
-			while let Some((k, v)) = range.next() {
-				let Some(value) = v.fetch_version(self.version) else { continue };
+			let version = self.version;
+			for_each_in_range(&self.database.datastore, beg, end, |k, v| {
+				let Some(value) = v.fetch_version(version) else {
+					return ControlFlow::Continue(());
+				};
 				if skip > 0 {
 					skip -= 1;
-					continue;
+					return ControlFlow::Continue(());
 				}
 				count += 1;
 				if !f(k, &value) {
-					break;
+					return ControlFlow::Break(());
 				}
 				if let Some(l) = limit {
 					if count >= l {
-						break;
+						return ControlFlow::Break(());
 					}
 				}
-			}
+				ControlFlow::Continue(())
+			});
 			return Ok(count);
 		}
 		// Build combined writeset from merge queue entries only.
@@ -1686,29 +1690,30 @@ impl TransactionInner {
 			self.track_scan_range(beg, end);
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly.
+		// range — walk the tree range directly via bulk leaf iteration.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let mut range = self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end));
-			while let Some((k, v)) = range.next() {
-				if !v.exists_version(self.version) {
-					continue;
+			let version = self.version;
+			for_each_in_range(&self.database.datastore, beg, end, |k, v| {
+				if !v.exists_version(version) {
+					return ControlFlow::Continue(());
 				}
 				if skip > 0 {
 					skip -= 1;
-					continue;
+					return ControlFlow::Continue(());
 				}
 				count += 1;
 				if !f(k) {
-					break;
+					return ControlFlow::Break(());
 				}
 				if let Some(l) = limit {
 					if count >= l {
-						break;
+						return ControlFlow::Break(());
 					}
 				}
-			}
+				ControlFlow::Continue(())
+			});
 			return Ok(count);
 		}
 		// Build combined writeset from merge queue entries only.
@@ -1777,24 +1782,28 @@ impl TransactionInner {
 			self.track_scan_range(beg, end);
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly into the buffer.
+		// range — walk the tree range directly into the buffer via bulk leaf
+		// iteration.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let mut range = self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end));
-			while let Some((k, v)) = range.next() {
-				let Some(value) = v.fetch_version(self.version) else { continue };
+			let version = self.version;
+			for_each_in_range(&self.database.datastore, beg, end, |k, v| {
+				let Some(value) = v.fetch_version(version) else {
+					return ControlFlow::Continue(());
+				};
 				if skip > 0 {
 					skip -= 1;
-					continue;
+					return ControlFlow::Continue(());
 				}
 				buf.push((k.clone(), value));
 				if let Some(l) = limit {
 					if buf.len() >= l {
-						break;
+						return ControlFlow::Break(());
 					}
 				}
-			}
+				ControlFlow::Continue(())
+			});
 			return Ok(());
 		}
 		// Build combined writeset from merge queue entries only.
@@ -1860,26 +1869,28 @@ impl TransactionInner {
 			self.track_scan_range(beg, end);
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly into the buffer.
+		// range — walk the tree range directly into the buffer via bulk leaf
+		// iteration.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let mut range = self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end));
-			while let Some((k, v)) = range.next() {
-				if !v.exists_version(self.version) {
-					continue;
+			let version = self.version;
+			for_each_in_range(&self.database.datastore, beg, end, |k, v| {
+				if !v.exists_version(version) {
+					return ControlFlow::Continue(());
 				}
 				if skip > 0 {
 					skip -= 1;
-					continue;
+					return ControlFlow::Continue(());
 				}
 				buf.push(k.clone());
 				if let Some(l) = limit {
 					if buf.len() >= l {
-						break;
+						return ControlFlow::Break(());
 					}
 				}
-			}
+				ControlFlow::Continue(())
+			});
 			return Ok(());
 		}
 		// Build combined writeset from merge queue entries only.
@@ -1971,13 +1982,38 @@ impl TransactionInner {
 			}
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly.
+		// range — walk the tree range directly. Forward direction uses
+		// `for_each_in_range`, which processes a whole B+tree leaf in one
+		// tight loop via ferntree's `for_each_in_leaf`. Reverse direction
+		// keeps the entry-at-a-time `RangeRev` iterator since ferntree only
+		// exposes bulk leaf processing in forward order.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			macro_rules! consume_fast_path {
-				($iter:expr) => {{
-					let mut range = $iter;
+			match direction {
+				Direction::Forward => {
+					for_each_in_range(&self.database.datastore, beg, end, |_, v| {
+						if !v.exists_version(version) {
+							return ControlFlow::Continue(());
+						}
+						if skip > 0 {
+							skip -= 1;
+							return ControlFlow::Continue(());
+						}
+						res += 1;
+						if let Some(l) = limit {
+							if res >= l {
+								return ControlFlow::Break(());
+							}
+						}
+						ControlFlow::Continue(())
+					});
+				}
+				Direction::Reverse => {
+					let mut range = self
+						.database
+						.datastore
+						.range_rev(Bound::Included(beg), Bound::Excluded(end));
 					while let Some((_, v)) = range.next() {
 						if !v.exists_version(version) {
 							continue;
@@ -1993,19 +2029,6 @@ impl TransactionInner {
 							}
 						}
 					}
-				}};
-			}
-			match direction {
-				Direction::Forward => {
-					consume_fast_path!(
-						self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end))
-					)
-				}
-				Direction::Reverse => {
-					consume_fast_path!(self
-						.database
-						.datastore
-						.range_rev(Bound::Included(beg), Bound::Excluded(end)))
 				}
 			}
 			return Ok(res);
@@ -2078,13 +2101,35 @@ impl TransactionInner {
 			}
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly.
+		// range — walk the tree range directly. Forward uses ferntree's bulk
+		// leaf iteration via `for_each_in_range`; reverse stays on `RangeRev`.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			macro_rules! consume_fast_path {
-				($iter:expr) => {{
-					let mut range = $iter;
+			match direction {
+				Direction::Forward => {
+					for_each_in_range(&self.database.datastore, beg, end, |k, v| {
+						if !v.exists_version(version) {
+							return ControlFlow::Continue(());
+						}
+						if skip > 0 {
+							skip -= 1;
+							return ControlFlow::Continue(());
+						}
+						res.push(k.clone());
+						if let Some(l) = limit {
+							if res.len() >= l {
+								return ControlFlow::Break(());
+							}
+						}
+						ControlFlow::Continue(())
+					});
+				}
+				Direction::Reverse => {
+					let mut range = self
+						.database
+						.datastore
+						.range_rev(Bound::Included(beg), Bound::Excluded(end));
 					while let Some((k, v)) = range.next() {
 						if !v.exists_version(version) {
 							continue;
@@ -2100,19 +2145,6 @@ impl TransactionInner {
 							}
 						}
 					}
-				}};
-			}
-			match direction {
-				Direction::Forward => {
-					consume_fast_path!(
-						self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end))
-					)
-				}
-				Direction::Reverse => {
-					consume_fast_path!(self
-						.database
-						.datastore
-						.range_rev(Bound::Included(beg), Bound::Excluded(end)))
 				}
 			}
 			return Ok(res);
@@ -2185,13 +2217,35 @@ impl TransactionInner {
 			}
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly.
+		// range — walk the tree range directly. Forward uses ferntree's bulk
+		// leaf iteration via `for_each_in_range`; reverse stays on `RangeRev`.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			macro_rules! consume_fast_path {
-				($iter:expr) => {{
-					let mut range = $iter;
+			match direction {
+				Direction::Forward => {
+					for_each_in_range(&self.database.datastore, beg, end, |k, v| {
+						let Some(value) = v.fetch_version(version) else {
+							return ControlFlow::Continue(());
+						};
+						if skip > 0 {
+							skip -= 1;
+							return ControlFlow::Continue(());
+						}
+						res.push((k.clone(), value));
+						if let Some(l) = limit {
+							if res.len() >= l {
+								return ControlFlow::Break(());
+							}
+						}
+						ControlFlow::Continue(())
+					});
+				}
+				Direction::Reverse => {
+					let mut range = self
+						.database
+						.datastore
+						.range_rev(Bound::Included(beg), Bound::Excluded(end));
 					while let Some((k, v)) = range.next() {
 						let Some(value) = v.fetch_version(version) else { continue };
 						if skip > 0 {
@@ -2205,19 +2259,6 @@ impl TransactionInner {
 							}
 						}
 					}
-				}};
-			}
-			match direction {
-				Direction::Forward => {
-					consume_fast_path!(
-						self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end))
-					)
-				}
-				Direction::Reverse => {
-					consume_fast_path!(self
-						.database
-						.datastore
-						.range_rev(Bound::Included(beg), Bound::Excluded(end)))
 				}
 			}
 			return Ok(res);

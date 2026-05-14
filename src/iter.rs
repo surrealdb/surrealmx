@@ -24,6 +24,7 @@ use std::collections::btree_map::Range as TreeRange;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::ops::Bound;
+use std::ops::ControlFlow;
 
 // Tree fanout used by the surrealmx datastore tree.
 // Kept aliased here so iterator types match the tree configured in `inner.rs`.
@@ -52,6 +53,55 @@ impl<'a> TreeIterState<'a> {
 			Direction::Reverse => {
 				TreeIterState::Reverse(tree.range_rev(Bound::Included(beg), Bound::Excluded(end)))
 			}
+		}
+	}
+}
+
+/// Walk every `(key, versions)` pair in `[beg, end)` in forward order,
+/// dispatching `f` per entry. The closure returns `ControlFlow::Break` to
+/// stop iteration early.
+///
+/// Internally this uses ferntree's `for_each_in_leaf`, which processes a
+/// whole leaf's `SmallVec<(K, V)>` in a tight loop without re-entering the
+/// iterator state machine. The cross-leaf step still goes through the
+/// regular `next()` path, so one entry per leaf boundary pays the normal
+/// iterator-advance cost.
+#[inline]
+pub(crate) fn for_each_in_range<F>(
+	tree: &Tree<Bytes, Versions>,
+	beg: &Bytes,
+	end: &Bytes,
+	mut f: F,
+) where
+	F: FnMut(&Bytes, &Versions) -> ControlFlow<()>,
+{
+	let mut iter = tree.raw_iter();
+	iter.seek(beg);
+	let mut stop = false;
+	loop {
+		let has_more_leaves = iter.for_each_in_leaf(|k, v| {
+			if stop {
+				return;
+			}
+			if k >= end {
+				stop = true;
+				return;
+			}
+			if matches!(f(k, v), ControlFlow::Break(())) {
+				stop = true;
+			}
+		});
+		if stop || !has_more_leaves {
+			break;
+		}
+		// Advance into the next leaf. `next()` yields its first entry, which
+		// would otherwise be skipped by `for_each_in_leaf`'s cursor handling.
+		let Some((k, v)) = iter.next() else { break };
+		if k >= end {
+			break;
+		}
+		if matches!(f(k, v), ControlFlow::Break(())) {
+			break;
 		}
 	}
 }
