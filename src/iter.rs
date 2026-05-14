@@ -138,15 +138,18 @@ impl<'a> MergeIterator<'a> {
 	/// version, caching the key/exists/value triple to avoid repeated work.
 	#[inline]
 	fn fetch_tree_entry(tree_iter: &mut TreeIterState<'_>, version: u64) -> CachedTreeEntry {
+		// `Versions::fetch_version` returns `Some` iff the resolved version
+		// is a non-tombstone, which is exactly the predicate `exists_version`
+		// would compute, so we derive existence directly from the value.
 		match tree_iter {
 			TreeIterState::Forward(range) => range.peek().map(|(k, v)| {
 				let value = v.fetch_version(version);
-				let exists = value.is_some() || v.exists_version(version);
+				let exists = value.is_some();
 				(k.clone(), exists, value)
 			}),
 			TreeIterState::Reverse(range) => range.peek().map(|(k, v)| {
 				let value = v.fetch_version(version);
-				let exists = value.is_some() || v.exists_version(version);
+				let exists = value.is_some();
 				(k.clone(), exists, value)
 			}),
 		}
