@@ -16,7 +16,9 @@
 //! bloom filter pre-checks. Not part of the public API.
 
 use crate::bloom::BloomFilter;
-use crate::queue::Commit;
+use crate::direction::Direction;
+use crate::iter::MergeQueueIter;
+use crate::queue::{Commit, Merge};
 use bytes::Bytes;
 use papaya::HashSet;
 use std::collections::BTreeMap;
@@ -134,5 +136,69 @@ impl WritesetConflictScenario {
 			min_key,
 			max_key,
 		}
+	}
+}
+
+/// A prepared merge-queue scenario for benchmarking the lazy k-way merge.
+/// Holds a vector of `Arc<Merge>` source writesets and the iteration bounds.
+pub struct MergeQueueScenario {
+	sources: Vec<Arc<Merge>>,
+	beg: Bytes,
+	end: Bytes,
+}
+
+impl MergeQueueScenario {
+	/// Build a scenario with `num_sources` writesets, each populated with
+	/// `keys_per_source` keys drawn pseudo-randomly from `0..total_keys` so
+	/// that sources statistically overlap and the merge has to dedup.
+	pub fn new(num_sources: usize, keys_per_source: usize, total_keys: usize) -> Self {
+		let mut sources = Vec::with_capacity(num_sources);
+		for i in 0..num_sources {
+			let mut ws = BTreeMap::new();
+			for j in 0..keys_per_source {
+				// Cheap deterministic spread; collisions across sources are
+				// expected and exercise the dedup path.
+				let key_idx = (i.wrapping_mul(31) + j.wrapping_mul(17)) % total_keys;
+				let key = Bytes::from(format!("key_{:08}", key_idx).into_bytes());
+				ws.insert(key, Some(Bytes::from_static(b"v")));
+			}
+			sources.push(Arc::new(Merge {
+				id: i as u64,
+				writeset: Arc::new(ws),
+			}));
+		}
+		let beg = Bytes::from(b"key_00000000".to_vec());
+		let end = Bytes::from(format!("key_{:08}", total_keys).into_bytes());
+		Self {
+			sources,
+			beg,
+			end,
+		}
+	}
+
+	/// Fully iterate the lazy merge in forward direction and return the
+	/// total number of entries yielded.
+	pub fn iter_forward_count(&self) -> usize {
+		MergeQueueIter::new(
+			self.sources.clone(),
+			self.beg.clone(),
+			self.end.clone(),
+			Direction::Forward,
+		)
+		.count()
+	}
+
+	/// Iterate the lazy merge forward, taking only the first `n` entries —
+	/// exercises the early-termination path that the previous eager
+	/// materialisation could not benefit from.
+	pub fn iter_forward_take(&self, n: usize) -> usize {
+		MergeQueueIter::new(
+			self.sources.clone(),
+			self.beg.clone(),
+			self.end.clone(),
+			Direction::Forward,
+		)
+		.take(n)
+		.count()
 	}
 }

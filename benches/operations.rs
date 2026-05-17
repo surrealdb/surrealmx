@@ -17,7 +17,9 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use rand::{rngs::StdRng, RngExt, SeedableRng};
 use std::hint::black_box;
 use std::sync::Arc;
-use surrealmx::bench_internals::{ReadsetConflictScenario, WritesetConflictScenario};
+use surrealmx::bench_internals::{
+	MergeQueueScenario, ReadsetConflictScenario, WritesetConflictScenario,
+};
 use surrealmx::{Database, DatabaseOptions};
 
 const SEED: u64 = 42;
@@ -1329,6 +1331,84 @@ fn bench_bloom_concurrent_throughput(c: &mut Criterion) {
 	group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// Lazy k-way merge over the transaction merge queue. Microbenchmark over
+// the `MergeQueueIter` in isolation (built via bench_internals because the
+// production merge queue drains synchronously at commit, so the only way to
+// get reproducible queue depth in a single-threaded bench is to construct it
+// directly).
+// ---------------------------------------------------------------------------
+
+fn bench_merge_queue_iter(c: &mut Criterion) {
+	let mut group = c.benchmark_group("merge_queue_iter");
+
+	let total_keys = 10_000;
+	let keys_per_source = 50;
+
+	for num_sources in [1, 4, 16, 64].iter() {
+		let scenario = MergeQueueScenario::new(*num_sources, keys_per_source, total_keys);
+
+		// Full drain: scales with merge-queue depth × keys per source.
+		group.bench_function(BenchmarkId::new("drain", format!("{}sources", num_sources)), |b| {
+			b.iter(|| {
+				black_box(scenario.iter_forward_count());
+			})
+		});
+
+		// Early termination at 100 entries: highlights the lazy iterator's
+		// advantage over the previous eager BTreeMap materialisation, which
+		// always paid the full merge cost up front.
+		group.bench_function(
+			BenchmarkId::new("take_100", format!("{}sources", num_sources)),
+			|b| {
+				b.iter(|| {
+					black_box(scenario.iter_forward_take(100));
+				})
+			},
+		);
+	}
+	group.finish();
+}
+
+// Cursor pagination: open a cursor over a 10k-key range and fetch the first
+// 100 keys via `next()`. Targets the cursor's `create_iterator` path which
+// used to re-slice a BTreeMap on every direction change and now builds a
+// fresh `MergeQueueIter` from the pre-snapshotted `Vec<Arc<Merge>>`.
+fn bench_cursor_pagination(c: &mut Criterion) {
+	let mut group = c.benchmark_group("cursor_pagination");
+
+	let entry_count = 10_000;
+	let db = setup_database_with_sequential_data(entry_count, 100);
+
+	for page_size in [10, 100, 1000].iter() {
+		group.throughput(Throughput::Elements(*page_size as u64));
+		group.bench_with_input(
+			BenchmarkId::new("first_n", format!("page{}", page_size)),
+			page_size,
+			|b, &page| {
+				b.iter(|| {
+					let tx = db.transaction(false);
+					let start_key = b"".to_vec();
+					let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
+					let mut cursor = tx.cursor(start_key..end_key).unwrap();
+					cursor.seek_to_first();
+					let mut count = 0;
+					while cursor.valid() && count < page {
+						if cursor.exists() {
+							black_box(cursor.key());
+							black_box(cursor.value());
+							count += 1;
+						}
+						cursor.next();
+					}
+					black_box(count);
+				})
+			},
+		);
+	}
+	group.finish();
+}
+
 criterion_group!(
 	database_benchmarks,
 	bench_transaction_creation,
@@ -1358,6 +1438,8 @@ criterion_group!(
 
 criterion_group!(configuration_benchmarks, bench_database_options);
 
+criterion_group!(merge_benchmarks, bench_merge_queue_iter, bench_cursor_pagination);
+
 criterion_group!(
 	optimization_benchmarks,
 	bench_scan_for_each,
@@ -1376,5 +1458,6 @@ criterion_main!(
 	scan_benchmarks,
 	concurrent_benchmarks,
 	configuration_benchmarks,
-	optimization_benchmarks
+	optimization_benchmarks,
+	merge_benchmarks
 );
