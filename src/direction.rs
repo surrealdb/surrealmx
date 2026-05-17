@@ -15,6 +15,7 @@
 //! This module stores the database iteration direction.
 
 /// The direction that the iterator should iterate
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Direction {
 	Forward,
 	Reverse,

@@ -16,7 +16,8 @@
 
 use crate::direction::Direction;
 use crate::inner::Inner;
-use crate::iter::MergeIterator;
+use crate::iter::{MergeIterator, MergeQueueIter};
+use crate::queue::Merge;
 use bytes::Bytes;
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -56,8 +57,10 @@ pub struct Cursor<'a> {
 	end: Bytes,
 	/// Transaction version for MVCC
 	version: u64,
-	/// Combined writeset from merge queue (owned, built at cursor creation)
-	combined_writeset: BTreeMap<Bytes, Option<Bytes>>,
+	/// Snapshot of merge-queue writesets visible to this cursor (Arc bumps,
+	/// captured once at construction so direction changes don't have to
+	/// re-walk the queue).
+	merge_sources: Vec<Arc<Merge>>,
 	/// Current direction of iteration
 	direction: Direction,
 	/// Current cached entry (key, value) - None means invalid position
@@ -80,20 +83,14 @@ impl<'a> Cursor<'a> {
 		end: Bytes,
 		version: u64,
 	) -> Self {
-		// Build combined writeset from merge queue entries.
-		// Fast path: skip entirely when the merge queue is empty (common case).
-		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> =
-			if database.transaction_merge_queue.is_empty() {
-				BTreeMap::new()
-			} else {
-				let mut ws = BTreeMap::new();
-				for entry in database.transaction_merge_queue.range(..=version).rev() {
-					for (k, v) in entry.value().writeset.range::<Bytes, _>(&beg..&end) {
-						ws.entry(k.clone()).or_insert_with(|| v.clone());
-					}
-				}
-				ws
-			};
+		// Snapshot the merge-queue writesets once (Arc bumps); the lazy
+		// iterator built in `create_iterator` ranges into them on demand.
+		let merge_sources: Vec<Arc<Merge>> = database
+			.transaction_merge_queue
+			.range(..=version)
+			.rev()
+			.map(|e| e.value().clone())
+			.collect();
 
 		Cursor {
 			database,
@@ -101,7 +98,7 @@ impl<'a> Cursor<'a> {
 			beg,
 			end,
 			version,
-			combined_writeset,
+			merge_sources,
 			direction: Direction::Forward,
 			current: None,
 			positioned: false,
@@ -263,17 +260,18 @@ impl<'a> Cursor<'a> {
 	/// Create a new merge iterator over the given range and direction.
 	/// Replaces any existing iterator.
 	fn create_iterator(&mut self, start: &Bytes, end: &Bytes, direction: Direction) {
-		let join: BTreeMap<Bytes, Option<Bytes>> = self
-			.combined_writeset
-			.range::<Bytes, _>(start..end)
-			.map(|(k, v)| (k.clone(), v.clone()))
-			.collect();
+		let join_iter = Box::new(MergeQueueIter::new(
+			self.merge_sources.clone(),
+			start.clone(),
+			end.clone(),
+			direction,
+		));
 
 		self.iter = Some(MergeIterator::new(
 			self.database
 				.datastore
 				.range((Bound::Included(start.clone()), Bound::Excluded(end.clone()))),
-			join,
+			join_iter,
 			self.writeset.range::<Bytes, _>(start..end),
 			direction,
 			self.version,
