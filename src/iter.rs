@@ -16,15 +16,15 @@
 //! sources.
 
 use crate::direction::Direction;
+use crate::queue::Merge;
 use crate::versions::Versions;
 use bytes::Bytes;
 use ferntree::iter::{Range as FernRange, RangeRev};
 use ferntree::Tree;
 use std::collections::btree_map::Range as TreeRange;
-use std::collections::BTreeMap;
-use std::collections::VecDeque;
 use std::ops::Bound;
 use std::ops::ControlFlow;
+use std::sync::Arc;
 
 // Tree fanout used by the surrealmx datastore tree.
 // Kept aliased here so iterator types match the tree configured in `inner.rs`.
@@ -112,6 +112,132 @@ where
 /// existence for (`next_count`, `next_key`).
 type CachedTreeEntry = Option<(Bytes, bool)>;
 
+/// Lazy k-way merge iterator over committed merge-queue writesets.
+///
+/// Yields `(Bytes, Option<Bytes>)` pairs in sorted order with newest-wins
+/// dedup. Sources must be passed in newest-first order (index 0 = newest).
+/// On a tie, the lowest-index source wins; older sources at the same key
+/// are advanced past it.
+///
+/// Holds an `Arc<Merge>` per source to keep the underlying `Arc<BTreeMap>`
+/// alive without storing any borrows from it; advancement re-seeks the
+/// BTreeMap each step (O(log n) per advance).
+pub(crate) struct MergeQueueIter {
+	sources: Vec<Arc<Merge>>,
+	heads: Vec<Option<(Bytes, Option<Bytes>)>>,
+	beg: Bytes,
+	end: Bytes,
+	direction: Direction,
+}
+
+impl MergeQueueIter {
+	/// Build a new lazy merge iterator.
+	///
+	/// `sources` must be ordered newest-first (typically by collecting
+	/// `transaction_merge_queue.range(..=version).rev()`). `beg` is included,
+	/// `end` is excluded.
+	pub(crate) fn new(
+		sources: Vec<Arc<Merge>>,
+		beg: Bytes,
+		end: Bytes,
+		direction: Direction,
+	) -> Self {
+		let mut heads = Vec::with_capacity(sources.len());
+		for src in &sources {
+			heads.push(seek_in_writeset(src, direction, &beg, &end, None));
+		}
+		Self {
+			sources,
+			heads,
+			beg,
+			end,
+			direction,
+		}
+	}
+}
+
+/// Seek the next entry within `[beg, end)` for `direction`, optionally past
+/// `after`. Returns owned `(Bytes, Option<Bytes>)` (refcount clones only).
+fn seek_in_writeset(
+	src: &Arc<Merge>,
+	direction: Direction,
+	beg: &Bytes,
+	end: &Bytes,
+	after: Option<&Bytes>,
+) -> Option<(Bytes, Option<Bytes>)> {
+	let ws = &src.writeset;
+	let entry = match (direction, after) {
+		(Direction::Forward, None) => {
+			ws.range::<Bytes, _>((Bound::Included(beg), Bound::Excluded(end))).next()
+		}
+		(Direction::Forward, Some(k)) => {
+			ws.range::<Bytes, _>((Bound::Excluded(k), Bound::Excluded(end))).next()
+		}
+		(Direction::Reverse, None) => {
+			ws.range::<Bytes, _>((Bound::Included(beg), Bound::Excluded(end))).next_back()
+		}
+		(Direction::Reverse, Some(k)) => {
+			ws.range::<Bytes, _>((Bound::Included(beg), Bound::Excluded(k))).next_back()
+		}
+	};
+	entry.map(|(k, v)| (k.clone(), v.clone()))
+}
+
+impl Iterator for MergeQueueIter {
+	type Item = (Bytes, Option<Bytes>);
+
+	fn next(&mut self) -> Option<Self::Item> {
+		// Find the winning source: smallest (Forward) or largest (Reverse)
+		// head. On ties, lower index wins (newest), so a strict comparison
+		// keeps the first-seen source as the winner.
+		let mut winner: Option<usize> = None;
+		for (i, head) in self.heads.iter().enumerate() {
+			let Some((k, _)) = head else {
+				continue;
+			};
+			match winner {
+				None => winner = Some(i),
+				Some(wi) => {
+					let (wk, _) = self.heads[wi].as_ref().unwrap();
+					let take = match self.direction {
+						Direction::Forward => k < wk,
+						Direction::Reverse => k > wk,
+					};
+					if take {
+						winner = Some(i);
+					}
+				}
+			}
+		}
+		let winner = winner?;
+		let (out_key, out_val) = self.heads[winner].take().unwrap();
+		// Discard older duplicates at the same key, re-seeking past it.
+		for i in (winner + 1)..self.heads.len() {
+			let same = self.heads[i].as_ref().map(|(k, _)| k == &out_key).unwrap_or(false);
+			if same {
+				let new = seek_in_writeset(
+					&self.sources[i],
+					self.direction,
+					&self.beg,
+					&self.end,
+					Some(&out_key),
+				);
+				self.heads[i] = new;
+			}
+		}
+		// Advance the winning source.
+		let new = seek_in_writeset(
+			&self.sources[winner],
+			self.direction,
+			&self.beg,
+			&self.end,
+			Some(&out_key),
+		);
+		self.heads[winner] = new;
+		Some((out_key, out_val))
+	}
+}
+
 /// Three-way merge iterator over tree, merge queue, and current transaction
 /// writesets.
 pub struct MergeIterator<'a> {
@@ -119,8 +245,8 @@ pub struct MergeIterator<'a> {
 	pub(crate) tree_iter: TreeIterState<'a>,
 	pub(crate) self_iter: TreeRange<'a, Bytes, Option<Bytes>>,
 
-	// Join entries from merge queue, consumed from front (forward) or back (reverse)
-	pub(crate) join_entries: VecDeque<(Bytes, Option<Bytes>)>,
+	// Lazy iterator over committed merge-queue writesets
+	pub(crate) join_iter: Box<dyn Iterator<Item = (Bytes, Option<Bytes>)> + 'a>,
 
 	// Current buffered entries from each source
 	pub(crate) tree_next: CachedTreeEntry,
@@ -145,41 +271,36 @@ enum KeySource {
 }
 
 impl<'a> MergeIterator<'a> {
-	pub(crate) fn new(
+	pub fn new(
 		tree_iter: TreeIterState<'a>,
-		join_storage: BTreeMap<Bytes, Option<Bytes>>,
+		mut join_iter: Box<dyn Iterator<Item = (Bytes, Option<Bytes>)> + 'a>,
 		mut self_iter: TreeRange<'a, Bytes, Option<Bytes>>,
 		direction: Direction,
 		version: u64,
 		skip: usize,
 	) -> Self {
+		// Prime the join-side from the lazy iterator (direction-baked).
+		let join_next = join_iter.next();
+
+		// Prime the transaction-side iterator
+		let self_next = match direction {
+			Direction::Forward => self_iter.next(),
+			Direction::Reverse => self_iter.next_back(),
+		};
+
 		let mut me = MergeIterator {
 			tree_iter,
-			self_iter: TreeRange::default(),
-			join_entries: VecDeque::new(),
+			self_iter,
+			join_iter,
 			tree_next: None,
-			join_next: None,
-			self_next: None,
+			join_next,
+			self_next,
 			direction,
 			version,
 			skip_remaining: skip,
 		};
 
-		// Convert BTreeMap to VecDeque for O(1) sequential access
-		me.join_entries = join_storage.into_iter().collect();
-		me.join_next = match direction {
-			Direction::Forward => me.join_entries.pop_front(),
-			Direction::Reverse => me.join_entries.pop_back(),
-		};
-
-		// Prime the transaction-side iterator
-		me.self_next = match direction {
-			Direction::Forward => self_iter.next(),
-			Direction::Reverse => self_iter.next_back(),
-		};
-		me.self_iter = self_iter;
-
-		// Prime the tree-side cache
+		// Prime the tree-side cache (peek + resolve version once)
 		me.tree_next = Self::fetch_tree_entry(&mut me.tree_iter, version);
 
 		me
@@ -218,10 +339,7 @@ impl<'a> MergeIterator<'a> {
 
 	#[inline]
 	fn advance_join(&mut self) {
-		self.join_next = match self.direction {
-			Direction::Forward => self.join_entries.pop_front(),
-			Direction::Reverse => self.join_entries.pop_back(),
-		};
+		self.join_next = self.join_iter.next();
 	}
 
 	#[inline]

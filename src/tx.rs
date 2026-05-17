@@ -19,7 +19,7 @@ use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
 use crate::inner::Inner;
-use crate::iter::{for_each_in_range, MergeIterator, TreeIterState};
+use crate::iter::{for_each_in_range, MergeIterator, MergeQueueIter, TreeIterState};
 use crate::kv::IntoBytes;
 use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
@@ -1622,20 +1622,17 @@ impl TransactionInner {
 			});
 			return Ok(count);
 		}
-		// Build combined writeset from merge queue entries only.
-		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> = {
-			let mut ws = BTreeMap::new();
-			for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
-				for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
-					ws.entry(k.clone()).or_insert_with(|| v.clone());
-				}
-			}
-			ws
-		};
+		// Lazy k-way merge over the merge-queue writesets.
+		let join_iter = Box::new(MergeQueueIter::new(
+			self.snapshot_merge_sources(self.version),
+			beg.clone(),
+			end.clone(),
+			Direction::Forward,
+		));
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
 			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
-			combined_writeset,
+			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
 			self.version,
@@ -1716,20 +1713,17 @@ impl TransactionInner {
 			});
 			return Ok(count);
 		}
-		// Build combined writeset from merge queue entries only.
-		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> = {
-			let mut ws = BTreeMap::new();
-			for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
-				for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
-					ws.entry(k.clone()).or_insert_with(|| v.clone());
-				}
-			}
-			ws
-		};
+		// Lazy k-way merge over the merge-queue writesets.
+		let join_iter = Box::new(MergeQueueIter::new(
+			self.snapshot_merge_sources(self.version),
+			beg.clone(),
+			end.clone(),
+			Direction::Forward,
+		));
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
-			combined_writeset,
+			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
 			self.version,
@@ -1806,20 +1800,17 @@ impl TransactionInner {
 			});
 			return Ok(());
 		}
-		// Build combined writeset from merge queue entries only.
-		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> = {
-			let mut ws = BTreeMap::new();
-			for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
-				for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
-					ws.entry(k.clone()).or_insert_with(|| v.clone());
-				}
-			}
-			ws
-		};
+		// Lazy k-way merge over the merge-queue writesets.
+		let join_iter = Box::new(MergeQueueIter::new(
+			self.snapshot_merge_sources(self.version),
+			beg.clone(),
+			end.clone(),
+			Direction::Forward,
+		));
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
 			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
-			combined_writeset,
+			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
 			self.version,
@@ -1893,20 +1884,17 @@ impl TransactionInner {
 			});
 			return Ok(());
 		}
-		// Build combined writeset from merge queue entries only.
-		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> = {
-			let mut ws = BTreeMap::new();
-			for entry in self.database.transaction_merge_queue.range(..=self.version).rev() {
-				for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
-					ws.entry(k.clone()).or_insert_with(|| v.clone());
-				}
-			}
-			ws
-		};
+		// Lazy k-way merge over the merge-queue writesets.
+		let join_iter = Box::new(MergeQueueIter::new(
+			self.snapshot_merge_sources(self.version),
+			beg.clone(),
+			end.clone(),
+			Direction::Forward,
+		));
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
-			combined_writeset,
+			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
 			self.version,
@@ -1949,6 +1937,18 @@ impl TransactionInner {
 			// This range scan is already covered
 			_ => (),
 		}
+	}
+
+	/// Snapshot the merge-queue writesets visible at `version` as a vector of
+	/// `Arc<Merge>` ordered newest-first. Cheap — each element is an Arc bump.
+	#[inline]
+	fn snapshot_merge_sources(&self, version: u64) -> Vec<Arc<Merge>> {
+		self.database
+			.transaction_merge_queue
+			.range(..=version)
+			.rev()
+			.map(|e| e.value().clone())
+			.collect()
 	}
 
 	/// Retrieve a count of keys from the database
@@ -2033,20 +2033,17 @@ impl TransactionInner {
 			}
 			return Ok(res);
 		}
-		// Build combined writeset from merge queue entries only.
-		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> = {
-			let mut ws = BTreeMap::new();
-			for entry in self.database.transaction_merge_queue.range(..=version).rev() {
-				for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
-					ws.entry(k.clone()).or_insert_with(|| v.clone());
-				}
-			}
-			ws
-		};
+		// Lazy k-way merge over the merge-queue writesets.
+		let join_iter = Box::new(MergeQueueIter::new(
+			self.snapshot_merge_sources(version),
+			beg.clone(),
+			end.clone(),
+			direction,
+		));
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			TreeIterState::build(&self.database.datastore, beg, end, direction),
-			combined_writeset,
+			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
 			version,
@@ -2149,20 +2146,17 @@ impl TransactionInner {
 			}
 			return Ok(res);
 		}
-		// Build combined writeset from merge queue entries only.
-		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> = {
-			let mut ws = BTreeMap::new();
-			for entry in self.database.transaction_merge_queue.range(..=version).rev() {
-				for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
-					ws.entry(k.clone()).or_insert_with(|| v.clone());
-				}
-			}
-			ws
-		};
+		// Lazy k-way merge over the merge-queue writesets.
+		let join_iter = Box::new(MergeQueueIter::new(
+			self.snapshot_merge_sources(version),
+			beg.clone(),
+			end.clone(),
+			direction,
+		));
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			TreeIterState::build(&self.database.datastore, beg, end, direction),
-			combined_writeset,
+			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
 			version,
@@ -2265,20 +2259,17 @@ impl TransactionInner {
 			}
 			return Ok(res);
 		}
-		// Build combined writeset from merge queue entries only.
-		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> = {
-			let mut ws = BTreeMap::new();
-			for entry in self.database.transaction_merge_queue.range(..=version).rev() {
-				for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
-					ws.entry(k.clone()).or_insert_with(|| v.clone());
-				}
-			}
-			ws
-		};
+		// Lazy k-way merge over the merge-queue writesets.
+		let join_iter = Box::new(MergeQueueIter::new(
+			self.snapshot_merge_sources(version),
+			beg.clone(),
+			end.clone(),
+			direction,
+		));
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
 			TreeIterState::build(&self.database.datastore, beg, end, direction),
-			combined_writeset,
+			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
 			version,
@@ -2330,26 +2321,19 @@ impl TransactionInner {
 				self.track_scan_range(beg, end);
 			}
 		}
-		// Build combined writeset from merge queue entries only.
-		// Fast path: skip entirely when the merge queue is empty (common case).
-		let combined_writeset: BTreeMap<Bytes, Option<Bytes>> =
-			if self.database.transaction_merge_queue.is_empty() {
-				BTreeMap::new()
-			} else {
-				let mut ws = BTreeMap::new();
-				for entry in self.database.transaction_merge_queue.range(..=version).rev() {
-					for (k, v) in entry.value().writeset.range::<Bytes, _>(beg..end) {
-						ws.entry(k.clone()).or_insert_with(|| v.clone());
-					}
-				}
-				ws
-			};
+		// Lazy k-way merge over the merge-queue writesets. The
+		// `snapshot_merge_sources` helper returns an empty vector when the
+		// queue is empty, so the iterator is effectively a no-op in that case.
+		let join_iter = Box::new(MergeQueueIter::new(
+			self.snapshot_merge_sources(version),
+			beg.clone(),
+			end.clone(),
+			Direction::Forward,
+		));
 		// Create the 3-way merge iterator to iterate over keys
 		let iter = MergeIterator::new(
-			TreeIterState::Forward(
-				self.database.datastore.range(Bound::Included(beg), Bound::Excluded(end)),
-			),
-			combined_writeset,
+			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
+			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
 			version,
