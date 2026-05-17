@@ -314,14 +314,13 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "ferntree"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "689b980d6383b172b58240bd34c3c04b1182fc1c41e91a4f7a923e6385ef19d5"
+checksum = "4cef1301dd173aeb2f9ace7fc89c6e1d00e4e5ecdc1c9dff0f3889231d208a7e"
 dependencies = [
  "crossbeam-epoch",
  "parking_lot",
  "parking_lot_core",
- "smallvec",
  "thiserror",
 ]
 
