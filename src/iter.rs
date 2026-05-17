@@ -86,18 +86,18 @@ fn seek_in_writeset(
 ) -> Option<(Bytes, Option<Bytes>)> {
 	let ws = &src.writeset;
 	let entry = match (direction, after) {
-		(Direction::Forward, None) => ws
-			.range::<Bytes, _>((Bound::Included(beg), Bound::Excluded(end)))
-			.next(),
-		(Direction::Forward, Some(k)) => ws
-			.range::<Bytes, _>((Bound::Excluded(k), Bound::Excluded(end)))
-			.next(),
-		(Direction::Reverse, None) => ws
-			.range::<Bytes, _>((Bound::Included(beg), Bound::Excluded(end)))
-			.next_back(),
-		(Direction::Reverse, Some(k)) => ws
-			.range::<Bytes, _>((Bound::Included(beg), Bound::Excluded(k)))
-			.next_back(),
+		(Direction::Forward, None) => {
+			ws.range::<Bytes, _>((Bound::Included(beg), Bound::Excluded(end))).next()
+		}
+		(Direction::Forward, Some(k)) => {
+			ws.range::<Bytes, _>((Bound::Excluded(k), Bound::Excluded(end))).next()
+		}
+		(Direction::Reverse, None) => {
+			ws.range::<Bytes, _>((Bound::Included(beg), Bound::Excluded(end))).next_back()
+		}
+		(Direction::Reverse, Some(k)) => {
+			ws.range::<Bytes, _>((Bound::Included(beg), Bound::Excluded(k))).next_back()
+		}
 	};
 	entry.map(|(k, v)| (k.clone(), v.clone()))
 }
@@ -132,11 +132,7 @@ impl Iterator for MergeQueueIter {
 		let (out_key, out_val) = self.heads[winner].take().unwrap();
 		// Discard older duplicates at the same key, re-seeking past it.
 		for i in (winner + 1)..self.heads.len() {
-			let same = self
-				.heads[i]
-				.as_ref()
-				.map(|(k, _)| k == &out_key)
-				.unwrap_or(false);
+			let same = self.heads[i].as_ref().map(|(k, _)| k == &out_key).unwrap_or(false);
 			if same {
 				let new = seek_in_writeset(
 					&self.sources[i],
