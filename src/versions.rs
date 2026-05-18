@@ -1,5 +1,6 @@
 use crate::version::Version;
 use bytes::Bytes;
+use ferntree::impl_optimistic_read_boxed;
 use smallvec::SmallVec;
 
 pub(crate) enum IndexOrUpdate<'a> {
@@ -11,9 +12,15 @@ pub(crate) enum IndexOrUpdate<'a> {
 	Update(&'a mut Version),
 }
 
+#[derive(Clone)]
 pub struct Versions {
 	inner: SmallVec<[Version; 4]>,
 }
+
+// SAFETY: `Versions` is `Clone + Send + Sync + 'static`; ferntree stores it
+// behind `BoxedSlot`, so the displaced `Box<Versions>` must be routed through
+// the epoch GC on overwrite. See `impl_optimistic_read_boxed!` docs.
+impl_optimistic_read_boxed!(Versions);
 
 impl From<Version> for Versions {
 	fn from(value: Version) -> Self {
