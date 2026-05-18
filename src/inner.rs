@@ -25,11 +25,17 @@ use crossbeam_queue::SegQueue;
 use crossbeam_skiplist::SkipMap;
 use ferntree::Tree;
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+/// Sentinel value stored in a counter entry while its owning [`Inner`]
+/// SkipMap entry is being removed by [`crate::tx::Transaction::drop`]. A
+/// concurrent `register_counter` will observe this marker and retry with a
+/// fresh entry rather than incrementing a detached counter.
+pub(crate) const COUNTER_TOMBSTONE: u64 = u64::MAX;
 
 /// The inner structure of the transactional in-memory database
 pub struct Inner {
@@ -95,6 +101,37 @@ impl Inner {
 			reset_threshold: opts.reset_threshold,
 		}
 	}
+}
+
+impl Inner {
+	/// Returns the earliest active reader's snapshot version, or `fallback`
+	/// if no reader is currently registered. Pairs with the SeqCst
+	/// load-and-fence in `register_counter` to give writers a watermark
+	/// that observes every reader whose registration is totally ordered
+	/// before the fence below.
+	#[inline]
+	pub(crate) fn earliest_active_version(&self, fallback: u64) -> u64 {
+		earliest_active(&self.counter_by_oracle, fallback)
+	}
+
+	/// Returns the earliest active reader's start commit id, or `fallback`
+	/// if no reader is currently registered. See `earliest_active_version`.
+	#[inline]
+	pub(crate) fn earliest_active_commit(&self, fallback: u64) -> u64 {
+		earliest_active(&self.counter_by_commit, fallback)
+	}
+}
+
+#[inline]
+fn earliest_active(map: &SkipMap<u64, Arc<AtomicU64>>, fallback: u64) -> u64 {
+	fence(Ordering::SeqCst);
+	for entry in map.iter() {
+		let c = entry.value().load(Ordering::Acquire);
+		if c != 0 && c != COUNTER_TOMBSTONE {
+			return *entry.key();
+		}
+	}
+	fallback
 }
 
 impl Default for Inner {

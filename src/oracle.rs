@@ -61,6 +61,7 @@ impl Oracle {
 	}
 
 	/// Returns the current timestamp for this oracle
+	#[cfg(test)]
 	#[inline]
 	pub fn current_timestamp(&self) -> u64 {
 		self.inner.timestamp.load(Ordering::Acquire)
