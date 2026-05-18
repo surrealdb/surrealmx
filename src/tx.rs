@@ -1058,9 +1058,7 @@ impl TransactionInner {
 					// Re-check under exclusive: another committer may have
 					// pushed a fresh version on this key since we released
 					// the shared lock above.
-					self.database.datastore.remove_if_sync(key, |arc| {
-						arc.read().is_empty()
-					});
+					self.database.datastore.remove_if_sync(key, |arc| arc.read().is_empty());
 				}
 				continue;
 			}
@@ -1094,9 +1092,9 @@ impl TransactionInner {
 						});
 						if took_path {
 							if needs_remove {
-								self.database.datastore.remove_if_sync(key, |arc| {
-									arc.read().is_empty()
-								});
+								self.database
+									.datastore
+									.remove_if_sync(key, |arc| arc.read().is_empty());
 							}
 							break;
 						}

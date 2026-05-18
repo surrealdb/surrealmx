@@ -16,7 +16,6 @@
 
 use crate::inner::Inner;
 use crate::options::DatabaseOptions;
-use bytes::Bytes;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
 #[cfg(not(target_arch = "wasm32"))]
@@ -24,6 +23,7 @@ use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
 use crate::tx::Transaction;
+use bytes::Bytes;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -412,8 +412,7 @@ impl Database {
 							}
 						});
 						if empty {
-							db.datastore
-								.remove_if_sync(&key, |arc| arc.read().is_empty());
+							db.datastore.remove_if_sync(&key, |arc| arc.read().is_empty());
 						}
 					}
 					// Periodically do a full datastore scan
@@ -429,8 +428,7 @@ impl Database {
 						}
 						drop(guard);
 						for key in to_check {
-							db.datastore
-								.remove_if_sync(&key, |arc| arc.read().is_empty());
+							db.datastore.remove_if_sync(&key, |arc| arc.read().is_empty());
 						}
 					}
 				}

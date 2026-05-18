@@ -19,8 +19,8 @@ use crate::direction::Direction;
 use crate::inner::DataValue;
 use crate::queue::Merge;
 use bytes::Bytes;
-use scc::Guard;
 use scc::tree_index::Range as TreeRange;
+use scc::Guard;
 use scc::TreeIndex;
 use std::collections::btree_map::Range as BTreeRange;
 use std::ops::Bound;
@@ -84,8 +84,7 @@ impl<'a> TreeIter<'a> {
 		// to construct `range`, which is dropped before `_guard` thanks to
 		// the field declaration order. No other code may observe the
 		// transmuted reference.
-		let guard_ref: &'a Guard =
-			unsafe { std::mem::transmute::<&Guard, &'a Guard>(&*guard) };
+		let guard_ref: &'a Guard = unsafe { std::mem::transmute::<&Guard, &'a Guard>(&*guard) };
 		let range = tree.range::<Bytes, _>(tree_bounds(beg, end), guard_ref);
 		Self {
 			range,
