@@ -34,6 +34,23 @@ pub(crate) type SkipBounds = (Bound<Bytes>, Bound<Bytes>);
 /// Concrete type of the `scc::TreeIndex` range iterator over the datastore.
 type DataRange<'a> = TreeRange<'a, Bytes, DataValue, Bytes, SkipBounds>;
 
+/// Compute `scc::TreeIndex::range` bounds with the empty-prefix workaround.
+///
+/// `scc::TreeIndex::range` becomes ~30ms slow (on 100k+ entries) when the
+/// lower bound sorts before every stored key — its `start_forward` falls
+/// into a hot loop while walking forward from the leftmost leaf. Mapping
+/// `Bound::Included(empty)` to `Bound::Unbounded` is semantically
+/// equivalent for `Bytes` keys and stays sub-microsecond.
+#[inline]
+pub(crate) fn tree_bounds(beg: &Bytes, end: &Bytes) -> SkipBounds {
+	let start = if beg.is_empty() {
+		Bound::Unbounded
+	} else {
+		Bound::Included(beg.clone())
+	};
+	(start, Bound::Excluded(end.clone()))
+}
+
 /// Wraps a `scc::TreeIndex::range` iterator together with its owning EBR
 /// `Guard`. `scc::TreeIndex` returns references that are only valid while the
 /// `Guard` is alive, so the iterator and the guard must be held together.
@@ -52,6 +69,13 @@ pub(crate) struct TreeIter<'a> {
 
 impl<'a> TreeIter<'a> {
 	/// Build a new tree iterator over `[beg, end)` for the given tree.
+	///
+	/// An empty `beg` is mapped to `Bound::Unbounded` because
+	/// `scc::TreeIndex::range` has a pathologically slow start path when the
+	/// lower bound sorts before every stored key (observed ~30ms per call on
+	/// 100k entries with shared-prefix keys), while the unbounded path is
+	/// sub-microsecond. The semantics are identical for our `Bytes` keys —
+	/// no entry can be lexicographically smaller than an empty key.
 	#[inline]
 	pub(crate) fn new(tree: &'a TreeIndex<Bytes, DataValue>, beg: &Bytes, end: &Bytes) -> Self {
 		let guard = Box::new(Guard::new());
@@ -62,9 +86,7 @@ impl<'a> TreeIter<'a> {
 		// transmuted reference.
 		let guard_ref: &'a Guard =
 			unsafe { std::mem::transmute::<&Guard, &'a Guard>(&*guard) };
-		let bounds: SkipBounds =
-			(Bound::Included(beg.clone()), Bound::Excluded(end.clone()));
-		let range = tree.range::<Bytes, _>(bounds, guard_ref);
+		let range = tree.range::<Bytes, _>(tree_bounds(beg, end), guard_ref);
 		Self {
 			range,
 			_guard: guard,

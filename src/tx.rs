@@ -19,7 +19,7 @@ use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
 use crate::inner::{Inner, COUNTER_TOMBSTONE};
-use crate::iter::{MergeIterator, MergeQueueIter, TreeIter};
+use crate::iter::{tree_bounds, MergeIterator, MergeQueueIter, TreeIter};
 use crate::kv::IntoBytes;
 use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
@@ -33,7 +33,6 @@ use papaya::HashSet;
 use parking_lot::RwLock;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{fence, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1686,10 +1685,8 @@ impl TransactionInner {
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
 			let guard = scc::Guard::new();
-			let datastore_range = self.database.datastore.range::<Bytes, _>(
-				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
-				&guard,
-			);
+			let datastore_range =
+				self.database.datastore.range::<Bytes, _>(tree_bounds(beg, end), &guard);
 			for (k, arc) in datastore_range {
 				let value = match arc.try_read() {
 					Some(g) => g.fetch_version(self.version),
@@ -1784,10 +1781,8 @@ impl TransactionInner {
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
 			let guard = scc::Guard::new();
-			let datastore_range = self.database.datastore.range::<Bytes, _>(
-				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
-				&guard,
-			);
+			let datastore_range =
+				self.database.datastore.range::<Bytes, _>(tree_bounds(beg, end), &guard);
 			for (k, arc) in datastore_range {
 				let exists = match arc.try_read() {
 					Some(g) => g.exists_version(self.version),
@@ -1880,10 +1875,8 @@ impl TransactionInner {
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
 			let guard = scc::Guard::new();
-			let datastore_range = self.database.datastore.range::<Bytes, _>(
-				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
-				&guard,
-			);
+			let datastore_range =
+				self.database.datastore.range::<Bytes, _>(tree_bounds(beg, end), &guard);
 			for (k, arc) in datastore_range {
 				let value = match arc.try_read() {
 					Some(g) => g.fetch_version(self.version),
@@ -1970,10 +1963,8 @@ impl TransactionInner {
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
 			let guard = scc::Guard::new();
-			let datastore_range = self.database.datastore.range::<Bytes, _>(
-				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
-				&guard,
-			);
+			let datastore_range =
+				self.database.datastore.range::<Bytes, _>(tree_bounds(beg, end), &guard);
 			for (k, arc) in datastore_range {
 				let exists = match arc.try_read() {
 					Some(g) => g.exists_version(self.version),
@@ -2099,10 +2090,8 @@ impl TransactionInner {
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
 			let guard = scc::Guard::new();
-			let datastore_range = self.database.datastore.range::<Bytes, _>(
-				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
-				&guard,
-			);
+			let datastore_range =
+				self.database.datastore.range::<Bytes, _>(tree_bounds(beg, end), &guard);
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
 					for (_k, arc) in $iter {
@@ -2202,10 +2191,8 @@ impl TransactionInner {
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
 			let guard = scc::Guard::new();
-			let datastore_range = self.database.datastore.range::<Bytes, _>(
-				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
-				&guard,
-			);
+			let datastore_range =
+				self.database.datastore.range::<Bytes, _>(tree_bounds(beg, end), &guard);
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
 					for (k, arc) in $iter {
@@ -2305,10 +2292,8 @@ impl TransactionInner {
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
 			let guard = scc::Guard::new();
-			let datastore_range = self.database.datastore.range::<Bytes, _>(
-				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
-				&guard,
-			);
+			let datastore_range =
+				self.database.datastore.range::<Bytes, _>(tree_bounds(beg, end), &guard);
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
 					for (k, arc) in $iter {
