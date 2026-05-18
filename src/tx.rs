@@ -18,7 +18,7 @@ use crate::bloom::BloomFilter;
 use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
-use crate::inner::Inner;
+use crate::inner::{Inner, COUNTER_TOMBSTONE};
 use crate::iter::{MergeIterator, MergeQueueIter};
 use crate::kv::IntoBytes;
 use crate::pool::Pool;
@@ -35,7 +35,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::debug;
 
@@ -61,14 +61,14 @@ pub struct Transaction {
 impl Drop for Transaction {
 	fn drop(&mut self) {
 		if let Some(inner) = self.inner.take() {
-			// Reduce the transaction commit counter
-			if inner.counter_commit.fetch_sub(1, Ordering::Relaxed) == 1 {
-				// If this was the last reference, remove the counter entry
+			// Release this transaction's reference on each counter. If we
+			// took the last reference, claim removal via a 1->TOMBSTONE
+			// CAS so a fresh `register_counter` cannot increment from
+			// underneath us and end up holding a detached entry.
+			if release_counter(&inner.counter_commit) {
 				inner.database.counter_by_commit.remove(&inner.commit);
 			}
-			// Reduce the transaction version counter
-			if inner.counter_version.fetch_sub(1, Ordering::Relaxed) == 1 {
-				// If this was the last reference, remove the counter entry
+			if release_counter(&inner.counter_version) {
 				inner.database.counter_by_oracle.remove(&inner.version);
 			}
 			// Put the transaction in to the pool
@@ -630,37 +630,104 @@ pub(crate) struct TransactionInner {
 	savepoint_stack: Vec<SavepointState>,
 }
 
+/// Register a new transaction against one of the `Inner` counter SkipMaps.
+///
+/// Two races make this non-trivial and motivate the validate-and-retry
+/// shape:
+///
+/// 1. **load-then-register**: between the reader's load of `atomic` and
+///    its insert into `map`, a writer can advance the watermark and run
+///    inline GC against a `front()` that does not yet see the reader.
+///    The reader's subsequent reads at its snapshot then return `None`.
+/// 2. **drop/register**: a concurrent `Transaction::Drop` that takes the
+///    last reference on the same key removes the entry from the SkipMap.
+///    Without coordination the new registration would land on a detached
+///    counter that no later `front()`/`iter()` can observe.
+///
+/// Closed by:
+///  * `atomic.load(SeqCst)` participates in the same total order as the
+///    writer's SeqCst `fetch_max`/`fetch_add`; a re-load after a SeqCst
+///    fence catches any writer that ran in between.
+///  * Drops claim removal via `1 -> COUNTER_TOMBSTONE` CAS; new
+///    registrations spin past TOMBSTONE-valued counters and retry with a
+///    fresh entry.
+#[inline]
+fn register_counter(
+	map: &SkipMap<u64, Arc<AtomicU64>>,
+	atomic: &AtomicU64,
+) -> (u64, Arc<AtomicU64>) {
+	loop {
+		let v = atomic.load(Ordering::SeqCst);
+		let counter = map.get_or_insert_with(v, || Arc::new(AtomicU64::new(0))).value().clone();
+		// CAS-increment, skipping the tombstone sentinel.
+		let acquired = loop {
+			let cur = counter.load(Ordering::Acquire);
+			if cur == COUNTER_TOMBSTONE {
+				break false;
+			}
+			if counter
+				.compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
+				.is_ok()
+			{
+				break true;
+			}
+		};
+		if !acquired {
+			continue;
+		}
+		fence(Ordering::SeqCst);
+		// If `atomic` has not advanced since our first load, no writer
+		// can have run with a watermark that excluded us: a writer that
+		// reads `iter()` after this fence (in SC total order) will see
+		// our positive count.
+		if atomic.load(Ordering::SeqCst) == v {
+			return (v, counter);
+		}
+		// Roll back, mirroring the Drop path so a concurrent register
+		// cannot land on this counter once we tombstone it.
+		if release_counter(&counter) {
+			if let Some(e) = map.get(&v) {
+				if Arc::ptr_eq(e.value(), &counter) {
+					e.remove();
+				}
+			}
+		}
+	}
+}
+
+/// Decrement a counter and try to claim removal of its SkipMap entry.
+/// Returns `true` if the caller should remove the entry from the map.
+#[inline]
+fn release_counter(counter: &AtomicU64) -> bool {
+	loop {
+		let cur = counter.load(Ordering::Acquire);
+		if cur > 1 {
+			if counter
+				.compare_exchange_weak(cur, cur - 1, Ordering::AcqRel, Ordering::Acquire)
+				.is_ok()
+			{
+				return false;
+			}
+			continue;
+		}
+		debug_assert_eq!(cur, 1);
+		if counter
+			.compare_exchange(1, COUNTER_TOMBSTONE, Ordering::AcqRel, Ordering::Acquire)
+			.is_ok()
+		{
+			return true;
+		}
+	}
+}
+
 impl TransactionInner {
 	/// Create a new read-only or writeable transaction
 	pub(crate) fn new(db: Arc<Inner>, write: bool) -> Self {
-		// Prepare and increment the oracle counter
-		let (version, counter_version) = {
-			// Get the current version sequence number
-			let value = db.oracle.current_timestamp();
-			// Initialise the transaction oracle counter
-			let entry =
-				db.counter_by_oracle.get_or_insert_with(value, || Arc::new(AtomicU64::new(0)));
-			// Fetch the underlying counter for this value
-			let counter = entry.value().clone();
-			// Increment the transaction oracle counter
-			counter.fetch_add(1, Ordering::Relaxed);
-			// Return the value
-			(value, counter)
-		};
-		// Prepare and increment the commit counter
-		let (commit, counter_commit) = {
-			// Get the current commit sequence number
-			let value = db.transaction_commit_id.load(Ordering::Relaxed);
-			// Initialise the transaction commit counter
-			let entry =
-				db.counter_by_commit.get_or_insert_with(value, || Arc::new(AtomicU64::new(0)));
-			// Fetch the underlying counter for this value
-			let counter = entry.value().clone();
-			// Increment the transaction commit counter
-			counter.fetch_add(1, Ordering::Relaxed);
-			// Return the value
-			(value, counter)
-		};
+		// Register against both watermark counters
+		let (version, counter_version) =
+			register_counter(&db.counter_by_oracle, &db.oracle.inner.timestamp);
+		let (commit, counter_commit) =
+			register_counter(&db.counter_by_commit, &db.transaction_commit_id);
 		// Store the threshold separately before moving db
 		let threshold = db.reset_threshold;
 		// Create the transaction
@@ -688,38 +755,15 @@ impl TransactionInner {
 		self.mode = IsolationLevel::SerializableSnapshotIsolation;
 		// Update the reset threshold from the database
 		self.reset_threshold = self.database.reset_threshold;
-		// Prepare and increment the oracle counter
-		let (version, counter_version) = {
-			// Get the current version sequence number
-			let value = self.database.oracle.current_timestamp();
-			// Initialise the transaction oracle counter
-			let entry = self
-				.database
-				.counter_by_oracle
-				.get_or_insert_with(value, || Arc::new(AtomicU64::new(0)));
-			// Fetch the underlying counter for this value
-			let counter = entry.value().clone();
-			// Increment the transaction oracle counter
-			counter.fetch_add(1, Ordering::Relaxed);
-			// Return the value
-			(value, counter)
-		};
-		// Prepare and increment the commit counter
-		let (commit, counter_commit) = {
-			// Get the current commit sequence number
-			let value = self.database.transaction_commit_id.load(Ordering::Relaxed);
-			// Initialise the transaction commit counter
-			let entry = self
-				.database
-				.counter_by_commit
-				.get_or_insert_with(value, || Arc::new(AtomicU64::new(0)));
-			// Fetch the underlying counter for this value
-			let counter = entry.value().clone();
-			// Increment the transaction commit counter
-			counter.fetch_add(1, Ordering::Relaxed);
-			// Return the value
-			(value, counter)
-		};
+		// Re-register against both watermark counters
+		let (version, counter_version) = register_counter(
+			&self.database.counter_by_oracle,
+			&self.database.oracle.inner.timestamp,
+		);
+		let (commit, counter_commit) = register_counter(
+			&self.database.counter_by_commit,
+			&self.database.transaction_commit_id,
+		);
 		// Clear savepoint stack
 		self.savepoint_stack.clear();
 		// Clear or completely reset the allocated readset
@@ -972,8 +1016,9 @@ impl TransactionInner {
 			writeset,
 			id: self.database.transaction_merge_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
-		// Get the earliest active transaction version
-		let earliest = self.database.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(version);
+		// Get the earliest active transaction version; SeqCst-fenced
+		// so it observes registrations totally ordered before this point
+		let earliest = self.database.earliest_active_version(version);
 		// Get the garbage collection epoch as nanoseconds
 		let history = self.database.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
 		// Calculate the history cutoff (current time - history duration)
@@ -2625,7 +2670,7 @@ impl TransactionInner {
 			let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
 			// Check if the entry was inserted correctly
 			if id == entry.value().id {
-				self.database.transaction_commit_id.fetch_add(1, Ordering::Release);
+				self.database.transaction_commit_id.fetch_add(1, Ordering::SeqCst);
 				return (version, entry.value().clone());
 			}
 			// Ensure the thread backs off when under contention
@@ -2662,7 +2707,7 @@ impl TransactionInner {
 			let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
 			// Check if the entry was inserted correctly
 			if id == entry.value().id {
-				oracle.inner.timestamp.fetch_max(version, Ordering::Release);
+				oracle.inner.timestamp.fetch_max(version, Ordering::SeqCst);
 				return (version, entry.value().clone());
 			}
 			// Ensure the thread backs off when under contention
@@ -5099,5 +5144,122 @@ mod tests {
 		for handle in handles {
 			handle.join().unwrap();
 		}
+	}
+
+	#[test]
+	fn snapshot_isolation_reader_registration_race_does_not_lose_versions() {
+		// Reproduces a snapshot-isolation registration race in
+		// `TransactionInner::new` and `TransactionInner::reset`:
+		// `oracle.current_timestamp()` is loaded *before* the new
+		// transaction's start version is registered in `counter_by_oracle`.
+		//
+		// A committer running in that load-then-register window computes
+		// `earliest = counter_by_oracle.front()` without seeing the new
+		// reader, so its inline GC in `commit()` advances
+		// `cleanup_ts = history.min(earliest)` past the reader's
+		// `self.version`. With no other live readers, `earliest` defaults
+		// to the committer's own version, so the GC sweeps *every* version
+		// older than the new commit. The pending reader then snapshots at
+		// `self.version`, calls `versions.fetch_version`, and gets `None`
+		// even though a committed value was visible at its snapshot
+		// timestamp.
+		//
+		// In the SurrealDB embedded `memory` backend this surfaces as a
+		// flake on tests that poll `INFO FOR INDEX` while a concurrent
+		// index builder is committing rapid heartbeat updates to the
+		// build-state key (`distributed_*_replays_second_node_update`
+		// in `surrealdb-private`).
+		use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+		use std::sync::Arc;
+		use std::thread;
+		use std::time::{Duration, Instant};
+
+		let db = Arc::new(Database::new());
+
+		// Seed the key. Every subsequent reader has a committed value at
+		// or before its snapshot timestamp, so `get` must return `Some(_)`
+		// on every iteration.
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v0").unwrap();
+			tx.commit().unwrap();
+		}
+
+		let stop = Arc::new(AtomicBool::new(false));
+		let none_reads = Arc::new(AtomicUsize::new(0));
+		let total_reads = Arc::new(AtomicUsize::new(0));
+
+		// Single writer thread keeps overwriting the same key. Each
+		// commit drives an inline `gc_older_versions` against the
+		// computed `cleanup_ts`. With no readers registered in
+		// `counter_by_oracle` at that moment, `earliest` falls back to
+		// the writer's own version and the GC sweeps every prior version
+		// of the key.
+		let writer = {
+			let db = Arc::clone(&db);
+			let stop = Arc::clone(&stop);
+			thread::spawn(move || {
+				let mut counter: u64 = 0;
+				while !stop.load(Ordering::Relaxed) {
+					let mut tx = db.transaction(true);
+					tx.set("key", format!("v{counter}")).unwrap();
+					// Sequential writes from one thread never conflict;
+					// any conflict here would be a test-environment issue,
+					// not the race we're exercising.
+					tx.commit().unwrap();
+					counter = counter.wrapping_add(1);
+				}
+			})
+		};
+
+		// Reader threads open many short-lived snapshots. The bug
+		// triggers when a reader enters `TransactionInner::new`/`reset`,
+		// loads the oracle timestamp, and is descheduled before it can
+		// register in `counter_by_oracle`. More readers means more
+		// chances to land in that window.
+		let mut readers = Vec::new();
+		for _ in 0..6 {
+			let db = Arc::clone(&db);
+			let stop = Arc::clone(&stop);
+			let none_reads = Arc::clone(&none_reads);
+			let total_reads = Arc::clone(&total_reads);
+			readers.push(thread::spawn(move || {
+				while !stop.load(Ordering::Relaxed) {
+					let tx = db.transaction(false);
+					let value = tx.get("key").unwrap();
+					total_reads.fetch_add(1, Ordering::Relaxed);
+					if value.is_none() {
+						none_reads.fetch_add(1, Ordering::Relaxed);
+					}
+					drop(tx);
+				}
+			}));
+		}
+
+		let started = Instant::now();
+		while started.elapsed() < Duration::from_millis(500) {
+			thread::sleep(Duration::from_millis(10));
+		}
+		stop.store(true, Ordering::Relaxed);
+
+		writer.join().unwrap();
+		for r in readers {
+			r.join().unwrap();
+		}
+
+		let nones = none_reads.load(Ordering::Relaxed);
+		let total = total_reads.load(Ordering::Relaxed);
+		assert_eq!(
+			nones, 0,
+			"reader observed `None` for a key that was seeded with a value \
+			 and never deleted ({nones} of {total} reads returned `None`). \
+			 This is a snapshot-isolation registration race: \
+			 `TransactionInner::new` (and `::reset`) load \
+			 `oracle.current_timestamp()` before registering the \
+			 transaction's start version in `counter_by_oracle`, so a \
+			 concurrent committer's inline GC can advance `cleanup_ts` \
+			 past the reader's snapshot. The reader then sees no visible \
+			 version at its snapshot timestamp."
+		);
 	}
 }
