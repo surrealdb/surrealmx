@@ -104,10 +104,10 @@ impl Inner {
 
 impl Inner {
 	/// Returns the earliest active reader's snapshot version, or `fallback`
-	/// if no reader is currently registered. Pairs with the `SeqCst` load
-	/// + fence in `register_counter` to give writers a watermark that
-	/// observes every reader whose registration is totally ordered before
-	/// the fence below.
+	/// if no reader is currently registered. Pairs with the SeqCst
+	/// load-and-fence in `register_counter` to give writers a watermark
+	/// that observes every reader whose registration is totally ordered
+	/// before the fence below.
 	#[inline]
 	pub(crate) fn earliest_active_version(&self, fallback: u64) -> u64 {
 		earliest_active(&self.counter_by_oracle, fallback)
