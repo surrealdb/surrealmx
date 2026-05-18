@@ -16,6 +16,7 @@
 
 use crate::inner::Inner;
 use crate::options::DatabaseOptions;
+use bytes::Bytes;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
 #[cfg(not(target_arch = "wasm32"))]
@@ -259,34 +260,38 @@ impl Database {
 	fn run_gc_dirty_inner(&self, cleanup_ts: u64) {
 		// Drain all keys from the dirty queue
 		while let Some(key) = self.gc_dirty_keys.pop() {
-			// Check if this key still exists in the datastore
-			if let Some(entry) = self.datastore.get(&key) {
-				// Get a mutable reference to the versions list
-				let mut versions = entry.value().write();
-				// Clean up unnecessary older versions
+			// Check if this key still exists in the datastore and clean up
+			// stale versions via the per-key RwLock. `read_sync` holds a
+			// shared leaf lock so interior mutability is observable.
+			let mut empty = false;
+			self.datastore.read_sync(&key, |_, arc| {
+				let mut versions = arc.write();
 				if versions.gc_older_versions(cleanup_ts) == 0 {
-					// Drop the version reference
-					drop(versions);
-					// Remove the entry from the datastore
-					self.datastore.remove(&key);
+					empty = true;
 				}
+			});
+			if empty {
+				self.datastore.remove_if_sync(&key, |arc| arc.read().is_empty());
 			}
 		}
 	}
 
 	fn run_gc_full(&self, cleanup_ts: u64) {
-		// Iterate over the entire datastore
-		for entry in self.datastore.iter() {
-			// Get a mutable reference to the versions list
-			let versions = entry.value();
-			let mut versions = versions.write();
-			// Clean up unnecessary older versions
+		// Snapshot keys whose versions chains might be empty after GC,
+		// then re-check under a conditional remove. We collect into a Vec
+		// so we don't hold an EBR guard across `remove_if_sync` calls,
+		// which would prevent EBR reclamation while we work.
+		let guard = scc::Guard::new();
+		let mut to_check: Vec<Bytes> = Vec::new();
+		for (key, arc) in self.datastore.iter(&guard) {
+			let mut versions = arc.write();
 			if versions.gc_older_versions(cleanup_ts) == 0 {
-				// Drop the version reference
-				drop(versions);
-				// Remove the entry from the datastore
-				self.datastore.remove(entry.key());
+				to_check.push(key.clone());
 			}
+		}
+		drop(guard);
+		for key in to_check {
+			self.datastore.remove_if_sync(&key, |arc| arc.read().is_empty());
 		}
 	}
 
@@ -399,34 +404,33 @@ impl Database {
 					let cleanup_ts = history_cutoff.min(earliest_tx);
 					// Drain all keys from the dirty queue (incremental GC)
 					while let Some(key) = db.gc_dirty_keys.pop() {
-						// Check if this key still exists in the datastore
-						if let Some(entry) = db.datastore.get(&key) {
-							// Get a mutable reference to the versions list
-							let mut versions = entry.value().write();
-							// Clean up unnecessary older versions
+						let mut empty = false;
+						db.datastore.read_sync(&key, |_, arc| {
+							let mut versions = arc.write();
 							if versions.gc_older_versions(cleanup_ts) == 0 {
-								// Drop the version reference
-								drop(versions);
-								// Remove the entry from the datastore
-								db.datastore.remove(&key);
+								empty = true;
 							}
+						});
+						if empty {
+							db.datastore
+								.remove_if_sync(&key, |arc| arc.read().is_empty());
 						}
 					}
 					// Periodically do a full datastore scan
 					cycle += 1;
 					if cycle.is_multiple_of(FULL_SCAN_FREQUENCY) {
-						// Iterate over the entire datastore
-						for entry in db.datastore.iter() {
-							// Get a mutable reference to the versions list
-							let versions = entry.value();
-							let mut versions = versions.write();
-							// Clean up unnecessary older versions
+						let guard = scc::Guard::new();
+						let mut to_check: Vec<Bytes> = Vec::new();
+						for (key, arc) in db.datastore.iter(&guard) {
+							let mut versions = arc.write();
 							if versions.gc_older_versions(cleanup_ts) == 0 {
-								// Drop the version reference
-								drop(versions);
-								// Remove the entry from the datastore
-								db.datastore.remove(entry.key());
+								to_check.push(key.clone());
 							}
+						}
+						drop(guard);
+						for key in to_check {
+							db.datastore
+								.remove_if_sync(&key, |arc| arc.read().is_empty());
 						}
 					}
 				}

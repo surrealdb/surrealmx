@@ -19,7 +19,7 @@ use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
 use crate::inner::{Inner, COUNTER_TOMBSTONE};
-use crate::iter::{MergeIterator, MergeQueueIter};
+use crate::iter::{MergeIterator, MergeQueueIter, TreeIter};
 use crate::kv::IntoBytes;
 use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
@@ -1027,41 +1027,85 @@ impl TransactionInner {
 		let cleanup_ts = history.min(earliest);
 		// Loop over the updates in the writeset
 		for (key, value) in entry.writeset.iter() {
-			// Clone the value for insertion
-			let value = value.clone();
-			// Check if this key already exists
-			if let Some(entry) = self.database.datastore.get(key) {
-				// Get a mutable reference to the versions list
-				let mut versions = entry.value().write();
-				// Clean up unnecessary older versions
+			// `scc::TreeIndex` lacks an entry-style mutate-or-insert API, so
+			// we open a `read_sync` (shared lock on the leaf) and mutate
+			// `Versions` through the `Arc<RwLock<_>>` interior. The shared
+			// lock blocks structural splits, satisfying the docs' requirement
+			// for observable interior mutability. When the key is absent we
+			// fall through to a tight `insert_sync` retry loop that handles
+			// concurrent inserts at the same key.
+			let mut existed = false;
+			let mut needs_remove = false;
+			self.database.datastore.read_sync(key, |_, arc| {
+				existed = true;
+				let mut versions = arc.write();
 				let len = versions.gc_older_versions(cleanup_ts);
-				// If no versions remain and the value is none, remove the entry fully
 				if len == 0 && value.is_none() {
-					// Drop the version reference
-					drop(versions);
-					// Remove the entry from the datastore
-					self.database.datastore.remove(key);
-				}
-				// If a value is set, add the new version entry
-				else {
-					// Add the version entry to the versions list
+					// Mark for removal; conditional removal happens after the
+					// `read_sync` shared lock has been released.
+					needs_remove = true;
+				} else {
 					versions.push(Version {
 						version,
-						value,
+						value: value.clone(),
 					});
-					// If stale versions remain, mark this key for background GC
 					if len > 1 {
 						self.database.gc_dirty_keys.push(key.clone());
 					}
 				}
-			} else {
-				self.database.datastore.insert(
-					key.clone(),
-					RwLock::new(Versions::from(Version {
-						version,
-						value,
-					})),
-				);
+			});
+			if existed {
+				if needs_remove {
+					// Re-check under exclusive: another committer may have
+					// pushed a fresh version on this key since we released
+					// the shared lock above.
+					self.database.datastore.remove_if_sync(key, |arc| {
+						arc.read().is_empty()
+					});
+				}
+				continue;
+			}
+			// Key absent — try to insert. If a concurrent committer races
+			// us, `insert_sync` returns the rejected `(K, V)` and we retry
+			// the `read_sync` mutate path on the next iteration.
+			let mut pending = Arc::new(RwLock::new(Versions::from(Version {
+				version,
+				value: value.clone(),
+			})));
+			loop {
+				match self.database.datastore.insert_sync(key.clone(), pending) {
+					Ok(()) => break,
+					Err((_, returned)) => {
+						let mut took_path = false;
+						self.database.datastore.read_sync(key, |_, arc| {
+							took_path = true;
+							let mut versions = arc.write();
+							let len = versions.gc_older_versions(cleanup_ts);
+							if len == 0 && value.is_none() {
+								needs_remove = true;
+							} else {
+								versions.push(Version {
+									version,
+									value: value.clone(),
+								});
+								if len > 1 {
+									self.database.gc_dirty_keys.push(key.clone());
+								}
+							}
+						});
+						if took_path {
+							if needs_remove {
+								self.database.datastore.remove_if_sync(key, |arc| {
+									arc.read().is_empty()
+								});
+							}
+							break;
+						}
+						// Both lookups raced — try insert again with the
+						// same pending Arc.
+						pending = returned;
+					}
+				}
 			}
 		}
 		// Append the transaction to the persistence layer
@@ -1641,14 +1685,15 @@ impl TransactionInner {
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			for entry in datastore_range {
-				let value = match entry.value().try_read() {
+			let guard = scc::Guard::new();
+			let datastore_range = self.database.datastore.range::<Bytes, _>(
+				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
+				&guard,
+			);
+			for (k, arc) in datastore_range {
+				let value = match arc.try_read() {
 					Some(g) => g.fetch_version(self.version),
-					None => entry.value().read().fetch_version(self.version),
+					None => arc.read().fetch_version(self.version),
 				};
 				let Some(value) = value else {
 					continue;
@@ -1658,7 +1703,7 @@ impl TransactionInner {
 					continue;
 				}
 				count += 1;
-				if !f(entry.key(), &value) {
+				if !f(k, &value) {
 					break;
 				}
 				if let Some(l) = limit {
@@ -1678,9 +1723,7 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIter::new(&self.database.datastore, beg, end),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -1740,14 +1783,15 @@ impl TransactionInner {
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			for entry in datastore_range {
-				let exists = match entry.value().try_read() {
+			let guard = scc::Guard::new();
+			let datastore_range = self.database.datastore.range::<Bytes, _>(
+				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
+				&guard,
+			);
+			for (k, arc) in datastore_range {
+				let exists = match arc.try_read() {
 					Some(g) => g.exists_version(self.version),
-					None => entry.value().read().exists_version(self.version),
+					None => arc.read().exists_version(self.version),
 				};
 				if !exists {
 					continue;
@@ -1757,7 +1801,7 @@ impl TransactionInner {
 					continue;
 				}
 				count += 1;
-				if !f(entry.key()) {
+				if !f(k) {
 					break;
 				}
 				if let Some(l) = limit {
@@ -1777,9 +1821,7 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIter::new(&self.database.datastore, beg, end),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -1837,14 +1879,15 @@ impl TransactionInner {
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			for entry in datastore_range {
-				let value = match entry.value().try_read() {
+			let guard = scc::Guard::new();
+			let datastore_range = self.database.datastore.range::<Bytes, _>(
+				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
+				&guard,
+			);
+			for (k, arc) in datastore_range {
+				let value = match arc.try_read() {
 					Some(g) => g.fetch_version(self.version),
-					None => entry.value().read().fetch_version(self.version),
+					None => arc.read().fetch_version(self.version),
 				};
 				let Some(value) = value else {
 					continue;
@@ -1853,7 +1896,7 @@ impl TransactionInner {
 					skip -= 1;
 					continue;
 				}
-				buf.push((entry.key().clone(), value));
+				buf.push((k.clone(), value));
 				if let Some(l) = limit {
 					if buf.len() >= l {
 						break;
@@ -1871,9 +1914,7 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIter::new(&self.database.datastore, beg, end),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -1928,14 +1969,15 @@ impl TransactionInner {
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			for entry in datastore_range {
-				let exists = match entry.value().try_read() {
+			let guard = scc::Guard::new();
+			let datastore_range = self.database.datastore.range::<Bytes, _>(
+				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
+				&guard,
+			);
+			for (k, arc) in datastore_range {
+				let exists = match arc.try_read() {
 					Some(g) => g.exists_version(self.version),
-					None => entry.value().read().exists_version(self.version),
+					None => arc.read().exists_version(self.version),
 				};
 				if !exists {
 					continue;
@@ -1944,7 +1986,7 @@ impl TransactionInner {
 					skip -= 1;
 					continue;
 				}
-				buf.push(entry.key().clone());
+				buf.push(k.clone());
 				if let Some(l) = limit {
 					if buf.len() >= l {
 						break;
@@ -1962,9 +2004,7 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIter::new(&self.database.datastore, beg, end),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -2058,16 +2098,17 @@ impl TransactionInner {
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			let guard = scc::Guard::new();
+			let datastore_range = self.database.datastore.range::<Bytes, _>(
+				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
+				&guard,
+			);
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
-					for entry in $iter {
-						let exists = match entry.value().try_read() {
+					for (_k, arc) in $iter {
+						let exists = match arc.try_read() {
 							Some(g) => g.exists_version(version),
-							None => entry.value().read().exists_version(version),
+							None => arc.read().exists_version(version),
 						};
 						if !exists {
 							continue;
@@ -2100,9 +2141,7 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIter::new(&self.database.datastore, beg, end),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -2162,16 +2201,17 @@ impl TransactionInner {
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			let guard = scc::Guard::new();
+			let datastore_range = self.database.datastore.range::<Bytes, _>(
+				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
+				&guard,
+			);
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
-					for entry in $iter {
-						let exists = match entry.value().try_read() {
+					for (k, arc) in $iter {
+						let exists = match arc.try_read() {
 							Some(g) => g.exists_version(version),
-							None => entry.value().read().exists_version(version),
+							None => arc.read().exists_version(version),
 						};
 						if !exists {
 							continue;
@@ -2180,7 +2220,7 @@ impl TransactionInner {
 							skip -= 1;
 							continue;
 						}
-						res.push(entry.key().clone());
+						res.push(k.clone());
 						if let Some(l) = limit {
 							if res.len() >= l {
 								break;
@@ -2204,9 +2244,7 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIter::new(&self.database.datastore, beg, end),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -2266,16 +2304,17 @@ impl TransactionInner {
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			let guard = scc::Guard::new();
+			let datastore_range = self.database.datastore.range::<Bytes, _>(
+				(Bound::Included(beg.clone()), Bound::Excluded(end.clone())),
+				&guard,
+			);
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
-					for entry in $iter {
-						let value = match entry.value().try_read() {
+					for (k, arc) in $iter {
+						let value = match arc.try_read() {
 							Some(g) => g.fetch_version(version),
-							None => entry.value().read().fetch_version(version),
+							None => arc.read().fetch_version(version),
 						};
 						let Some(value) = value else {
 							continue;
@@ -2284,7 +2323,7 @@ impl TransactionInner {
 							skip -= 1;
 							continue;
 						}
-						res.push((entry.key().clone(), value));
+						res.push((k.clone(), value));
 						if let Some(l) = limit {
 							if res.len() >= l {
 								break;
@@ -2308,9 +2347,7 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIter::new(&self.database.datastore, beg, end),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -2374,9 +2411,7 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator to iterate over keys
 		let iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			TreeIter::new(&self.database.datastore, beg, end),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -2389,15 +2424,17 @@ impl TransactionInner {
 		for (key, _) in iter {
 			// Use a BTreeMap to collect and merge versions by version number
 			let mut all_versions: BTreeMap<u64, Option<Bytes>> = BTreeMap::new();
-			// Collect all versions from the datastore
-			if let Some(entry) = self.database.datastore.get(&key) {
-				let versions = entry.value().read();
+			// Collect all versions from the datastore. `read_sync` keeps the
+			// leaf shared-locked while we read, ensuring `Versions` mutations
+			// are observable per `scc::TreeIndex` docs.
+			self.database.datastore.read_sync(&key, |_, arc| {
+				let versions = arc.read();
 				for (ver, val) in versions.all_versions() {
 					if ver <= version {
 						all_versions.insert(ver, val);
 					}
 				}
-			}
+			});
 			// Collect version from the current writeset
 			if self.write {
 				if let Some(val) = self.writeset.get(&key) {
@@ -2570,11 +2607,16 @@ impl TransactionInner {
 				}
 			}
 		}
-		// Check the key in the datastore
-		self.database.datastore.get(key).and_then(|e| match e.value().try_read() {
-			Some(guard) => guard.fetch_version(version),
-			None => e.value().read().fetch_version(version),
-		})
+		// Check the key in the datastore — `read_sync` holds a shared lock
+		// on the leaf so interior mutability through the `RwLock` is
+		// observable (per `scc::TreeIndex` docs).
+		self.database
+			.datastore
+			.read_sync(key, |_, arc| match arc.try_read() {
+				Some(guard) => guard.fetch_version(version),
+				None => arc.read().fetch_version(version),
+			})
+			.flatten()
 	}
 
 	/// Check if a key exists in the datastore only
@@ -2600,12 +2642,11 @@ impl TransactionInner {
 		// Check the key in the datastore
 		self.database
 			.datastore
-			.get(key)
-			.map(|e| match e.value().try_read() {
+			.read_sync(key, |_, arc| match arc.try_read() {
 				Some(guard) => guard.exists_version(version),
-				None => e.value().read().exists_version(version),
+				None => arc.read().exists_version(version),
 			})
-			.is_some_and(|v| v)
+			.unwrap_or(false)
 	}
 
 	/// Check if a key equals a value in the datastore only
@@ -2634,17 +2675,15 @@ impl TransactionInner {
 			}
 		}
 		// Check the key in the datastore
-		match (
-			chk.as_ref(),
-			self.database
-				.datastore
-				.get(key)
-				.and_then(|e| match e.value().try_read() {
-					Some(guard) => guard.fetch_version(version),
-					None => e.value().read().fetch_version(version),
-				})
-				.as_ref(),
-		) {
+		let datastore_value: Option<Bytes> = self
+			.database
+			.datastore
+			.read_sync(key, |_, arc| match arc.try_read() {
+				Some(guard) => guard.fetch_version(version),
+				None => arc.read().fetch_version(version),
+			})
+			.flatten();
+		match (chk.as_ref(), datastore_value.as_ref()) {
 			(Some(x), Some(y)) => x.as_slice() == y,
 			(None, None) => true,
 			_ => false,

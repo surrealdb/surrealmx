@@ -151,6 +151,12 @@ impl Versions {
 		self.inner.shrink_to_fit();
 	}
 
+	/// Whether the version chain is empty.
+	#[inline]
+	pub(crate) fn is_empty(&self) -> bool {
+		self.inner.is_empty()
+	}
+
 	/// Check if the item at a specific version is a delete.
 	#[inline]
 	pub(crate) fn is_delete(&self, version: usize) -> bool {

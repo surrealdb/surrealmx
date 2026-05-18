@@ -27,6 +27,7 @@ crossbeam-queue = "0.3.12"
 crossbeam-skiplist = "0.1.3"
 papaya = "0.2.4"
 parking_lot = "0.12.5"
+scc = "3.7"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 smallvec = { version = "1.15.1", features = ["serde"] }
 thiserror = "2.0.18"

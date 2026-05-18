@@ -314,19 +314,21 @@ impl Persistence {
 				0
 			};
 			// Stream write each key-value pair to reduce memory usage
-			for entry in self.inner.datastore.iter() {
+			let guard = scc::Guard::new();
+			for (key, arc) in self.inner.datastore.iter(&guard) {
 				// Get all versions for this key
-				let versions = entry.value().read().all_versions();
+				let versions = arc.read().all_versions();
 				// Ensure that there are version entries
 				if !versions.is_empty() {
 					// Serialize and write this single entry
 					bincode::serde::encode_into_std_write(
-						&(entry.key().clone(), versions),
+						&(key.clone(), versions),
 						&mut writer,
 						config::standard(),
 					)?;
 				}
 			}
+			drop(guard);
 			// Flush the compressed writer
 			writer.flush()?;
 			// Finish compression (finalizes LZ4 stream)
@@ -396,7 +398,10 @@ impl Persistence {
 									});
 								}
 								// Insert the entry into the datastore
-								self.inner.datastore.insert(k, RwLock::new(entries));
+								let _ = self
+									.inner
+									.datastore
+									.insert_sync(k, Arc::new(RwLock::new(entries)));
 							}
 						}
 						Err(e) => match e {
@@ -440,21 +445,33 @@ impl Persistence {
 					match result {
 						Ok((k, version, val)) => {
 							// Check if the key already exists
-							if let Some(entry) = self.inner.datastore.get(&k) {
-								// Update existing key with stored version
-								entry.value().write().push(Version {
+							let mut applied = false;
+							self.inner.datastore.read_sync(&k, |_, arc| {
+								arc.write().push(Version {
 									version,
-									value: val,
+									value: val.clone(),
 								});
-							} else {
-								// Insert new key with stored version
-								self.inner.datastore.insert(
-									k.clone(),
-									RwLock::new(Versions::from(Version {
-										version,
-										value: val,
-									})),
-								);
+								applied = true;
+							});
+							if !applied {
+								// Insert new key with stored version. If a
+								// concurrent reader has just inserted, fall
+								// back to a `read_sync` push on the existing
+								// entry.
+								let new = Arc::new(RwLock::new(Versions::from(Version {
+									version,
+									value: val.clone(),
+								})));
+								if let Err((_, _)) =
+									self.inner.datastore.insert_sync(k.clone(), new)
+								{
+									self.inner.datastore.read_sync(&k, |_, arc| {
+										arc.write().push(Version {
+											version,
+											value: val.clone(),
+										});
+									});
+								}
 							}
 						}
 						Err(e) => match e {
@@ -636,19 +653,21 @@ impl Persistence {
 							0
 						};
 						// Stream write each entry to reduce memory usage
-						for entry in db.datastore.iter() {
+						let guard = scc::Guard::new();
+						for (key, arc) in db.datastore.iter(&guard) {
 							// Get all versions for this key
-							let versions = entry.value().read().all_versions();
+							let versions = arc.read().all_versions();
 							// Ensure that there are version entries
 							if !versions.is_empty() {
 								// Serialize and write this single entry
 								bincode::serde::encode_into_std_write(
-									&(entry.key().clone(), versions),
+									&(key.clone(), versions),
 									&mut writer,
 									config::standard(),
 								)?;
 							}
 						}
+						drop(guard);
 						// Flush the compressed writer
 						writer.flush()?;
 						// Finish compression (finalizes LZ4 stream)

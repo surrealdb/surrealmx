@@ -24,11 +24,18 @@ use bytes::Bytes;
 use crossbeam_queue::SegQueue;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
+use scc::TreeIndex;
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+/// Shared MVCC version chain for a single datastore key. Wrapped in `Arc`
+/// because `scc::TreeIndex` requires `V: Clone` — `RwLock<Versions>` is not
+/// `Clone`, but cloning an `Arc` only bumps a refcount and lets the tree
+/// snapshot pointers around leaf splits without affecting interior state.
+pub(crate) type DataValue = Arc<RwLock<Versions>>;
 
 /// Sentinel value stored in a counter entry while its owning [`Inner`]
 /// SkipMap entry is being removed by [`crate::tx::Transaction::drop`]. A
@@ -40,8 +47,8 @@ pub(crate) const COUNTER_TOMBSTONE: u64 = u64::MAX;
 pub struct Inner {
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
-	/// The underlying lock-free Skip Map datastructure
-	pub(crate) datastore: SkipMap<Bytes, RwLock<Versions>>,
+	/// The underlying lock-free B+tree datastructure
+	pub(crate) datastore: TreeIndex<Bytes, DataValue>,
 	/// A count of total transactions grouped by oracle version
 	pub(crate) counter_by_oracle: SkipMap<u64, Arc<AtomicU64>>,
 	/// A count of total transactions grouped by commit id
@@ -80,7 +87,7 @@ impl Inner {
 	pub fn new(opts: &DatabaseOptions) -> Self {
 		Self {
 			oracle: Oracle::new(opts.resync_interval),
-			datastore: SkipMap::new(),
+			datastore: TreeIndex::new(),
 			counter_by_oracle: SkipMap::new(),
 			counter_by_commit: SkipMap::new(),
 			transaction_queue_id: AtomicU64::new(0),
