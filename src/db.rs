@@ -200,11 +200,10 @@ impl Database {
 	/// This should be called when automatic cleanup is disabled via
 	/// [`DatabaseOptions::enable_cleanup`].
 	pub fn run_cleanup(&self) {
-		// Get the oldest commit entry which is still active
-		if let Some(entry) = self.counter_by_commit.front() {
-			// Get the oldest commit version
-			let oldest = entry.key();
-			// Remove commits up to this commit queue id from the transaction queue
+		// Use `u64::MAX` as the "no readers" fallback to preserve the
+		// original semantics (trim nothing when nothing is registered).
+		let oldest = self.earliest_active_commit(u64::MAX);
+		if oldest != u64::MAX {
 			self.transaction_commit_queue.range(..oldest).for_each(|e| {
 				e.remove();
 			});
@@ -229,9 +228,8 @@ impl Database {
 		// Calculate the history cutoff (current time - history duration)
 		let history_cutoff = now.saturating_sub(history as u64);
 		// Get the earliest active transaction version
-		let earliest_tx = self.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(now);
-		// Use the earlier of history cutoff or earliest transaction to protect active
-		// transactions
+		let earliest_tx = self.earliest_active_version(now);
+		// Use history cutoff or earliest transaction to protect active transactions
 		let cleanup_ts = history_cutoff.min(earliest_tx);
 		// First, process keys known to have stale versions
 		self.run_gc_dirty_inner(cleanup_ts);
@@ -251,9 +249,8 @@ impl Database {
 		// Calculate the history cutoff (current time - history duration)
 		let history_cutoff = now.saturating_sub(history as u64);
 		// Get the earliest active transaction version
-		let earliest_tx = self.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(now);
-		// Use the earlier of history cutoff or earliest transaction to protect active
-		// transactions
+		let earliest_tx = self.earliest_active_version(now);
+		// Use history cutoff or earliest transaction to protect active transactions
 		let cleanup_ts = history_cutoff.min(earliest_tx);
 		// Process dirty keys
 		self.run_gc_dirty_inner(cleanup_ts);
@@ -354,11 +351,9 @@ impl Database {
 						break;
 					}
 					// Clean up the transaction commit queue
-					// Get the oldest commit entry which is still active
-					if let Some(entry) = db.counter_by_commit.front() {
-						// Get the oldest commit version
-						let oldest = entry.key();
-						// Remove the commits up to this commit queue id from the transaction queue
+					let oldest = db.earliest_active_commit(u64::MAX);
+					// Ensure the oldest value is not the max
+					if oldest != u64::MAX {
 						db.transaction_commit_queue.range(..oldest).for_each(|e| {
 							e.remove();
 						});
@@ -399,9 +394,8 @@ impl Database {
 					// Calculate the history cutoff (current time - history duration)
 					let history_cutoff = now.saturating_sub(history as u64);
 					// Get the earliest active transaction version
-					let earliest_tx = db.counter_by_oracle.front().map(|e| *e.key()).unwrap_or(now);
-					// Use the earlier of history cutoff or earliest transaction to protect active
-					// transactions
+					let earliest_tx = db.earliest_active_version(now);
+					// Use history cutoff or earliest transaction to protect active transactions
 					let cleanup_ts = history_cutoff.min(earliest_tx);
 					// Drain all keys from the dirty queue (incremental GC)
 					while let Some(key) = db.gc_dirty_keys.pop() {
