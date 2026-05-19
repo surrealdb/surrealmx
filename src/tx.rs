@@ -30,7 +30,7 @@ use arc_swap::ArcSwap;
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
-use std::cell::RefCell;
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::ControlFlow;
@@ -57,6 +57,13 @@ pub struct Transaction {
 	/// The inner transaction for this transaction
 	pub(crate) inner: Option<TransactionInner>,
 }
+
+// Transaction must be Send + Sync so downstream callers can place it
+// behind shared locks like `tokio::sync::RwLock<Transaction>`.
+const _: fn() = || {
+	fn assert_send_sync<T: Send + Sync>() {}
+	assert_send_sync::<Transaction>();
+};
 
 impl Drop for Transaction {
 	fn drop(&mut self) {
@@ -613,7 +620,7 @@ pub(crate) struct TransactionInner {
 	/// The local set of key reads
 	pub(crate) readset: HashSet<Bytes>,
 	/// Bloom filter over the readset for fast conflict pre-checks
-	pub(crate) readset_bloom: RefCell<BloomFilter>,
+	pub(crate) readset_bloom: Mutex<BloomFilter>,
 	/// The local set of key scans
 	pub(crate) scanset: SkipMap<Bytes, ArcSwap<Bytes>>,
 	/// The local set of updates and deletes
@@ -752,7 +759,7 @@ impl TransactionInner {
 			commit,
 			version,
 			readset: HashSet::new(),
-			readset_bloom: RefCell::new(BloomFilter::new()),
+			readset_bloom: Mutex::new(BloomFilter::new()),
 			scanset: SkipMap::new(),
 			writeset: BTreeMap::new(),
 			database: db,
@@ -789,7 +796,7 @@ impl TransactionInner {
 		// Clear the transaction readset
 		self.readset.pin().clear();
 		// Clear the readset bloom filter
-		self.readset_bloom.borrow_mut().clear();
+		self.readset_bloom.lock().clear();
 		// Clear or completely reset the allocated writeset
 		match self.writeset.len() > threshold {
 			true => self.writeset = BTreeMap::new(),
@@ -827,8 +834,10 @@ impl TransactionInner {
 		// Mark this transaction as done
 		self.done = true;
 		// Clear the transaction state
-		self.readset.pin().clear();
-		self.readset_bloom.borrow_mut().clear();
+		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			self.readset.pin().clear();
+			self.readset_bloom.lock().clear();
+		}
 		self.scanset.clear();
 		self.writeset.clear();
 		// Clear savepoint stack
@@ -924,8 +933,10 @@ impl TransactionInner {
 		if self.writeset.is_empty() {
 			// Clear the transaction state
 			self.scanset.clear();
-			self.readset.pin().clear();
-			self.readset_bloom.borrow_mut().clear();
+			if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+				self.readset.pin().clear();
+				self.readset_bloom.lock().clear();
+			}
 			// Clear savepoint stack
 			self.savepoint_stack.clear();
 			// Continue
@@ -959,8 +970,10 @@ impl TransactionInner {
 					self.database.transaction_commit_queue.remove(&version);
 					// Clear the transaction state
 					self.scanset.clear();
-					self.readset.pin().clear();
-					self.readset_bloom.borrow_mut().clear();
+					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+						self.readset.pin().clear();
+						self.readset_bloom.lock().clear();
+					}
 					self.writeset.clear();
 					// Clear savepoint stack
 					self.savepoint_stack.clear();
@@ -972,14 +985,14 @@ impl TransactionInner {
 					// Check if a previous transaction conflicts against reads
 					if !tx
 						.value()
-						.is_disjoint_readset_bloom(&self.readset, &self.readset_bloom.borrow())
+						.is_disjoint_readset_bloom(&self.readset, &self.readset_bloom.lock())
 					{
 						// Remove the transaction from the commit queue
 						self.database.transaction_commit_queue.remove(&version);
 						// Clear the transaction state
 						self.scanset.clear();
 						self.readset.pin().clear();
-						self.readset_bloom.borrow_mut().clear();
+						self.readset_bloom.lock().clear();
 						self.writeset.clear();
 						// Clear savepoint stack
 						self.savepoint_stack.clear();
@@ -1010,7 +1023,7 @@ impl TransactionInner {
 									self.database.transaction_commit_queue.remove(&version);
 									// Clear the transaction state
 									self.readset.pin().clear();
-									self.readset_bloom.borrow_mut().clear();
+									self.readset_bloom.lock().clear();
 									self.scanset.clear();
 									self.writeset.clear();
 									// Clear savepoint stack
@@ -1084,8 +1097,10 @@ impl TransactionInner {
 				self.database.transaction_merge_queue.remove(&version);
 				// Clear the transaction state
 				self.scanset.clear();
-				self.readset.pin().clear();
-				self.readset_bloom.borrow_mut().clear();
+				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+					self.readset.pin().clear();
+					self.readset_bloom.lock().clear();
+				}
 				self.writeset.clear();
 				// Clear savepoint stack
 				self.savepoint_stack.clear();
@@ -1097,8 +1112,10 @@ impl TransactionInner {
 		self.database.transaction_merge_queue.remove(&version);
 		// Clear the transaction state
 		self.scanset.clear();
-		self.readset.pin().clear();
-		self.readset_bloom.borrow_mut().clear();
+		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			self.readset.pin().clear();
+			self.readset_bloom.lock().clear();
+		}
 		self.writeset.clear();
 		// Clear savepoint stack
 		self.savepoint_stack.clear();
@@ -1129,7 +1146,7 @@ impl TransactionInner {
 					let res = self.exists_in_datastore(lookup, self.version);
 					// Check whether we should track key reads
 					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-						self.readset_bloom.borrow_mut().insert(lookup);
+						self.readset_bloom.lock().insert(lookup);
 						self.readset.pin().insert(key.into_bytes());
 					}
 					// Return the result
@@ -1189,7 +1206,7 @@ impl TransactionInner {
 					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 						let guard = self.readset.pin();
 						if !guard.contains(lookup) {
-							self.readset_bloom.borrow_mut().insert(lookup);
+							self.readset_bloom.lock().insert(lookup);
 							guard.insert(key.into_bytes());
 						}
 					}
@@ -1255,7 +1272,7 @@ impl TransactionInner {
 							if self.mode >= IsolationLevel::SerializableSnapshotIsolation
 								&& !self.readset.pin().contains(lookup)
 							{
-								self.readset_bloom.borrow_mut().insert(lookup);
+								self.readset_bloom.lock().insert(lookup);
 								self.readset.pin().insert(key.into_bytes());
 							}
 							// Return the result
