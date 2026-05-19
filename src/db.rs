@@ -17,14 +17,16 @@
 use crate::inner::Inner;
 use crate::options::DatabaseOptions;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
+use crate::options::{
+	DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_FULL_SCAN_FREQUENCY, DEFAULT_GC_INTERVAL,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
 use crate::tx::Transaction;
 use std::ops::Deref;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{fence, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,6 +46,9 @@ pub struct Database {
 	/// Interval used by the garbage collector thread
 	#[cfg(not(target_arch = "wasm32"))]
 	gc_interval: Duration,
+	/// Number of gc wake-ups between full datastore scans
+	#[cfg(not(target_arch = "wasm32"))]
+	gc_full_scan_frequency: u64,
 	/// Interval used by the cleanup thread
 	#[cfg(not(target_arch = "wasm32"))]
 	cleanup_interval: Duration,
@@ -60,6 +65,8 @@ impl Default for Database {
 			persistence: None,
 			#[cfg(not(target_arch = "wasm32"))]
 			gc_interval: DEFAULT_GC_INTERVAL,
+			#[cfg(not(target_arch = "wasm32"))]
+			gc_full_scan_frequency: DEFAULT_GC_FULL_SCAN_FREQUENCY,
 			#[cfg(not(target_arch = "wasm32"))]
 			cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
 		}
@@ -101,6 +108,8 @@ impl Database {
 			#[cfg(not(target_arch = "wasm32"))]
 			gc_interval: opts.gc_interval,
 			#[cfg(not(target_arch = "wasm32"))]
+			gc_full_scan_frequency: opts.gc_full_scan_frequency,
+			#[cfg(not(target_arch = "wasm32"))]
 			cleanup_interval: opts.cleanup_interval,
 		};
 		// Start background tasks when enabled
@@ -139,6 +148,7 @@ impl Database {
 			pool,
 			persistence: Some(persist),
 			gc_interval: opts.gc_interval,
+			gc_full_scan_frequency: opts.gc_full_scan_frequency,
 			cleanup_interval: opts.cleanup_interval,
 		};
 		// Start background tasks when enabled
@@ -221,16 +231,7 @@ impl Database {
 	/// modified, or when automatic background GC is disabled via
 	/// [`DatabaseOptions::enable_gc`].
 	pub fn run_gc(&self) {
-		// Get the current time in nanoseconds
-		let now = self.oracle.current_time_ns();
-		// Get the garbage collection epoch as nanoseconds
-		let history = self.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
-		// Calculate the history cutoff (current time - history duration)
-		let history_cutoff = now.saturating_sub(history as u64);
-		// Get the earliest active transaction version
-		let earliest_tx = self.earliest_active_version(now);
-		// Use history cutoff or earliest transaction to protect active transactions
-		let cleanup_ts = history_cutoff.min(earliest_tx);
+		let cleanup_ts = self.compute_cleanup_ts();
 		// First, process keys known to have stale versions
 		self.run_gc_dirty_inner(cleanup_ts);
 		// Then perform a full datastore scan for any remaining stale versions
@@ -242,18 +243,38 @@ impl Database {
 	/// This is a lightweight alternative to a full datastore scan, useful
 	/// for frequent incremental cleanup between full GC passes.
 	pub fn run_gc_dirty(&self) {
-		// Get the current time in nanoseconds
-		let now = self.oracle.current_time_ns();
-		// Get the garbage collection epoch as nanoseconds
-		let history = self.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
-		// Calculate the history cutoff (current time - history duration)
-		let history_cutoff = now.saturating_sub(history as u64);
-		// Get the earliest active transaction version
-		let earliest_tx = self.earliest_active_version(now);
-		// Use history cutoff or earliest transaction to protect active transactions
-		let cleanup_ts = history_cutoff.min(earliest_tx);
+		let cleanup_ts = self.compute_cleanup_ts();
 		// Process dirty keys
 		self.run_gc_dirty_inner(cleanup_ts);
+	}
+
+	/// Compute the next `cleanup_ts`, publishing it into `gc_floor` so
+	/// concurrent `register_counter` retries any reader whose snapshot
+	/// is below it, then re-scan to bound by any newly-arrived reader.
+	///
+	/// The proposed value is capped at the current oracle timestamp.
+	/// Without that cap, an idle database (oracle frozen while wall
+	/// clock advances) would push `gc_floor` above any value a future
+	/// reader could load — causing `register_counter` to spin forever
+	/// retrying.
+	fn compute_cleanup_ts(&self) -> u64 {
+		let now = self.oracle.current_time_ns();
+		let history = self.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
+		let history_cutoff = now.saturating_sub(history as u64);
+		let earliest_tx = self.earliest_active_version(now);
+		let oracle_now = self.oracle.inner.timestamp.load(Ordering::SeqCst);
+		// `gc_floor` must stay <= oracle so any future reader's load
+		// (which returns >= current oracle) satisfies the floor check.
+		let proposed = history_cutoff.min(earliest_tx).min(oracle_now);
+		// Publish proposed cleanup_ts via `gc_floor` BEFORE reclaiming.
+		// A `register_counter` that fences after CAS-publish will see
+		// either the old floor (and its publish becomes visible to our
+		// re-scan below via fence-fence SC ordering) or the new floor
+		// (and will retry to a fresh snapshot above it).
+		self.gc_floor.fetch_max(proposed, Ordering::SeqCst);
+		fence(Ordering::SeqCst);
+		let earliest_after = self.earliest_active_version(now);
+		proposed.min(earliest_after)
 	}
 
 	fn run_gc_dirty_inner(&self, cleanup_ts: u64) {
@@ -369,8 +390,8 @@ impl Database {
 		if db.garbage_collection_handle.read().is_none() {
 			// Get the specified interval
 			let interval = self.gc_interval;
-			// Full scan runs every 4th wake cycle; dirty-key pass runs every cycle
-			const FULL_SCAN_FREQUENCY: u64 = 4;
+			// Full scan runs every Nth wake cycle; dirty-key pass runs every cycle
+			let full_scan_frequency = self.gc_full_scan_frequency.max(1);
 			// Spawn a new thread to handle periodic garbage collection
 			let handle = std::thread::spawn(move || {
 				let mut cycle: u64 = 0;
@@ -382,34 +403,49 @@ impl Database {
 					if !db.background_threads_enabled.load(Ordering::Relaxed) {
 						break;
 					}
-					// Get the current time in nanoseconds
-					let now = db.oracle.current_time_ns();
-					// Get the garbage collection epoch as nanoseconds
-					let history = db.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
-					// Calculate the history cutoff (current time - history duration)
-					let history_cutoff = now.saturating_sub(history as u64);
-					// Get the earliest active transaction version
-					let earliest_tx = db.earliest_active_version(now);
-					// Use history cutoff or earliest transaction to protect active transactions
-					let cleanup_ts = history_cutoff.min(earliest_tx);
-					// Drain all keys from the dirty queue (incremental GC)
-					{
+					// Compute the next cleanup_ts. This publishes the
+					// proposed value to `gc_floor` and re-scans the
+					// counter map so any reader landing in the
+					// publish-and-scan window is either visible to us
+					// (and bounds the final cleanup_ts) or retries from
+					// a fresh oracle read above the floor. The proposed
+					// value is capped at the current oracle so an idle
+					// database does not lock readers out forever.
+					let cleanup_ts = {
+						let now = db.oracle.current_time_ns();
+						let history = db
+							.garbage_collection_epoch
+							.read()
+							.unwrap_or_default()
+							.as_nanos();
+						let history_cutoff = now.saturating_sub(history as u64);
+						let earliest_tx = db.earliest_active_version(now);
+						let oracle_now = db.oracle.inner.timestamp.load(Ordering::SeqCst);
+						let proposed =
+							history_cutoff.min(earliest_tx).min(oracle_now);
+						db.gc_floor.fetch_max(proposed, Ordering::SeqCst);
+						fence(Ordering::SeqCst);
+						let earliest_after = db.earliest_active_version(now);
+						proposed.min(earliest_after)
+					};
+					// Drain all keys from the dirty queue (incremental GC).
+					// A fresh `raw_iter_mut` is opened per key so the
+					// exclusive leaf guard is scoped to a single key —
+					// this avoids any iterator-state bugs from reusing the
+					// same cursor across `remove_here` calls that may
+					// trigger leaf merges.
+					while let Some(key) = db.gc_dirty_keys.pop() {
 						let mut iter = db.datastore.raw_iter_mut();
-						while let Some(key) = db.gc_dirty_keys.pop() {
-							// Check if this key still exists in the datastore
-							if iter.seek_exact(&key) {
-								let (_, versions) = iter.next().expect("seek_exact returned true");
-								// Clean up unnecessary older versions
-								if versions.gc_older_versions(cleanup_ts) == 0 {
-									// Remove the entry just yielded by next()
-									iter.remove_here();
-								}
+						if iter.seek_exact(&key) {
+							let (_, versions) = iter.next().expect("seek_exact returned true");
+							if versions.gc_older_versions(cleanup_ts) == 0 {
+								iter.remove_here();
 							}
 						}
 					}
 					// Periodically do a full datastore scan
 					cycle += 1;
-					if cycle.is_multiple_of(FULL_SCAN_FREQUENCY) {
+					if cycle.is_multiple_of(full_scan_frequency) {
 						// Iterate over the entire datastore
 						let mut iter = db.datastore.raw_iter_mut();
 						iter.seek_to_first();

@@ -630,31 +630,35 @@ pub(crate) struct TransactionInner {
 	savepoint_stack: Vec<SavepointState>,
 }
 
-/// Register a new transaction against one of the `Inner` counter SkipMaps.
+/// Register a new transaction against one of the `Inner` counter
+/// SkipMaps.
 ///
-/// Two races make this non-trivial and motivate the validate-and-retry
+/// Three races make this non-trivial and motivate the validate-and-retry
 /// shape:
 ///
-/// 1. **load-then-register**: between the reader's load of `atomic` and
-///    its insert into `map`, a writer can advance the watermark and run
-///    inline GC against a `front()` that does not yet see the reader.
-///    The reader's subsequent reads at its snapshot then return `None`.
-/// 2. **drop/register**: a concurrent `Transaction::Drop` that takes the
-///    last reference on the same key removes the entry from the SkipMap.
-///    Without coordination the new registration would land on a detached
-///    counter that no later `front()`/`iter()` can observe.
+/// 1. **load-then-register vs writer fetch_max**: between the reader's
+///    load of `atomic` and its insert into `map`, a writer can advance
+///    the watermark via `fetch_max`. The post-fence reload of `atomic`
+///    catches this and retries with a fresh snapshot.
+/// 2. **load-then-register vs gc**: the BG sweeper can run a
+///    cleanup_ts > v_r in the window between our load and our publish,
+///    missing us on its scan. To close this, the sweeper publishes its
+///    cleanup_ts into [`Inner::gc_floor`] *before* reclaiming any
+///    versions, and we re-load `gc_floor` after the fence: if our
+///    snapshot is below the floor, the version we wanted is on its way
+///    out, so we roll back and retry from a fresh oracle read.
+/// 3. **drop/register**: a concurrent `Transaction::Drop` that takes
+///    the last reference on the same key removes the entry from the
+///    SkipMap. The `COUNTER_TOMBSTONE` sentinel claims removal so a
+///    new registration cannot land on a detached counter.
 ///
-/// Closed by:
-///  * `atomic.load(SeqCst)` participates in the same total order as the
-///    writer's SeqCst `fetch_max`/`fetch_add`; a re-load after a SeqCst
-///    fence catches any writer that ran in between.
-///  * Drops claim removal via `1 -> COUNTER_TOMBSTONE` CAS; new
-///    registrations spin past TOMBSTONE-valued counters and retry with a
-///    fresh entry.
+/// Only the oracle map needs the gc_floor check; for `counter_by_commit`
+/// we pass `None`.
 #[inline]
 fn register_counter(
 	map: &SkipMap<u64, Arc<AtomicU64>>,
 	atomic: &AtomicU64,
+	gc_floor: Option<&AtomicU64>,
 ) -> (u64, Arc<AtomicU64>) {
 	loop {
 		let v = atomic.load(Ordering::SeqCst);
@@ -676,11 +680,19 @@ fn register_counter(
 			continue;
 		}
 		fence(Ordering::SeqCst);
-		// If `atomic` has not advanced since our first load, no writer
-		// can have run with a watermark that excluded us: a writer that
-		// reads `iter()` after this fence (in SC total order) will see
-		// our positive count.
-		if atomic.load(Ordering::SeqCst) == v {
+		// Two validations after publishing our counter:
+		// (a) `atomic` must not have advanced — a writer's `fetch_max`
+		//     between our load and now means our snapshot is stale.
+		// (b) `gc_floor` (if applicable) must be `<= v`. The BG sweeper
+		//     publishes its cleanup_ts to `gc_floor` before reclaiming
+		//     any versions, so a value above ours means the version we
+		//     wanted is about to disappear and we must retry.
+		let oracle_stable = atomic.load(Ordering::SeqCst) == v;
+		let floor_ok = match gc_floor {
+			Some(f) => f.load(Ordering::SeqCst) <= v,
+			None => true,
+		};
+		if oracle_stable && floor_ok {
 			return (v, counter);
 		}
 		// Roll back, mirroring the Drop path so a concurrent register
@@ -723,11 +735,16 @@ fn release_counter(counter: &AtomicU64) -> bool {
 impl TransactionInner {
 	/// Create a new read-only or writeable transaction
 	pub(crate) fn new(db: Arc<Inner>, write: bool) -> Self {
-		// Register against both watermark counters
-		let (version, counter_version) =
-			register_counter(&db.counter_by_oracle, &db.oracle.inner.timestamp);
+		// Register against both watermark counters. Only the oracle map
+		// needs the `gc_floor` validation — version reclamation is keyed
+		// off oracle timestamps, not commit ids.
+		let (version, counter_version) = register_counter(
+			&db.counter_by_oracle,
+			&db.oracle.inner.timestamp,
+			Some(&db.gc_floor),
+		);
 		let (commit, counter_commit) =
-			register_counter(&db.counter_by_commit, &db.transaction_commit_id);
+			register_counter(&db.counter_by_commit, &db.transaction_commit_id, None);
 		// Store the threshold separately before moving db
 		let threshold = db.reset_threshold;
 		// Create the transaction
@@ -759,10 +776,12 @@ impl TransactionInner {
 		let (version, counter_version) = register_counter(
 			&self.database.counter_by_oracle,
 			&self.database.oracle.inner.timestamp,
+			Some(&self.database.gc_floor),
 		);
 		let (commit, counter_commit) = register_counter(
 			&self.database.counter_by_commit,
 			&self.database.transaction_commit_id,
+			None,
 		);
 		// Clear savepoint stack
 		self.savepoint_stack.clear();
@@ -1011,24 +1030,26 @@ impl TransactionInner {
 				}
 			}
 		}
-		// Insert this transaction into the merge queue
+		// Insert this transaction into the merge queue.
 		let (version, entry) = self.atomic_merge(Merge {
 			writeset,
 			id: self.database.transaction_merge_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
-		// Get the earliest active transaction version; SeqCst-fenced
-		// so it observes registrations totally ordered before this point
-		let earliest = self.database.earliest_active_version(version);
-		// Get the garbage collection epoch as nanoseconds
-		let history = self.database.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
-		// Calculate the history cutoff (current time - history duration)
-		let history = version.saturating_sub(history as u64);
-		// Use the earlier of history or earliest transaction
-		let cleanup_ts = history.min(earliest);
-		// Apply each writeset entry independently. A fresh `raw_iter_mut` is
-		// opened per key so the exclusive leaf guard is scoped to a single
-		// update — this keeps concurrent commits from holding leaf locks
-		// across unrelated keys.
+		// Apply each writeset entry independently. A fresh `raw_iter_mut`
+		// is opened per key so the exclusive leaf guard is scoped to a
+		// single update — this keeps concurrent commits from holding leaf
+		// locks across unrelated keys.
+		//
+		// Inline gc has intentionally been removed from this path. The
+		// registration race in PR #77 stems from the gap between
+		// `earliest_active_version` and `gc_older_versions`: a reader
+		// that registers in that window would have its snapshot version
+		// swept by a cleanup_ts computed without it. We defer all
+		// version reclamation to the background gc worker, which runs
+		// far less frequently and so does not race with the steady-state
+		// reader registration pattern. The commit path now only
+		// publishes the new version and queues the key for later
+		// sweeping.
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
@@ -1036,27 +1057,14 @@ impl TransactionInner {
 			let mut iter = self.database.datastore.raw_iter_mut();
 			// Check if this key already exists in the tree
 			if iter.seek_exact(key) {
-				// Yield the entry at the cursor to obtain a mutable reference
+				// Yield the entry at the cursor to obtain a mutable
+				// reference and append the new version. Tombstone-only
+				// removals are handled by the background gc.
 				let (_, versions) = iter.next().expect("seek_exact returned true");
-				// Clean up unnecessary older versions
-				let len = versions.gc_older_versions(cleanup_ts);
-				// If no versions remain and the value is none, remove the entry fully
-				if len == 0 && value.is_none() {
-					// Remove the entry just yielded by next()
-					iter.remove_here();
-				}
-				// If a value is set, add the new version entry
-				else {
-					// Add the version entry to the versions list
-					versions.push(Version {
-						version,
-						value,
-					});
-					// If stale versions remain, mark this key for background GC
-					if len > 1 {
-						self.database.gc_dirty_keys.push(key.clone());
-					}
-				}
+				versions.push(Version {
+					version,
+					value,
+				});
 			} else {
 				// Insert a new entry at the cursor's current position
 				iter.insert_here(
@@ -1067,6 +1075,9 @@ impl TransactionInner {
 					}),
 				);
 			}
+			// Queue the key for background gc. Each commit publishes
+			// fresh stale versions, so every modified key is dirty.
+			self.database.gc_dirty_keys.push(key.clone());
 		}
 		// Append the transaction to the persistence layer
 		#[cfg(not(target_arch = "wasm32"))]
@@ -5172,12 +5183,7 @@ mod tests {
 		let none_reads = Arc::new(AtomicUsize::new(0));
 		let total_reads = Arc::new(AtomicUsize::new(0));
 
-		// Single writer thread keeps overwriting the same key. Each
-		// commit drives an inline `gc_older_versions` against the
-		// computed `cleanup_ts`. With no readers registered in
-		// `counter_by_oracle` at that moment, `earliest` falls back to
-		// the writer's own version and the GC sweeps every prior version
-		// of the key.
+		// Single writer thread keeps overwriting the same key.
 		let writer = {
 			let db = Arc::clone(&db);
 			let stop = Arc::clone(&stop);
