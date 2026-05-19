@@ -23,6 +23,7 @@ use crate::DatabaseOptions;
 use bytes::Bytes;
 use crossbeam_queue::SegQueue;
 use crossbeam_skiplist::SkipMap;
+use ferntree::Tree;
 use parking_lot::RwLock;
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -40,8 +41,8 @@ pub(crate) const COUNTER_TOMBSTONE: u64 = u64::MAX;
 pub struct Inner {
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
-	/// The underlying lock-free Skip Map datastructure
-	pub(crate) datastore: SkipMap<Bytes, RwLock<Versions>>,
+	/// The underlying lock-free B+tree datastructure
+	pub(crate) datastore: Tree<Bytes, Versions>,
 	/// A count of total transactions grouped by oracle version
 	pub(crate) counter_by_oracle: SkipMap<u64, Arc<AtomicU64>>,
 	/// A count of total transactions grouped by commit id
@@ -71,6 +72,19 @@ pub struct Inner {
 	pub(crate) garbage_collection_handle: RwLock<Option<JoinHandle<()>>>,
 	/// Keys with stale versions pending incremental garbage collection
 	pub(crate) gc_dirty_keys: SegQueue<Bytes>,
+	/// Watermark below which versions are about to be (or have been)
+	/// reclaimed by the garbage collector. The GC sweeper publishes its
+	/// intended `cleanup_ts` here with a SeqCst `fetch_max` *before*
+	/// actually reclaiming any versions. `register_counter` validates
+	/// `v_r >= gc_floor` after publishing its counter; if a reader
+	/// finds `gc_floor > v_r`, it rolls back and reloads the oracle,
+	/// landing on a fresh snapshot above the floor. This closes the
+	/// scan/gc race in the BG sweeper: a sweeper that misses an
+	/// in-flight reader on its first scan publishes `gc_floor`, fences,
+	/// then re-scans — and either the reader saw the new floor and
+	/// retried, or its publish is now visible to the re-scan so the
+	/// sweeper's final cleanup_ts is bounded by it.
+	pub(crate) gc_floor: AtomicU64,
 	/// Threshold after which transaction state is reset
 	pub(crate) reset_threshold: usize,
 }
@@ -80,7 +94,7 @@ impl Inner {
 	pub fn new(opts: &DatabaseOptions) -> Self {
 		Self {
 			oracle: Oracle::new(opts.resync_interval),
-			datastore: SkipMap::new(),
+			datastore: Tree::new(),
 			counter_by_oracle: SkipMap::new(),
 			counter_by_commit: SkipMap::new(),
 			transaction_queue_id: AtomicU64::new(0),
@@ -97,6 +111,7 @@ impl Inner {
 			#[cfg(not(target_arch = "wasm32"))]
 			garbage_collection_handle: RwLock::new(None),
 			gc_dirty_keys: SegQueue::new(),
+			gc_floor: AtomicU64::new(0),
 			reset_threshold: opts.reset_threshold,
 		}
 	}

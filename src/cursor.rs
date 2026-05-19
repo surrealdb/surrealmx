@@ -16,11 +16,10 @@
 
 use crate::direction::Direction;
 use crate::inner::Inner;
-use crate::iter::{MergeIterator, MergeQueueIter};
+use crate::iter::{MergeIterator, MergeQueueIter, TreeIterState};
 use crate::queue::Merge;
 use bytes::Bytes;
 use std::collections::BTreeMap;
-use std::ops::Bound;
 use std::sync::Arc;
 
 // --------------------------------------------------
@@ -268,9 +267,7 @@ impl<'a> Cursor<'a> {
 		));
 
 		self.iter = Some(MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(start.clone()), Bound::Excluded(end.clone()))),
+			TreeIterState::build(&self.database.datastore, start, end, direction),
 			join_iter,
 			self.writeset.range::<Bytes, _>(start..end),
 			direction,
