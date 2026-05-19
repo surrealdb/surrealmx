@@ -738,11 +738,8 @@ impl TransactionInner {
 		// Register against both watermark counters. Only the oracle map
 		// needs the `gc_floor` validation — version reclamation is keyed
 		// off oracle timestamps, not commit ids.
-		let (version, counter_version) = register_counter(
-			&db.counter_by_oracle,
-			&db.oracle.inner.timestamp,
-			Some(&db.gc_floor),
-		);
+		let (version, counter_version) =
+			register_counter(&db.counter_by_oracle, &db.oracle.inner.timestamp, Some(&db.gc_floor));
 		let (commit, counter_commit) =
 			register_counter(&db.counter_by_commit, &db.transaction_commit_id, None);
 		// Store the threshold separately before moving db

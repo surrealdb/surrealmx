@@ -413,16 +413,12 @@ impl Database {
 					// database does not lock readers out forever.
 					let cleanup_ts = {
 						let now = db.oracle.current_time_ns();
-						let history = db
-							.garbage_collection_epoch
-							.read()
-							.unwrap_or_default()
-							.as_nanos();
+						let history =
+							db.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
 						let history_cutoff = now.saturating_sub(history as u64);
 						let earliest_tx = db.earliest_active_version(now);
 						let oracle_now = db.oracle.inner.timestamp.load(Ordering::SeqCst);
-						let proposed =
-							history_cutoff.min(earliest_tx).min(oracle_now);
+						let proposed = history_cutoff.min(earliest_tx).min(oracle_now);
 						db.gc_floor.fetch_max(proposed, Ordering::SeqCst);
 						fence(Ordering::SeqCst);
 						let earliest_after = db.earliest_active_version(now);
