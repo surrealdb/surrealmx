@@ -32,7 +32,18 @@ const IC: usize = 64;
 const LC: usize = 64;
 
 /// Forward or reverse iterator over the underlying tree.
-pub(crate) enum TreeIterState<'a> {
+///
+/// The struct carries the requested `[beg, end)` bounds in addition to the
+/// inner ferntree iterator. `peek` and `next` re-check those bounds on every
+/// access so the scan contract is enforced even if the underlying B+ tree
+/// iterator drifts outside the range under concurrent leaf mutations.
+pub(crate) struct TreeIterState<'a> {
+	inner: TreeIterInner<'a>,
+	beg: Bytes,
+	end: Bytes,
+}
+
+enum TreeIterInner<'a> {
 	Forward(FernRange<'a, Bytes, Versions, IC, LC>),
 	Reverse(RangeRev<'a, Bytes, Versions, IC, LC>),
 }
@@ -46,12 +57,65 @@ impl<'a> TreeIterState<'a> {
 		end: &Bytes,
 		direction: Direction,
 	) -> Self {
-		match direction {
+		let inner = match direction {
 			Direction::Forward => {
-				TreeIterState::Forward(tree.range(Bound::Included(beg), Bound::Excluded(end)))
+				TreeIterInner::Forward(tree.range(Bound::Included(beg), Bound::Excluded(end)))
 			}
 			Direction::Reverse => {
-				TreeIterState::Reverse(tree.range_rev(Bound::Included(beg), Bound::Excluded(end)))
+				TreeIterInner::Reverse(tree.range_rev(Bound::Included(beg), Bound::Excluded(end)))
+			}
+		};
+		Self {
+			inner,
+			beg: beg.clone(),
+			end: end.clone(),
+		}
+	}
+
+	/// True when `k` lies inside `[beg, end)`.
+	#[inline]
+	fn in_range(&self, k: &Bytes) -> bool {
+		k.as_ref() >= self.beg.as_ref() && k.as_ref() < self.end.as_ref()
+	}
+
+	/// Peek the next entry that lies inside `[beg, end)`.
+	///
+	/// Ferntree's `Range::peek` only validates the "far" bound (upper for
+	/// forward, lower for reverse). Under concurrent leaf mutation the raw
+	/// iterator can briefly surface a key on the wrong side of the "near"
+	/// bound; we consume any such key and retry so the merge layer never
+	/// caches one.
+	#[inline]
+	fn peek_next_in_range(&mut self) -> Option<(&Bytes, &Versions)> {
+		loop {
+			let peeked = match &mut self.inner {
+				TreeIterInner::Forward(range) => range.peek().map(|(k, _)| k.clone()),
+				TreeIterInner::Reverse(range) => range.peek().map(|(k, _)| k.clone()),
+			};
+			let Some(k) = peeked else {
+				return None;
+			};
+			if self.in_range(&k) {
+				return match &mut self.inner {
+					TreeIterInner::Forward(range) => range.peek(),
+					TreeIterInner::Reverse(range) => range.peek(),
+				};
+			}
+			self.advance();
+		}
+	}
+
+	/// Consume the entry the iterator is parked on, then re-park on the next
+	/// in-range entry (if any). Mirrors the post-emit advance done by the
+	/// merge layer.
+	#[inline]
+	fn advance(&mut self) {
+		match &mut self.inner {
+			TreeIterInner::Forward(range) => {
+				range.next();
+			}
+			TreeIterInner::Reverse(range) => {
+				range.next();
 			}
 		}
 	}
@@ -79,6 +143,14 @@ where
 			if stop {
 				return;
 			}
+			// Defensive bound check on both sides. The raw iterator was seeked
+			// to `beg` and is bounded above by the `k >= end` early-exit, but
+			// under concurrent leaf mutation it can briefly surface keys on
+			// either side of the requested range; skip such stragglers so the
+			// caller never observes them.
+			if k < beg {
+				return;
+			}
 			if k >= end {
 				stop = true;
 				return;
@@ -97,6 +169,9 @@ where
 		};
 		if k >= end {
 			break;
+		}
+		if k < beg {
+			continue;
 		}
 		if matches!(f(k, v), ControlFlow::Break(())) {
 			break;
@@ -311,30 +386,18 @@ impl<'a> MergeIterator<'a> {
 	/// so paths that only need keys or counts don't pay the byte clone.
 	#[inline]
 	fn fetch_tree_entry(tree_iter: &mut TreeIterState<'_>, version: u64) -> CachedTreeEntry {
-		match tree_iter {
-			TreeIterState::Forward(range) => {
-				range.peek().map(|(k, v)| (k.clone(), v.exists_version(version)))
-			}
-			TreeIterState::Reverse(range) => {
-				range.peek().map(|(k, v)| (k.clone(), v.exists_version(version)))
-			}
-		}
+		tree_iter.peek_next_in_range().map(|(k, v)| (k.clone(), v.exists_version(version)))
 	}
 
 	/// Fetch the value at the current MVCC version for the entry that the
 	/// tree iterator is currently parked on. Call this in `Iterator::next`
-	/// right before advancing past the entry.
+	/// right before advancing past the entry. The caller must have just
+	/// observed the entry via `fetch_tree_entry`, so `peek_next_in_range`
+	/// returns the same in-range entry.
 	#[inline]
 	fn peek_tree_value(&mut self) -> Option<Bytes> {
 		let version = self.version;
-		match &mut self.tree_iter {
-			TreeIterState::Forward(range) => {
-				range.peek().and_then(|(_, v)| v.fetch_version(version))
-			}
-			TreeIterState::Reverse(range) => {
-				range.peek().and_then(|(_, v)| v.fetch_version(version))
-			}
-		}
+		self.tree_iter.peek_next_in_range().and_then(|(_, v)| v.fetch_version(version))
 	}
 
 	#[inline]
@@ -352,14 +415,7 @@ impl<'a> MergeIterator<'a> {
 
 	#[inline]
 	fn advance_tree(&mut self) {
-		match &mut self.tree_iter {
-			TreeIterState::Forward(range) => {
-				range.next();
-			}
-			TreeIterState::Reverse(range) => {
-				range.next();
-			}
-		}
+		self.tree_iter.advance();
 		self.tree_next = Self::fetch_tree_entry(&mut self.tree_iter, self.version);
 	}
 
