@@ -32,18 +32,7 @@ const IC: usize = 64;
 const LC: usize = 64;
 
 /// Forward or reverse iterator over the underlying tree.
-///
-/// The struct carries the requested `[beg, end)` bounds in addition to the
-/// inner ferntree iterator. `peek` and `next` re-check those bounds on every
-/// access so the scan contract is enforced even if the underlying B+ tree
-/// iterator drifts outside the range under concurrent leaf mutations.
-pub(crate) struct TreeIterState<'a> {
-	inner: TreeIterInner<'a>,
-	beg: Bytes,
-	end: Bytes,
-}
-
-enum TreeIterInner<'a> {
+pub(crate) enum TreeIterState<'a> {
 	Forward(FernRange<'a, Bytes, Versions, IC, LC>),
 	Reverse(RangeRev<'a, Bytes, Versions, IC, LC>),
 }
@@ -57,65 +46,12 @@ impl<'a> TreeIterState<'a> {
 		end: &Bytes,
 		direction: Direction,
 	) -> Self {
-		let inner = match direction {
+		match direction {
 			Direction::Forward => {
-				TreeIterInner::Forward(tree.range(Bound::Included(beg), Bound::Excluded(end)))
+				TreeIterState::Forward(tree.range(Bound::Included(beg), Bound::Excluded(end)))
 			}
 			Direction::Reverse => {
-				TreeIterInner::Reverse(tree.range_rev(Bound::Included(beg), Bound::Excluded(end)))
-			}
-		};
-		Self {
-			inner,
-			beg: beg.clone(),
-			end: end.clone(),
-		}
-	}
-
-	/// True when `k` lies inside `[beg, end)`.
-	#[inline]
-	fn in_range(&self, k: &Bytes) -> bool {
-		k.as_ref() >= self.beg.as_ref() && k.as_ref() < self.end.as_ref()
-	}
-
-	/// Peek the next entry that lies inside `[beg, end)`, projecting it
-	/// through `f` while the borrow on the underlying iterator is live.
-	///
-	/// Ferntree's `Range::peek` only validates the "far" bound (upper for
-	/// forward, lower for reverse). Under concurrent leaf mutation the raw
-	/// iterator can briefly surface a key on the wrong side of the "near"
-	/// bound; we consume any such key and retry so callers only ever see
-	/// in-range entries. The projection closure runs on the exact key that
-	/// passed the bound check, so the returned data and the validation are
-	/// always tied to the same peek.
-	#[inline]
-	fn peek_next_in_range<R>(
-		&mut self,
-		mut f: impl FnMut(&Bytes, &Versions) -> R,
-	) -> Option<(Bytes, R)> {
-		loop {
-			let entry = match &mut self.inner {
-				TreeIterInner::Forward(range) => range.peek().map(|(k, v)| (k.clone(), f(k, v))),
-				TreeIterInner::Reverse(range) => range.peek().map(|(k, v)| (k.clone(), f(k, v))),
-			};
-			match entry {
-				Some((k, _)) if !self.in_range(&k) => self.advance(),
-				other => return other,
-			}
-		}
-	}
-
-	/// Consume the entry the iterator is parked on, then re-park on the next
-	/// in-range entry (if any). Mirrors the post-emit advance done by the
-	/// merge layer.
-	#[inline]
-	fn advance(&mut self) {
-		match &mut self.inner {
-			TreeIterInner::Forward(range) => {
-				range.next();
-			}
-			TreeIterInner::Reverse(range) => {
-				range.next();
+				TreeIterState::Reverse(tree.range_rev(Bound::Included(beg), Bound::Excluded(end)))
 			}
 		}
 	}
@@ -143,14 +79,6 @@ where
 			if stop {
 				return;
 			}
-			// Defensive bound check on both sides. The raw iterator was seeked
-			// to `beg` and is bounded above by the `k >= end` early-exit, but
-			// under concurrent leaf mutation it can briefly surface keys on
-			// either side of the requested range; skip such stragglers so the
-			// caller never observes them.
-			if k < beg {
-				return;
-			}
 			if k >= end {
 				stop = true;
 				return;
@@ -169,9 +97,6 @@ where
 		};
 		if k >= end {
 			break;
-		}
-		if k < beg {
-			continue;
 		}
 		if matches!(f(k, v), ControlFlow::Break(())) {
 			break;
@@ -381,34 +306,35 @@ impl<'a> MergeIterator<'a> {
 		me
 	}
 
-	/// Peek at the next in-range tree entry and cache its key + existence at
-	/// the current MVCC version. Value resolution is deferred to
-	/// `peek_tree_value` so paths that only need keys or counts don't pay the
-	/// byte clone.
+	/// Peek at the next tree entry and cache its key + existence at the
+	/// current MVCC version. Value resolution is deferred to `peek_tree_value`
+	/// so paths that only need keys or counts don't pay the byte clone.
 	#[inline]
 	fn fetch_tree_entry(tree_iter: &mut TreeIterState<'_>, version: u64) -> CachedTreeEntry {
-		tree_iter.peek_next_in_range(|_, v| v.exists_version(version))
+		match tree_iter {
+			TreeIterState::Forward(range) => {
+				range.peek().map(|(k, v)| (k.clone(), v.exists_version(version)))
+			}
+			TreeIterState::Reverse(range) => {
+				range.peek().map(|(k, v)| (k.clone(), v.exists_version(version)))
+			}
+		}
 	}
 
 	/// Fetch the value at the current MVCC version for the entry that the
-	/// tree iterator is parked on, **provided** it still matches the entry
-	/// the caller cached in `tree_next`. The merge layer relies on this
-	/// equivalence: if the underlying iterator surfaces a different key
-	/// (which should not happen — `peek` is idempotent under the shared-leaf
-	/// guard) we treat the slot as deleted so the caller falls through to
-	/// the next emit cycle instead of returning a mismatched value.
+	/// tree iterator is currently parked on. Call this in `Iterator::next`
+	/// right before advancing past the entry.
 	#[inline]
-	fn peek_tree_value(&mut self, expected_key: &Bytes) -> Option<Bytes> {
+	fn peek_tree_value(&mut self) -> Option<Bytes> {
 		let version = self.version;
-		self.tree_iter
-			.peek_next_in_range(|k, v| {
-				if k == expected_key {
-					v.fetch_version(version)
-				} else {
-					None
-				}
-			})
-			.and_then(|(_, v)| v)
+		match &mut self.tree_iter {
+			TreeIterState::Forward(range) => {
+				range.peek().and_then(|(_, v)| v.fetch_version(version))
+			}
+			TreeIterState::Reverse(range) => {
+				range.peek().and_then(|(_, v)| v.fetch_version(version))
+			}
+		}
 	}
 
 	#[inline]
@@ -426,7 +352,14 @@ impl<'a> MergeIterator<'a> {
 
 	#[inline]
 	fn advance_tree(&mut self) {
-		self.tree_iter.advance();
+		match &mut self.tree_iter {
+			TreeIterState::Forward(range) => {
+				range.next();
+			}
+			TreeIterState::Reverse(range) => {
+				range.next();
+			}
+		}
 		self.tree_next = Self::fetch_tree_entry(&mut self.tree_iter, self.version);
 	}
 
@@ -664,16 +597,14 @@ impl<'a> Iterator for MergeIterator<'a> {
 						continue;
 					}
 
-					// Clone the cached key first, then resolve the value while
-					// the tree iter is still parked on the entry. Passing the
-					// cached key into `peek_tree_value` ties the returned value
-					// to the same entry we validated in `fetch_tree_entry`.
-					let key = self.tree_next.as_ref().map(|(k, _)| k.clone()).unwrap();
+					// Resolve the value lazily while the tree iter is still
+					// parked on this entry, then clone the key and advance.
 					let value = if exists {
-						self.peek_tree_value(&key)
+						self.peek_tree_value()
 					} else {
 						None
 					};
+					let key = self.tree_next.as_ref().map(|(k, _)| k.clone()).unwrap();
 					self.advance_tree();
 					return Some((key, value));
 				}

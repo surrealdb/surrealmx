@@ -2084,14 +2084,7 @@ impl TransactionInner {
 						.database
 						.datastore
 						.range_rev(Bound::Included(beg), Bound::Excluded(end));
-					while let Some((k, v)) = range.next() {
-						// Defensive: ferntree's RangeRev only validates the
-						// lower bound on emit; skip any straggler outside
-						// `[beg, end)` so concurrent leaf moves can't leak
-						// keys into the caller's view.
-						if k < beg || k >= end {
-							continue;
-						}
+					while let Some((_, v)) = range.next() {
 						if !v.exists_version(version) {
 							continue;
 						}
@@ -2205,13 +2198,6 @@ impl TransactionInner {
 						.datastore
 						.range_rev(Bound::Included(beg), Bound::Excluded(end));
 					while let Some((k, v)) = range.next() {
-						// Defensive: ferntree's RangeRev only validates the
-						// lower bound on emit; skip any straggler outside
-						// `[beg, end)` so concurrent leaf moves can't leak
-						// keys into the caller's view.
-						if k < beg || k >= end {
-							continue;
-						}
 						if !v.exists_version(version) {
 							continue;
 						}
@@ -2325,13 +2311,6 @@ impl TransactionInner {
 						.datastore
 						.range_rev(Bound::Included(beg), Bound::Excluded(end));
 					while let Some((k, v)) = range.next() {
-						// Defensive: ferntree's RangeRev only validates the
-						// lower bound on emit; skip any straggler outside
-						// `[beg, end)` so concurrent leaf moves can't leak
-						// keys into the caller's view.
-						if k < beg || k >= end {
-							continue;
-						}
 						let Some(value) = v.fetch_version(version) else {
 							continue;
 						};

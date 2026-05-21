@@ -314,9 +314,9 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "ferntree"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c61e94ab9b1d56c01922863b022039ef2cbb57e9dbf7bf237df5ae1e91b97676"
+checksum = "a1c631d458d3a990f4281cbf6e3d92f7b47ff3935e03841a62aa1100085f11f4"
 dependencies = [
  "bytes",
  "crossbeam-epoch",
