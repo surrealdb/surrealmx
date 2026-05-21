@@ -62,7 +62,7 @@ fn make_range(ix: u32, kind: [u8; 2]) -> (Vec<u8>, Vec<u8>) {
 	let mut beg = prefix.clone();
 	beg.push(0);
 	let mut end = prefix.clone();
-	end.extend(std::iter::repeat(0xff).take(40));
+	end.extend(std::iter::repeat_n(0xff, 40));
 	(beg, end)
 }
 
@@ -78,14 +78,8 @@ fn run_once(budget: Duration) -> (usize, usize, usize) {
 	// matters: full-text writes `!dc`, `!dl`, `!td`, `!tt`, `!ii`, `!tv`,
 	// etc., spread over `N_INDEXES` indexes. We just pick the same letter
 	// pairs from the real code.
-	const KINDS: &[[u8; 2]] = &[
-		[b'd', b'c'],
-		[b'd', b'l'],
-		[b't', b'd'],
-		[b't', b't'],
-		[b'i', b'i'],
-		[b't', b'v'],
-	];
+	const KINDS: &[[u8; 2]] =
+		&[[b'd', b'c'], [b'd', b'l'], [b't', b'd'], [b't', b't'], [b'i', b'i'], [b't', b'v']];
 
 	let db = Arc::new(Database::new());
 	let stop = Arc::new(AtomicBool::new(false));

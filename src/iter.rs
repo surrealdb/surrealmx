@@ -88,13 +88,10 @@ impl<'a> TreeIterState<'a> {
 	#[inline]
 	fn peek_next_in_range(&mut self) -> Option<(&Bytes, &Versions)> {
 		loop {
-			let peeked = match &mut self.inner {
+			let k = match &mut self.inner {
 				TreeIterInner::Forward(range) => range.peek().map(|(k, _)| k.clone()),
 				TreeIterInner::Reverse(range) => range.peek().map(|(k, _)| k.clone()),
-			};
-			let Some(k) = peeked else {
-				return None;
-			};
+			}?;
 			if self.in_range(&k) {
 				return match &mut self.inner {
 					TreeIterInner::Forward(range) => range.peek(),
