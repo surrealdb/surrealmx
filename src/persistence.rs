@@ -314,16 +314,14 @@ impl Persistence {
 				0
 			};
 			// Stream write each key-value pair to reduce memory usage
-			let mut iter = self.inner.datastore.raw_iter();
-			iter.seek_to_first();
-			while let Some((key, versions)) = iter.next() {
+			for entry in self.inner.datastore.iter() {
 				// Get all versions for this key
-				let versions = versions.all_versions();
+				let versions = entry.value().read().all_versions();
 				// Ensure that there are version entries
 				if !versions.is_empty() {
 					// Serialize and write this single entry
 					bincode::serde::encode_into_std_write(
-						&(key.clone(), versions),
+						&(entry.key().clone(), versions),
 						&mut writer,
 						config::standard(),
 					)?;
@@ -398,7 +396,7 @@ impl Persistence {
 									});
 								}
 								// Insert the entry into the datastore
-								self.inner.datastore.insert(k, entries);
+								self.inner.datastore.insert(k, RwLock::new(entries));
 							}
 						}
 						Err(e) => match e {
@@ -441,21 +439,21 @@ impl Persistence {
 					// Detech any end of file errors
 					match result {
 						Ok((k, version, val)) => {
-							// Update existing key, or insert a new one
-							let mut iter = self.inner.datastore.raw_iter_mut();
-							if iter.seek_exact(&k) {
-								let (_, versions) = iter.next().expect("seek_exact returned true");
-								versions.push(Version {
+							// Check if the key already exists
+							if let Some(entry) = self.inner.datastore.get(&k) {
+								// Update existing key with stored version
+								entry.value().write().push(Version {
 									version,
 									value: val,
 								});
 							} else {
-								iter.insert_here(
+								// Insert new key with stored version
+								self.inner.datastore.insert(
 									k.clone(),
-									Versions::from(Version {
+									RwLock::new(Versions::from(Version {
 										version,
 										value: val,
-									}),
+									})),
 								);
 							}
 						}
@@ -638,16 +636,14 @@ impl Persistence {
 							0
 						};
 						// Stream write each entry to reduce memory usage
-						let mut iter = db.datastore.raw_iter();
-						iter.seek_to_first();
-						while let Some((key, versions)) = iter.next() {
+						for entry in db.datastore.iter() {
 							// Get all versions for this key
-							let versions = versions.all_versions();
+							let versions = entry.value().read().all_versions();
 							// Ensure that there are version entries
 							if !versions.is_empty() {
 								// Serialize and write this single entry
 								bincode::serde::encode_into_std_write(
-									&(key.clone(), versions),
+									&(entry.key().clone(), versions),
 									&mut writer,
 									config::standard(),
 								)?;

@@ -19,7 +19,7 @@ use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
 use crate::inner::{Inner, COUNTER_TOMBSTONE};
-use crate::iter::{for_each_in_range, MergeIterator, MergeQueueIter, TreeIterState};
+use crate::iter::{MergeIterator, MergeQueueIter};
 use crate::kv::IntoBytes;
 use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
@@ -30,10 +30,9 @@ use arc_swap::ArcSwap;
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::collections::BTreeMap;
 use std::ops::Bound;
-use std::ops::ControlFlow;
 use std::ops::Range;
 use std::sync::atomic::{fence, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -637,30 +636,27 @@ pub(crate) struct TransactionInner {
 	savepoint_stack: Vec<SavepointState>,
 }
 
-/// Register a new transaction against one of the `Inner` counter
-/// SkipMaps.
+/// Register a new transaction against one of the `Inner` counter SkipMaps.
 ///
-/// Three races make this non-trivial and motivate the validate-and-retry
+/// Two races make this non-trivial and motivate the validate-and-retry
 /// shape:
 ///
-/// 1. **load-then-register vs writer fetch_max**: between the reader's
-///    load of `atomic` and its insert into `map`, a writer can advance
-///    the watermark via `fetch_max`. The post-fence reload of `atomic`
-///    catches this and retries with a fresh snapshot.
-/// 2. **load-then-register vs gc**: the BG sweeper can run a
-///    cleanup_ts > v_r in the window between our load and our publish,
-///    missing us on its scan. To close this, the sweeper publishes its
-///    cleanup_ts into [`Inner::gc_floor`] *before* reclaiming any
-///    versions, and we re-load `gc_floor` after the fence: if our
-///    snapshot is below the floor, the version we wanted is on its way
-///    out, so we roll back and retry from a fresh oracle read.
-/// 3. **drop/register**: a concurrent `Transaction::Drop` that takes
-///    the last reference on the same key removes the entry from the
-///    SkipMap. The `COUNTER_TOMBSTONE` sentinel claims removal so a
-///    new registration cannot land on a detached counter.
+/// 1. **load-then-register**: between the reader's load of `atomic` and
+///    its insert into `map`, a writer can advance the watermark and run
+///    inline GC against a `front()` that does not yet see the reader.
+///    The reader's subsequent reads at its snapshot then return `None`.
+/// 2. **drop/register**: a concurrent `Transaction::Drop` that takes the
+///    last reference on the same key removes the entry from the SkipMap.
+///    Without coordination the new registration would land on a detached
+///    counter that no later `front()`/`iter()` can observe.
 ///
-/// Only the oracle map needs the gc_floor check; for `counter_by_commit`
-/// we pass `None`.
+/// Closed by:
+///  * `atomic.load(SeqCst)` participates in the same total order as the
+///    writer's SeqCst `fetch_max`/`fetch_add`; a re-load after a SeqCst
+///    fence catches any writer that ran in between.
+///  * Drops claim removal via `1 -> COUNTER_TOMBSTONE` CAS; new
+///    registrations spin past TOMBSTONE-valued counters and retry with a
+///    fresh entry.
 #[inline]
 fn register_counter(
 	map: &SkipMap<u64, Arc<AtomicU64>>,
@@ -688,8 +684,10 @@ fn register_counter(
 		}
 		fence(Ordering::SeqCst);
 		// Two validations after publishing our counter:
-		// (a) `atomic` must not have advanced — a writer's `fetch_max`
-		//     between our load and now means our snapshot is stale.
+		// (a) `atomic` must not have advanced — a writer that reads
+		//     `iter()` after this fence (in SC total order) will see our
+		//     positive count, but a `fetch_max` between our load and now
+		//     means our snapshot is stale.
 		// (b) `gc_floor` (if applicable) must be `<= v`. The BG sweeper
 		//     publishes its cleanup_ts to `gc_floor` before reclaiming
 		//     any versions, so a value above ours means the version we
@@ -742,9 +740,7 @@ fn release_counter(counter: &AtomicU64) -> bool {
 impl TransactionInner {
 	/// Create a new read-only or writeable transaction
 	pub(crate) fn new(db: Arc<Inner>, write: bool) -> Self {
-		// Register against both watermark counters. Only the oracle map
-		// needs the `gc_floor` validation — version reclamation is keyed
-		// off oracle timestamps, not commit ids.
+		// Register against both watermark counters
 		let (version, counter_version) =
 			register_counter(&db.counter_by_oracle, &db.oracle.inner.timestamp, Some(&db.gc_floor));
 		let (commit, counter_commit) =
@@ -1040,49 +1036,40 @@ impl TransactionInner {
 				}
 			}
 		}
-		// Insert this transaction into the merge queue.
+		// Insert this transaction into the merge queue
 		let (version, entry) = self.atomic_merge(Merge {
 			writeset,
 			id: self.database.transaction_merge_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
-		// Apply each writeset entry independently. A fresh `raw_iter_mut`
-		// is opened per key so the exclusive leaf guard is scoped to a
-		// single update — this keeps concurrent commits from holding leaf
-		// locks across unrelated keys.
-		//
-		// Inline gc has intentionally been removed from this path. The
-		// registration race in PR #77 stems from the gap between
-		// `earliest_active_version` and `gc_older_versions`: a reader
-		// that registers in that window would have its snapshot version
-		// swept by a cleanup_ts computed without it. We defer all
-		// version reclamation to the background gc worker, which runs
-		// far less frequently and so does not race with the steady-state
-		// reader registration pattern. The commit path now only
-		// publishes the new version and queues the key for later
-		// sweeping.
+		// Apply each writeset entry. Inline gc has intentionally been
+		// removed from this path: the registration race in PR #77 stems
+		// from the gap between `earliest_active_version` and
+		// `gc_older_versions`, where a reader registering in that window
+		// would have its snapshot version swept by a cleanup_ts computed
+		// without it. We defer all version reclamation to the background
+		// gc worker (bounded by `gc_floor`), which runs far less
+		// frequently and so does not race with the steady-state reader
+		// registration pattern. The commit path now only publishes the
+		// new version and queues the key for later sweeping.
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
-			// Open an exclusive iterator scoped to this key
-			let mut iter = self.database.datastore.raw_iter_mut();
-			// Check if this key already exists in the tree
-			if iter.seek_exact(key) {
-				// Yield the entry at the cursor to obtain a mutable
-				// reference and append the new version. Tombstone-only
-				// removals are handled by the background gc.
-				let (_, versions) = iter.next().expect("seek_exact returned true");
-				versions.push(Version {
+			// Check if this key already exists
+			if let Some(entry) = self.database.datastore.get(key) {
+				// Append the new version. Tombstone-only removals are
+				// handled by the background gc.
+				entry.value().write().push(Version {
 					version,
 					value,
 				});
 			} else {
-				// Insert a new entry at the cursor's current position
-				iter.insert_here(
+				// Insert a new entry for this key
+				self.database.datastore.insert(
 					key.clone(),
-					Versions::from(Version {
+					RwLock::new(Versions::from(Version {
 						version,
 						value,
-					}),
+					})),
 				);
 			}
 			// Queue the key for background gc. Each commit publishes
@@ -1666,30 +1653,36 @@ impl TransactionInner {
 			self.track_scan_range(beg, end);
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly via bulk leaf iteration.
+		// range — walk the datastore directly.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let version = self.version;
-			for_each_in_range(&self.database.datastore, beg, end, |k, v| {
-				let Some(value) = v.fetch_version(version) else {
-					return ControlFlow::Continue(());
+			let datastore_range = self
+				.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			for entry in datastore_range {
+				let value = match entry.value().try_read() {
+					Some(g) => g.fetch_version(self.version),
+					None => entry.value().read().fetch_version(self.version),
+				};
+				let Some(value) = value else {
+					continue;
 				};
 				if skip > 0 {
 					skip -= 1;
-					return ControlFlow::Continue(());
+					continue;
 				}
 				count += 1;
-				if !f(k, &value) {
-					return ControlFlow::Break(());
+				if !f(entry.key(), &value) {
+					break;
 				}
 				if let Some(l) = limit {
 					if count >= l {
-						return ControlFlow::Break(());
+						break;
 					}
 				}
-				ControlFlow::Continue(())
-			});
+			}
 			return Ok(count);
 		}
 		// Lazy k-way merge over the merge-queue writesets.
@@ -1701,7 +1694,9 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
-			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -1757,30 +1752,36 @@ impl TransactionInner {
 			self.track_scan_range(beg, end);
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly via bulk leaf iteration.
+		// range — walk the datastore directly.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let version = self.version;
-			for_each_in_range(&self.database.datastore, beg, end, |k, v| {
-				if !v.exists_version(version) {
-					return ControlFlow::Continue(());
+			let datastore_range = self
+				.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			for entry in datastore_range {
+				let exists = match entry.value().try_read() {
+					Some(g) => g.exists_version(self.version),
+					None => entry.value().read().exists_version(self.version),
+				};
+				if !exists {
+					continue;
 				}
 				if skip > 0 {
 					skip -= 1;
-					return ControlFlow::Continue(());
+					continue;
 				}
 				count += 1;
-				if !f(k) {
-					return ControlFlow::Break(());
+				if !f(entry.key()) {
+					break;
 				}
 				if let Some(l) = limit {
 					if count >= l {
-						return ControlFlow::Break(());
+						break;
 					}
 				}
-				ControlFlow::Continue(())
-			});
+			}
 			return Ok(count);
 		}
 		// Lazy k-way merge over the merge-queue writesets.
@@ -1792,7 +1793,9 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -1846,28 +1849,33 @@ impl TransactionInner {
 			self.track_scan_range(beg, end);
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly into the buffer via bulk leaf
-		// iteration.
+		// range — walk the datastore directly into the buffer.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let version = self.version;
-			for_each_in_range(&self.database.datastore, beg, end, |k, v| {
-				let Some(value) = v.fetch_version(version) else {
-					return ControlFlow::Continue(());
+			let datastore_range = self
+				.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			for entry in datastore_range {
+				let value = match entry.value().try_read() {
+					Some(g) => g.fetch_version(self.version),
+					None => entry.value().read().fetch_version(self.version),
+				};
+				let Some(value) = value else {
+					continue;
 				};
 				if skip > 0 {
 					skip -= 1;
-					return ControlFlow::Continue(());
+					continue;
 				}
-				buf.push((k.clone(), value));
+				buf.push((entry.key().clone(), value));
 				if let Some(l) = limit {
 					if buf.len() >= l {
-						return ControlFlow::Break(());
+						break;
 					}
 				}
-				ControlFlow::Continue(())
-			});
+			}
 			return Ok(());
 		}
 		// Lazy k-way merge over the merge-queue writesets.
@@ -1879,7 +1887,9 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
-			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -1930,28 +1940,33 @@ impl TransactionInner {
 			self.track_scan_range(beg, end);
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly into the buffer via bulk leaf
-		// iteration.
+		// range — walk the datastore directly into the buffer.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			let version = self.version;
-			for_each_in_range(&self.database.datastore, beg, end, |k, v| {
-				if !v.exists_version(version) {
-					return ControlFlow::Continue(());
+			let datastore_range = self
+				.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			for entry in datastore_range {
+				let exists = match entry.value().try_read() {
+					Some(g) => g.exists_version(self.version),
+					None => entry.value().read().exists_version(self.version),
+				};
+				if !exists {
+					continue;
 				}
 				if skip > 0 {
 					skip -= 1;
-					return ControlFlow::Continue(());
+					continue;
 				}
-				buf.push(k.clone());
+				buf.push(entry.key().clone());
 				if let Some(l) = limit {
 					if buf.len() >= l {
-						return ControlFlow::Break(());
+						break;
 					}
 				}
-				ControlFlow::Continue(())
-			});
+			}
 			return Ok(());
 		}
 		// Lazy k-way merge over the merge-queue writesets.
@@ -1963,7 +1978,9 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -2051,41 +2068,24 @@ impl TransactionInner {
 				self.track_scan_range(beg, end);
 			}
 		}
-		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly. Forward direction uses
-		// `for_each_in_range`, which processes a whole B+tree leaf in one
-		// tight loop via ferntree's `for_each_in_leaf`. Reverse direction
-		// keeps the entry-at-a-time `RangeRev` iterator since ferntree only
-		// exposes bulk leaf processing in forward order.
+		// Fast path: when there are no in-flight committed transactions and no
+		// uncommitted writes in this range, the merge iterator has nothing to
+		// merge — read straight from the datastore range.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			match direction {
-				Direction::Forward => {
-					for_each_in_range(&self.database.datastore, beg, end, |_, v| {
-						if !v.exists_version(version) {
-							return ControlFlow::Continue(());
-						}
-						if skip > 0 {
-							skip -= 1;
-							return ControlFlow::Continue(());
-						}
-						res += 1;
-						if let Some(l) = limit {
-							if res >= l {
-								return ControlFlow::Break(());
-							}
-						}
-						ControlFlow::Continue(())
-					});
-				}
-				Direction::Reverse => {
-					let mut range = self
-						.database
-						.datastore
-						.range_rev(Bound::Included(beg), Bound::Excluded(end));
-					while let Some((_, v)) = range.next() {
-						if !v.exists_version(version) {
+			let datastore_range = self
+				.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			macro_rules! consume_fast_path {
+				($iter:expr) => {
+					for entry in $iter {
+						let exists = match entry.value().try_read() {
+							Some(g) => g.exists_version(version),
+							None => entry.value().read().exists_version(version),
+						};
+						if !exists {
 							continue;
 						}
 						if skip > 0 {
@@ -2099,7 +2099,11 @@ impl TransactionInner {
 							}
 						}
 					}
-				}
+				};
+			}
+			match direction {
+				Direction::Forward => consume_fast_path!(datastore_range),
+				Direction::Reverse => consume_fast_path!(datastore_range.rev()),
 			}
 			return Ok(res);
 		}
@@ -2112,7 +2116,9 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			TreeIterState::build(&self.database.datastore, beg, end, direction),
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -2168,51 +2174,40 @@ impl TransactionInner {
 			}
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly. Forward uses ferntree's bulk
-		// leaf iteration via `for_each_in_range`; reverse stays on `RangeRev`.
+		// range — read keys straight from the datastore range.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			match direction {
-				Direction::Forward => {
-					for_each_in_range(&self.database.datastore, beg, end, |k, v| {
-						if !v.exists_version(version) {
-							return ControlFlow::Continue(());
-						}
-						if skip > 0 {
-							skip -= 1;
-							return ControlFlow::Continue(());
-						}
-						res.push(k.clone());
-						if let Some(l) = limit {
-							if res.len() >= l {
-								return ControlFlow::Break(());
-							}
-						}
-						ControlFlow::Continue(())
-					});
-				}
-				Direction::Reverse => {
-					let mut range = self
-						.database
-						.datastore
-						.range_rev(Bound::Included(beg), Bound::Excluded(end));
-					while let Some((k, v)) = range.next() {
-						if !v.exists_version(version) {
+			let datastore_range = self
+				.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			macro_rules! consume_fast_path {
+				($iter:expr) => {
+					for entry in $iter {
+						let exists = match entry.value().try_read() {
+							Some(g) => g.exists_version(version),
+							None => entry.value().read().exists_version(version),
+						};
+						if !exists {
 							continue;
 						}
 						if skip > 0 {
 							skip -= 1;
 							continue;
 						}
-						res.push(k.clone());
+						res.push(entry.key().clone());
 						if let Some(l) = limit {
 							if res.len() >= l {
 								break;
 							}
 						}
 					}
-				}
+				};
+			}
+			match direction {
+				Direction::Forward => consume_fast_path!(datastore_range),
+				Direction::Reverse => consume_fast_path!(datastore_range.rev()),
 			}
 			return Ok(res);
 		}
@@ -2225,7 +2220,9 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
-			TreeIterState::build(&self.database.datastore, beg, end, direction),
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -2281,51 +2278,40 @@ impl TransactionInner {
 			}
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — walk the tree range directly. Forward uses ferntree's bulk
-		// leaf iteration via `for_each_in_range`; reverse stays on `RangeRev`.
+		// range — read key/value pairs straight from the datastore range.
 		if self.database.transaction_merge_queue.is_empty()
 			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
 		{
-			match direction {
-				Direction::Forward => {
-					for_each_in_range(&self.database.datastore, beg, end, |k, v| {
-						let Some(value) = v.fetch_version(version) else {
-							return ControlFlow::Continue(());
+			let datastore_range = self
+				.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			macro_rules! consume_fast_path {
+				($iter:expr) => {
+					for entry in $iter {
+						let value = match entry.value().try_read() {
+							Some(g) => g.fetch_version(version),
+							None => entry.value().read().fetch_version(version),
 						};
-						if skip > 0 {
-							skip -= 1;
-							return ControlFlow::Continue(());
-						}
-						res.push((k.clone(), value));
-						if let Some(l) = limit {
-							if res.len() >= l {
-								return ControlFlow::Break(());
-							}
-						}
-						ControlFlow::Continue(())
-					});
-				}
-				Direction::Reverse => {
-					let mut range = self
-						.database
-						.datastore
-						.range_rev(Bound::Included(beg), Bound::Excluded(end));
-					while let Some((k, v)) = range.next() {
-						let Some(value) = v.fetch_version(version) else {
+						let Some(value) = value else {
 							continue;
 						};
 						if skip > 0 {
 							skip -= 1;
 							continue;
 						}
-						res.push((k.clone(), value));
+						res.push((entry.key().clone(), value));
 						if let Some(l) = limit {
 							if res.len() >= l {
 								break;
 							}
 						}
 					}
-				}
+				};
+			}
+			match direction {
+				Direction::Forward => consume_fast_path!(datastore_range),
+				Direction::Reverse => consume_fast_path!(datastore_range.rev()),
 			}
 			return Ok(res);
 		}
@@ -2338,7 +2324,9 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
-			TreeIterState::build(&self.database.datastore, beg, end, direction),
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			direction,
@@ -2402,7 +2390,9 @@ impl TransactionInner {
 		));
 		// Create the 3-way merge iterator to iterate over keys
 		let iter = MergeIterator::new(
-			TreeIterState::build(&self.database.datastore, beg, end, Direction::Forward),
+			self.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
 			self.writeset.range::<Bytes, _>(beg..end),
 			Direction::Forward,
@@ -2416,10 +2406,9 @@ impl TransactionInner {
 			// Use a BTreeMap to collect and merge versions by version number
 			let mut all_versions: BTreeMap<u64, Option<Bytes>> = BTreeMap::new();
 			// Collect all versions from the datastore
-			let collected: Option<Vec<(u64, Option<Bytes>)>> =
-				self.database.datastore.lookup(&key, |v| v.all_versions());
-			if let Some(versions) = collected {
-				for (ver, val) in versions {
+			if let Some(entry) = self.database.datastore.get(&key) {
+				let versions = entry.value().read();
+				for (ver, val) in versions.all_versions() {
 					if ver <= version {
 						all_versions.insert(ver, val);
 					}
@@ -2598,7 +2587,10 @@ impl TransactionInner {
 			}
 		}
 		// Check the key in the datastore
-		self.database.datastore.lookup(key, |v| v.fetch_version(version)).flatten()
+		self.database.datastore.get(key).and_then(|e| match e.value().try_read() {
+			Some(guard) => guard.fetch_version(version),
+			None => e.value().read().fetch_version(version),
+		})
 	}
 
 	/// Check if a key exists in the datastore only
@@ -2622,7 +2614,14 @@ impl TransactionInner {
 			}
 		}
 		// Check the key in the datastore
-		self.database.datastore.lookup(key, |v| v.exists_version(version)).unwrap_or(false)
+		self.database
+			.datastore
+			.get(key)
+			.map(|e| match e.value().try_read() {
+				Some(guard) => guard.exists_version(version),
+				None => e.value().read().exists_version(version),
+			})
+			.is_some_and(|v| v)
 	}
 
 	/// Check if a key equals a value in the datastore only
@@ -2651,8 +2650,17 @@ impl TransactionInner {
 			}
 		}
 		// Check the key in the datastore
-		let stored = self.database.datastore.lookup(key, |v| v.fetch_version(version)).flatten();
-		match (chk.as_ref(), stored.as_ref()) {
+		match (
+			chk.as_ref(),
+			self.database
+				.datastore
+				.get(key)
+				.and_then(|e| match e.value().try_read() {
+					Some(guard) => guard.fetch_version(version),
+					None => e.value().read().fetch_version(version),
+				})
+				.as_ref(),
+		) {
 			(Some(x), Some(y)) => x.as_slice() == y,
 			(None, None) => true,
 			_ => false,
