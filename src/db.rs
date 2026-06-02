@@ -286,10 +286,12 @@ impl Database {
 				let mut versions = entry.value().write();
 				// Clean up unnecessary older versions
 				if versions.gc_older_versions(cleanup_ts) == 0 {
-					// Drop the version reference
-					drop(versions);
-					// Remove the entry from the datastore
-					self.datastore.remove(&key);
+					// Remove the entry while still holding the version write
+					// lock, so a committer blocked on that lock observes
+					// `is_removed()` and re-inserts rather than writing into a
+					// node we are about to unlink. `Entry::remove` also unlinks
+					// at the cursor with no second key lookup.
+					entry.remove();
 				}
 			}
 		}
@@ -303,10 +305,8 @@ impl Database {
 			let mut versions = versions.write();
 			// Clean up unnecessary older versions
 			if versions.gc_older_versions(cleanup_ts) == 0 {
-				// Drop the version reference
-				drop(versions);
-				// Remove the entry from the datastore
-				self.datastore.remove(entry.key());
+				// Remove under the version write lock (see `run_gc_dirty_inner`).
+				entry.remove();
 			}
 		}
 	}
@@ -434,8 +434,8 @@ impl Database {
 						if let Some(entry) = db.datastore.get(&key) {
 							let mut versions = entry.value().write();
 							if versions.gc_older_versions(cleanup_ts) == 0 {
-								drop(versions);
-								db.datastore.remove(&key);
+								// Remove under the version write lock (see `run_gc_dirty_inner`).
+								entry.remove();
 							}
 						}
 					}
@@ -447,10 +447,8 @@ impl Database {
 							// Clean up unnecessary older versions
 							let mut versions = entry.value().write();
 							if versions.gc_older_versions(cleanup_ts) == 0 {
-								// Drop the version reference
-								drop(versions);
-								// Remove the entry from the datastore
-								db.datastore.remove(entry.key());
+								// Remove under the version write lock (see `run_gc_dirty_inner`).
+								entry.remove();
 							}
 						}
 					}

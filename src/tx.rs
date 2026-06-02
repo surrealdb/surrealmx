@@ -1054,23 +1054,36 @@ impl TransactionInner {
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
-			// Check if this key already exists
-			if let Some(entry) = self.database.datastore.get(key) {
-				// Append the new version. Tombstone-only removals are
-				// handled by the background gc.
-				entry.value().write().push(Version {
-					version,
-					value,
-				});
-			} else {
-				// Insert a new entry for this key
-				self.database.datastore.insert(
-					key.clone(),
-					RwLock::new(Versions::from(Version {
+			// Append into the existing entry, but guard against a concurrent
+			// background gc that may be unlinking this key: the sweeper calls
+			// `Entry::remove` while holding the entry's write lock, so once we
+			// hold that lock `is_removed()` tells us whether the node is still
+			// live. If gc unlinked it, fall through to a fresh insert instead
+			// of pushing into a detached node (which would drop this commit's
+			// write). See `Database::run_gc_dirty_inner`.
+			let pending = if let Some(entry) = self.database.datastore.get(key) {
+				let mut versions = entry.value().write();
+				if entry.is_removed() {
+					Some(Version {
 						version,
 						value,
-					})),
-				);
+					})
+				} else {
+					versions.push(Version {
+						version,
+						value,
+					});
+					None
+				}
+			} else {
+				Some(Version {
+					version,
+					value,
+				})
+			};
+			// Insert a new entry when the key was absent or gc unlinked it.
+			if let Some(version) = pending {
+				self.database.datastore.insert(key.clone(), RwLock::new(Versions::from(version)));
 			}
 			// Queue the key for background gc. Each commit publishes
 			// fresh stale versions, so every modified key is dirty.
