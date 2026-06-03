@@ -23,8 +23,8 @@ use crate::DatabaseOptions;
 use bytes::Bytes;
 use crossbeam_queue::SegQueue;
 use crossbeam_skiplist::SkipMap;
-use ferntree::Tree;
 use parking_lot::RwLock;
+use std::collections::HashSet;
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
@@ -41,8 +41,8 @@ pub(crate) const COUNTER_TOMBSTONE: u64 = u64::MAX;
 pub struct Inner {
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
-	/// The underlying lock-free B+tree datastructure
-	pub(crate) datastore: Tree<Bytes, Versions>,
+	/// The underlying lock-free skip-list datastructure
+	pub(crate) datastore: SkipMap<Bytes, RwLock<Versions>>,
 	/// A count of total transactions grouped by oracle version
 	pub(crate) counter_by_oracle: SkipMap<u64, Arc<AtomicU64>>,
 	/// A count of total transactions grouped by commit id
@@ -94,7 +94,7 @@ impl Inner {
 	pub fn new(opts: &DatabaseOptions) -> Self {
 		Self {
 			oracle: Oracle::new(opts.resync_interval),
-			datastore: Tree::new(),
+			datastore: SkipMap::new(),
 			counter_by_oracle: SkipMap::new(),
 			counter_by_commit: SkipMap::new(),
 			transaction_queue_id: AtomicU64::new(0),
@@ -133,6 +133,91 @@ impl Inner {
 	#[inline]
 	pub(crate) fn earliest_active_commit(&self, fallback: u64) -> u64 {
 		earliest_active(&self.counter_by_commit, fallback)
+	}
+
+	/// Compute the next `cleanup_ts`, publishing it into `gc_floor` so
+	/// concurrent `register_counter` retries any reader whose snapshot
+	/// is below it, then re-scan to bound by any newly-arrived reader.
+	///
+	/// The proposed value is capped at the current oracle timestamp.
+	/// Without that cap, an idle database (oracle frozen while wall
+	/// clock advances) would push `gc_floor` above any value a future
+	/// reader could load — causing `register_counter` to spin forever
+	/// retrying.
+	pub(crate) fn compute_cleanup_ts(&self) -> u64 {
+		let now = self.oracle.current_time_ns();
+		let history = self.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
+		let history_cutoff = now.saturating_sub(history as u64);
+		let earliest_tx = self.earliest_active_version(now);
+		let oracle_now = self.oracle.inner.timestamp.load(Ordering::SeqCst);
+		// `gc_floor` must stay <= oracle so any future reader's load
+		// (which returns >= current oracle) satisfies the floor check.
+		let proposed = history_cutoff.min(earliest_tx).min(oracle_now);
+		// Publish proposed cleanup_ts via `gc_floor` BEFORE reclaiming.
+		// A `register_counter` that fences after CAS-publish will see
+		// either the old floor (and its publish becomes visible to our
+		// re-scan below via fence-fence SC ordering) or the new floor
+		// (and will retry to a fresh snapshot above it).
+		self.gc_floor.fetch_max(proposed, Ordering::SeqCst);
+		fence(Ordering::SeqCst);
+		let earliest_after = self.earliest_active_version(now);
+		proposed.min(earliest_after)
+	}
+
+	/// Drain the dirty-key queue, reclaiming stale versions on each key and
+	/// unlinking any whose version chain becomes empty.
+	///
+	/// Keys are de-duplicated within a pass: a hot key committed many times
+	/// between gc cycles is enqueued once per commit, but reclaiming it more
+	/// than once under a fixed `cleanup_ts` is wasted lock traffic — every
+	/// pass after the first is a no-op. A version added by a commit that
+	/// re-dirties the key mid-drain is newer than `cleanup_ts` and so not
+	/// reclaimable this pass anyway; it is caught on the next commit or the
+	/// periodic full scan.
+	pub(crate) fn run_gc_dirty_inner(&self, cleanup_ts: u64) {
+		let mut seen = HashSet::new();
+		// Drain all keys from the dirty queue
+		while let Some(key) = self.gc_dirty_keys.pop() {
+			// Skip keys already reclaimed in this pass
+			if !seen.insert(key.clone()) {
+				continue;
+			}
+			// Reclaim stale versions on this key
+			self.gc_key(&key, cleanup_ts);
+		}
+	}
+
+	/// Scan the entire datastore, reclaiming stale versions on every key.
+	pub(crate) fn run_gc_full(&self, cleanup_ts: u64) {
+		// Iterate over the entire datastore
+		for entry in self.datastore.iter() {
+			// Get a mutable reference to the versions list
+			let mut versions = entry.value().write();
+			// Clean up unnecessary older versions
+			if versions.gc_older_versions(cleanup_ts) == 0 {
+				// Remove under the version write lock (see `gc_key`).
+				entry.remove();
+			}
+		}
+	}
+
+	/// Reclaim stale versions on a single key, unlinking the entry if its
+	/// version chain becomes empty.
+	fn gc_key(&self, key: &Bytes, cleanup_ts: u64) {
+		// Look the key up in the datastore
+		if let Some(entry) = self.datastore.get(key) {
+			// Get a mutable reference to the versions list
+			let mut versions = entry.value().write();
+			// Clean up unnecessary older versions
+			if versions.gc_older_versions(cleanup_ts) == 0 {
+				// Remove the entry while still holding the version write lock,
+				// so a committer blocked on that lock observes `is_removed()`
+				// and re-inserts rather than writing into a node we are about
+				// to unlink. `Entry::remove` also unlinks at the cursor with
+				// no second key lookup.
+				entry.remove();
+			}
+		}
 	}
 }
 

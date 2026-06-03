@@ -308,3 +308,84 @@ fn ssi_delete_read_conflict() {
 	let tx = db.transaction(false);
 	assert!(tx.get("key").unwrap().is_none(), "Key should be deleted");
 }
+
+/// Stress guard for delete-then-recreate under aggressive concurrent GC: a key
+/// that is deleted and immediately recreated must always read back as its new
+/// value, never `None`. This exercises the path the GC remove/commit-reinsert
+/// coordination protects — the sweeper unlinks a tombstoned entry while holding
+/// its write lock, and the committer re-checks `is_removed()` under that same
+/// lock so a recreate either lands in a fresh entry or blocks the removal.
+///
+/// Note: the specific remove-vs-reinsert window is extremely narrow and this
+/// test is not a deterministic reproducer of it (it did not fail even with the
+/// guard removed under ThreadSanitizer); it is a sanity/stress guard over the
+/// delete-recreate-under-GC pattern. A side thread hammers `run_gc()`.
+#[test]
+fn delete_then_recreate_under_gc_keeps_value() {
+	use std::sync::atomic::{AtomicBool, Ordering};
+
+	const WRITERS: usize = 4;
+	const KEYS_PER_WRITER: usize = 32;
+	const ROUNDS: usize = 150;
+
+	// Background GC is enabled by default; we also drive it synchronously below.
+	let db = Arc::new(Database::new());
+
+	// Seed every key so the first delete always has something to remove.
+	{
+		let mut tx = db.transaction(true);
+		for w in 0..WRITERS {
+			for k in 0..KEYS_PER_WRITER {
+				tx.set(format!("w{w}:k{k}"), "seed").unwrap();
+			}
+		}
+		tx.commit().unwrap();
+	}
+
+	// Hammer GC to maximise the chance of a remove landing next to a recreate.
+	let stop = Arc::new(AtomicBool::new(false));
+	let gc = {
+		let db = db.clone();
+		let stop = stop.clone();
+		thread::spawn(move || {
+			while !stop.load(Ordering::Relaxed) {
+				db.run_gc();
+			}
+		})
+	};
+
+	let mut handles = Vec::new();
+	for w in 0..WRITERS {
+		// Each writer owns a disjoint key set, so commits never conflict.
+		let db = db.clone();
+		handles.push(thread::spawn(move || {
+			for round in 0..ROUNDS {
+				for k in 0..KEYS_PER_WRITER {
+					let key = format!("w{w}:k{k}");
+					let val = format!("w{w}:k{k}:r{round}");
+					// Delete, then recreate, each in its own commit.
+					let mut tx = db.transaction(true);
+					tx.del(key.as_str()).unwrap();
+					tx.commit().unwrap();
+					let mut tx = db.transaction(true);
+					tx.set(key.as_str(), val.as_str()).unwrap();
+					tx.commit().unwrap();
+					// A fresh snapshot (version above the recreate) must observe it.
+					let mut tx = db.transaction(false);
+					let got = tx.get(key.as_str()).unwrap();
+					tx.cancel().unwrap();
+					assert_eq!(
+						got.as_deref(),
+						Some(val.as_bytes()),
+						"recreated key {key} lost its value — GC removed a concurrently-committed entry"
+					);
+				}
+			}
+		}));
+	}
+	for h in handles {
+		h.join().unwrap();
+	}
+	stop.store(true, Ordering::Relaxed);
+	gc.join().unwrap();
+}

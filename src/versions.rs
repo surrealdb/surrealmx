@@ -1,6 +1,5 @@
 use crate::version::Version;
 use bytes::Bytes;
-use ferntree::impl_optimistic_read_boxed;
 use smallvec::SmallVec;
 
 pub(crate) enum IndexOrUpdate<'a> {
@@ -12,15 +11,9 @@ pub(crate) enum IndexOrUpdate<'a> {
 	Update(&'a mut Version),
 }
 
-#[derive(Clone)]
 pub struct Versions {
 	inner: SmallVec<[Version; 4]>,
 }
-
-// SAFETY: `Versions` is `Clone + Send + Sync + 'static`; ferntree stores it
-// behind `BoxedSlot`, so the displaced `Box<Versions>` must be routed through
-// the epoch GC on overwrite. See `impl_optimistic_read_boxed!` docs.
-impl_optimistic_read_boxed!(Versions);
 
 impl From<Version> for Versions {
 	fn from(value: Version) -> Self {
@@ -154,34 +147,12 @@ impl Versions {
 	{
 		// Drain the versions
 		self.inner.drain(range);
-		// Shrink the vec inline
-		self.inner.shrink_to_fit();
-	}
-
-	/// Check if the item at a specific version is a delete.
-	#[inline]
-	pub(crate) fn is_delete(&self, version: usize) -> bool {
-		self.inner.get(version).is_some_and(|v| v.value.is_none())
-	}
-
-	/// Find the index of the entry where item.version < version.
-	#[inline]
-	pub(crate) fn find_index_lt_version(&self, version: u64) -> usize {
-		// Check for any existing version
-		if let Some(last) = self.inner.last() {
-			// Check if the version is newer
-			if version > last.version {
-				// Return the index of the last version
-				return self.inner.len();
-			}
-		}
-		// Check the list length for reverse iteration or binary search
-		if self.inner.len() <= 4 {
-			// Use linear search to find the first element where v.version > version
-			self.inner.iter().rposition(|v| v.version < version).map_or(0, |i| i + 1)
-		} else {
-			// Find the index of the item where item.version <= version
-			self.inner.partition_point(|v| v.version < version)
+		// Only reclaim backing storage once capacity has grown well beyond
+		// the live set. Shrinking on every drain would thrash allocations
+		// for hot keys under the frequent background GC; the hysteresis keeps
+		// steady-state churn cheap while still bounding wasted capacity.
+		if self.inner.capacity() > self.inner.len().max(4).saturating_mul(2) {
+			self.inner.shrink_to_fit();
 		}
 	}
 
@@ -238,29 +209,35 @@ impl Versions {
 		self.inner.iter().map(|v| (v.version, v.value.clone())).collect()
 	}
 
-	/// Remove all versions older than the specified version.
+	/// Remove versions that no reader at a snapshot `>= version` can observe.
+	///
+	/// `version` is the GC floor: no reader exists below it, but readers may
+	/// sit exactly at it or anywhere above. The earliest snapshot any surviving
+	/// reader can hold is `version` itself, so the oldest entry we must retain
+	/// is the one *visible at* `version` — the latest entry with
+	/// `entry.version <= version` — together with every newer entry. Removing
+	/// that entry would let a reader whose snapshot lands between it and the
+	/// next entry observe the key vanish mid-snapshot (an SI violation).
 	#[inline]
 	pub(crate) fn gc_older_versions(&mut self, version: u64) -> usize {
-		// Find the index of the item where item.version < version
-		let idx = self.find_index_lt_version(version);
-		// Handle the case where all versions are older than the cutoff
-		if idx >= self.inner.len() {
-			// Check if the last version is a delete
-			if let Some(last) = self.inner.last() {
-				if last.value.is_none() {
-					// Last version is a delete, remove everything
-					self.inner.clear();
-				} else if idx > 1 {
-					// Last version has data, keep it and remove all others
-					self.drain(..idx - 1);
-				}
-			}
-		} else if self.is_delete(idx) {
-			// Remove all versions up to and including this delete
-			self.drain(..=idx);
-		} else if idx > 0 {
-			// Remove all versions up to this version
-			self.drain(..idx);
+		// Number of entries with entry.version <= version.
+		let lte = self.find_index_lte_version(version);
+		// No entry is <= version: every entry is newer and still required.
+		if lte == 0 {
+			return self.inner.len();
+		}
+		// The entry visible at `version`.
+		let visible = lte - 1;
+		if self.inner[visible].value.is_none() {
+			// The visible entry is a delete tombstone. A reader at or above
+			// `version` (and below the next entry) observes "absent", which is
+			// identical to the entry being gone — so drop the tombstone and
+			// everything before it.
+			self.drain(..lte);
+		} else {
+			// The visible entry carries a value a surviving reader may read.
+			// Keep it; drop only the strictly-older entries before it.
+			self.drain(..visible);
 		}
 		// Return the length
 		self.inner.len()
@@ -289,90 +266,6 @@ mod tests {
 			v.push(make_version(version, value));
 		}
 		v
-	}
-
-	// ==================== Tests for find_index_lt_version ====================
-
-	#[test]
-	fn test_find_index_lt_version_empty() {
-		let versions = Versions::new();
-		assert_eq!(versions.find_index_lt_version(0), 0);
-		assert_eq!(versions.find_index_lt_version(1), 0);
-		assert_eq!(versions.find_index_lt_version(100), 0);
-	}
-
-	#[test]
-	fn test_find_index_lt_version_single_version() {
-		let versions = make_versions(vec![(10, Some("value"))]);
-		// Query before the version
-		assert_eq!(versions.find_index_lt_version(5), 0);
-		assert_eq!(versions.find_index_lt_version(9), 0);
-		// Query at the version
-		assert_eq!(versions.find_index_lt_version(10), 0);
-		// Query after the version
-		assert_eq!(versions.find_index_lt_version(11), 1);
-		assert_eq!(versions.find_index_lt_version(100), 1);
-	}
-
-	#[test]
-	fn test_find_index_lt_version_multiple_versions() {
-		// Create a small list (≤32 elements) to trigger linear search
-		let versions = make_versions(vec![
-			(10, Some("v1")),
-			(20, Some("v2")),
-			(30, Some("v3")),
-			(40, Some("v4")),
-			(50, Some("v5")),
-		]);
-		// Query before the first version
-		assert_eq!(versions.find_index_lt_version(0), 0);
-		assert_eq!(versions.find_index_lt_version(5), 0);
-		// Query at the first version
-		assert_eq!(versions.find_index_lt_version(10), 0);
-		// Query after the first version
-		assert_eq!(versions.find_index_lt_version(15), 1);
-		// Query at the second version
-		assert_eq!(versions.find_index_lt_version(20), 1);
-		// Query after the second version
-		assert_eq!(versions.find_index_lt_version(25), 2);
-		assert_eq!(versions.find_index_lt_version(30), 2);
-		// Query at the third version
-		assert_eq!(versions.find_index_lt_version(35), 3);
-		assert_eq!(versions.find_index_lt_version(40), 3);
-		// Query at the fourth version
-		assert_eq!(versions.find_index_lt_version(45), 4);
-		// Query at the fifth version
-		assert_eq!(versions.find_index_lt_version(50), 4);
-		// Query after the fifth version
-		assert_eq!(versions.find_index_lt_version(51), 5);
-		assert_eq!(versions.find_index_lt_version(100), 5);
-	}
-
-	#[test]
-	fn test_find_index_lt_version_with_deletes() {
-		let versions = make_versions(vec![
-			(10, Some("v1")),
-			(20, None), // Delete
-			(30, Some("v3")),
-			(40, None), // Delete
-		]);
-		// Query before the first version
-		assert_eq!(versions.find_index_lt_version(5), 0);
-		assert_eq!(versions.find_index_lt_version(9), 0);
-		// Query at the first version
-		assert_eq!(versions.find_index_lt_version(10), 0);
-		// Query after the first version
-		assert_eq!(versions.find_index_lt_version(15), 1);
-		// Query at the second version
-		assert_eq!(versions.find_index_lt_version(20), 1);
-		// Query after the second version
-		assert_eq!(versions.find_index_lt_version(25), 2);
-		assert_eq!(versions.find_index_lt_version(30), 2);
-		// Query at the third version
-		assert_eq!(versions.find_index_lt_version(35), 3);
-		assert_eq!(versions.find_index_lt_version(40), 3);
-		// Query after the third version
-		assert_eq!(versions.find_index_lt_version(50), 4);
 	}
 
 	// ==================== Tests for find_index_lte_version ====================
@@ -460,31 +353,59 @@ mod tests {
 		assert_eq!(versions.find_index_lte_version(50), 4);
 	}
 
+	// ==================== Tests for gc_older_versions ====================
+
 	#[test]
-	fn test_find_index_lt_vs_lte_difference() {
-		// This test demonstrates the key difference between < and <=
-		let versions = make_versions(vec![
-			(10, Some("v1")),
-			(20, Some("v2")),
-			(30, Some("v3")),
-			(40, Some("v4")),
-			(50, Some("v5")),
-		]);
-		// Query at the first version
-		assert_eq!(versions.find_index_lt_version(10), 0);
-		assert_eq!(versions.find_index_lte_version(10), 1);
-		// Query after the first version
-		assert_eq!(versions.find_index_lt_version(15), 1);
-		assert_eq!(versions.find_index_lte_version(15), 1);
-		// Query at the second version
-		assert_eq!(versions.find_index_lt_version(20), 1);
-		assert_eq!(versions.find_index_lte_version(20), 2);
-		// Query at the third version
-		assert_eq!(versions.find_index_lt_version(30), 2);
-		assert_eq!(versions.find_index_lte_version(30), 3);
-		// Query after the third version
-		assert_eq!(versions.find_index_lt_version(35), 3);
-		assert_eq!(versions.find_index_lte_version(35), 3);
+	fn test_gc_keeps_version_visible_at_floor() {
+		// Regression: the GC floor falls in the gap between a value and a
+		// later delete. A reader whose snapshot lands in [floor, delete) must
+		// still observe the value, so it must survive GC.
+		let mut v = make_versions(vec![(10, Some("v1")), (40, None)]);
+		v.gc_older_versions(30);
+		// The value visible at 30 (and at 35) must remain readable.
+		assert_eq!(v.fetch_version(30), Some(Bytes::from("v1".to_string())));
+		assert_eq!(v.fetch_version(35), Some(Bytes::from("v1".to_string())));
+		// At/after the delete it is gone.
+		assert_eq!(v.fetch_version(40), None);
+	}
+
+	#[test]
+	fn test_gc_keeps_value_before_newer_version_in_gap() {
+		// Floor in the gap between two values: the earlier value is visible at
+		// the floor and must survive.
+		let mut v = make_versions(vec![(10, Some("v1")), (50, Some("v2"))]);
+		v.gc_older_versions(30);
+		assert_eq!(v.fetch_version(30), Some(Bytes::from("v1".to_string())));
+		assert_eq!(v.fetch_version(49), Some(Bytes::from("v1".to_string())));
+		assert_eq!(v.fetch_version(50), Some(Bytes::from("v2".to_string())));
+	}
+
+	#[test]
+	fn test_gc_drops_versions_below_visible() {
+		// Floor exactly on a value: older versions are reclaimed, the visible
+		// one is kept.
+		let mut v = make_versions(vec![(10, Some("v1")), (30, Some("v2"))]);
+		assert_eq!(v.gc_older_versions(30), 1);
+		assert_eq!(v.fetch_version(30), Some(Bytes::from("v2".to_string())));
+		assert_eq!(v.fetch_version(35), Some(Bytes::from("v2".to_string())));
+	}
+
+	#[test]
+	fn test_gc_collapses_fully_deleted_key() {
+		// Visible entry at the floor is a delete tombstone: the whole chain is
+		// reclaimable.
+		let mut v = make_versions(vec![(10, Some("v1")), (30, None)]);
+		assert_eq!(v.gc_older_versions(40), 0);
+		assert_eq!(v.fetch_version(40), None);
+	}
+
+	#[test]
+	fn test_gc_retains_all_when_floor_below_everything() {
+		// Floor below the earliest version: nothing is reclaimable.
+		let mut v = make_versions(vec![(10, Some("v1")), (20, Some("v2"))]);
+		assert_eq!(v.gc_older_versions(5), 2);
+		assert_eq!(v.fetch_version(10), Some(Bytes::from("v1".to_string())));
+		assert_eq!(v.fetch_version(20), Some(Bytes::from("v2".to_string())));
 	}
 
 	// ==================== Tests for fetch_version ====================
