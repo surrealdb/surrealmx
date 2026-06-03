@@ -26,7 +26,7 @@ use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
 use crate::tx::Transaction;
 use std::ops::Deref;
-use std::sync::atomic::{fence, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -248,69 +248,6 @@ impl Database {
 		self.run_gc_dirty_inner(cleanup_ts);
 	}
 
-	/// Compute the next `cleanup_ts`, publishing it into `gc_floor` so
-	/// concurrent `register_counter` retries any reader whose snapshot
-	/// is below it, then re-scan to bound by any newly-arrived reader.
-	///
-	/// The proposed value is capped at the current oracle timestamp.
-	/// Without that cap, an idle database (oracle frozen while wall
-	/// clock advances) would push `gc_floor` above any value a future
-	/// reader could load — causing `register_counter` to spin forever
-	/// retrying.
-	fn compute_cleanup_ts(&self) -> u64 {
-		let now = self.oracle.current_time_ns();
-		let history = self.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
-		let history_cutoff = now.saturating_sub(history as u64);
-		let earliest_tx = self.earliest_active_version(now);
-		let oracle_now = self.oracle.inner.timestamp.load(Ordering::SeqCst);
-		// `gc_floor` must stay <= oracle so any future reader's load
-		// (which returns >= current oracle) satisfies the floor check.
-		let proposed = history_cutoff.min(earliest_tx).min(oracle_now);
-		// Publish proposed cleanup_ts via `gc_floor` BEFORE reclaiming.
-		// A `register_counter` that fences after CAS-publish will see
-		// either the old floor (and its publish becomes visible to our
-		// re-scan below via fence-fence SC ordering) or the new floor
-		// (and will retry to a fresh snapshot above it).
-		self.gc_floor.fetch_max(proposed, Ordering::SeqCst);
-		fence(Ordering::SeqCst);
-		let earliest_after = self.earliest_active_version(now);
-		proposed.min(earliest_after)
-	}
-
-	fn run_gc_dirty_inner(&self, cleanup_ts: u64) {
-		// Drain all keys from the dirty queue
-		while let Some(key) = self.gc_dirty_keys.pop() {
-			// Check if this key still exists in the datastore
-			if let Some(entry) = self.datastore.get(&key) {
-				// Get a mutable reference to the versions list
-				let mut versions = entry.value().write();
-				// Clean up unnecessary older versions
-				if versions.gc_older_versions(cleanup_ts) == 0 {
-					// Remove the entry while still holding the version write
-					// lock, so a committer blocked on that lock observes
-					// `is_removed()` and re-inserts rather than writing into a
-					// node we are about to unlink. `Entry::remove` also unlinks
-					// at the cursor with no second key lookup.
-					entry.remove();
-				}
-			}
-		}
-	}
-
-	fn run_gc_full(&self, cleanup_ts: u64) {
-		// Iterate over the entire datastore
-		for entry in self.datastore.iter() {
-			// Get a mutable reference to the versions list
-			let versions = entry.value();
-			let mut versions = versions.write();
-			// Clean up unnecessary older versions
-			if versions.gc_older_versions(cleanup_ts) == 0 {
-				// Remove under the version write lock (see `run_gc_dirty_inner`).
-				entry.remove();
-			}
-		}
-	}
-
 	/// Shutdown the datastore, waiting for background threads to exit
 	fn shutdown(&self) {
 		#[cfg(not(target_arch = "wasm32"))]
@@ -416,41 +353,13 @@ impl Database {
 					// a fresh oracle read above the floor. The proposed
 					// value is capped at the current oracle so an idle
 					// database does not lock readers out forever.
-					let cleanup_ts = {
-						let now = db.oracle.current_time_ns();
-						let history =
-							db.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
-						let history_cutoff = now.saturating_sub(history as u64);
-						let earliest_tx = db.earliest_active_version(now);
-						let oracle_now = db.oracle.inner.timestamp.load(Ordering::SeqCst);
-						let proposed = history_cutoff.min(earliest_tx).min(oracle_now);
-						db.gc_floor.fetch_max(proposed, Ordering::SeqCst);
-						fence(Ordering::SeqCst);
-						let earliest_after = db.earliest_active_version(now);
-						proposed.min(earliest_after)
-					};
-					// Drain all keys from the dirty queue (incremental GC).
-					while let Some(key) = db.gc_dirty_keys.pop() {
-						if let Some(entry) = db.datastore.get(&key) {
-							let mut versions = entry.value().write();
-							if versions.gc_older_versions(cleanup_ts) == 0 {
-								// Remove under the version write lock (see `run_gc_dirty_inner`).
-								entry.remove();
-							}
-						}
-					}
-					// Periodically do a full datastore scan
+					let cleanup_ts = db.compute_cleanup_ts();
+					// Drain the dirty-key queue every cycle (incremental GC).
+					db.run_gc_dirty_inner(cleanup_ts);
+					// Periodically do a full datastore scan.
 					cycle += 1;
 					if cycle.is_multiple_of(full_scan_frequency) {
-						// Iterate over the entire datastore
-						for entry in db.datastore.iter() {
-							// Clean up unnecessary older versions
-							let mut versions = entry.value().write();
-							if versions.gc_older_versions(cleanup_ts) == 0 {
-								// Remove under the version write lock (see `run_gc_dirty_inner`).
-								entry.remove();
-							}
-						}
+						db.run_gc_full(cleanup_ts);
 					}
 				}
 			});

@@ -1054,36 +1054,36 @@ impl TransactionInner {
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
-			// Append into the existing entry, but guard against a concurrent
-			// background gc that may be unlinking this key: the sweeper calls
-			// `Entry::remove` while holding the entry's write lock, so once we
-			// hold that lock `is_removed()` tells us whether the node is still
-			// live. If gc unlinked it, fall through to a fresh insert instead
-			// of pushing into a detached node (which would drop this commit's
-			// write). See `Database::run_gc_dirty_inner`.
-			let pending = if let Some(entry) = self.database.datastore.get(key) {
+			// Publish the new version into the datastore, guarding against a
+			// concurrent background gc that may be unlinking this key: the
+			// sweeper calls `Entry::remove` while holding the entry's write
+			// lock, so once we hold that lock `is_removed()` tells us whether
+			// the node is still live. `get_or_insert_with` (unlike `insert`)
+			// never replaces a live node, so a concurrent writer's entry can
+			// never be clobbered; if the sweeper unlinked the node we landed
+			// on, we retry and get a fresh one. The closure seeds the chain
+			// with this version so a freshly-inserted node is never an empty,
+			// immediately-gc-reclaimable node mid-insert. See
+			// `Inner::run_gc_dirty_inner`.
+			loop {
+				let entry = self.database.datastore.get_or_insert_with(key.clone(), || {
+					RwLock::new(Versions::from(Version {
+						version,
+						value: value.clone(),
+					}))
+				});
 				let mut versions = entry.value().write();
+				// The sweeper unlinked this node between lookup and lock; retry
+				// onto a fresh one rather than writing into a detached node.
 				if entry.is_removed() {
-					Some(Version {
-						version,
-						value,
-					})
-				} else {
-					versions.push(Version {
-						version,
-						value,
-					});
-					None
+					continue;
 				}
-			} else {
-				Some(Version {
+				// A no-op when the node was just seeded with this version.
+				versions.push(Version {
 					version,
 					value,
-				})
-			};
-			// Insert a new entry when the key was absent or gc unlinked it.
-			if let Some(version) = pending {
-				self.database.datastore.insert(key.clone(), RwLock::new(Versions::from(version)));
+				});
+				break;
 			}
 			// Queue the key for background gc. Each commit publishes
 			// fresh stale versions, so every modified key is dirty.

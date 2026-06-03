@@ -147,8 +147,13 @@ impl Versions {
 	{
 		// Drain the versions
 		self.inner.drain(range);
-		// Shrink the vec inline
-		self.inner.shrink_to_fit();
+		// Only reclaim backing storage once capacity has grown well beyond
+		// the live set. Shrinking on every drain would thrash allocations
+		// for hot keys under the frequent background GC; the hysteresis keeps
+		// steady-state churn cheap while still bounding wasted capacity.
+		if self.inner.capacity() > self.inner.len().max(4).saturating_mul(2) {
+			self.inner.shrink_to_fit();
+		}
 	}
 
 	/// Find the index of the entry where item.version <= version.
