@@ -820,29 +820,30 @@ impl TransactionInner {
 		// cover our merge version — in the queue overlay or applied below.
 		commit_entry.merge_version.store(version, Ordering::SeqCst);
 		self.database.advance_commit_watermark();
-		// Apply each writeset entry. Inline gc has intentionally been
-		// removed from this path: the registration race in PR #77 stems
-		// from the gap between `earliest_active_version` and
-		// `gc_older_versions`, where a reader registering in that window
-		// would have its snapshot version swept by a cleanup_ts computed
-		// without it. We defer all version reclamation to the background
-		// gc worker, which runs far less frequently and so does not race
-		// with the steady-state reader registration pattern. The commit
-		// path publishes the new version and queues the key for sweeping.
+		// Compute the inline-GC watermark ONCE for this commit, after our
+		// merge version is published and before the apply loop. The
+		// pin-then-read slot protocol makes this safe where it once was
+		// not (the PR #77 race): every current transaction is visible in
+		// the slot scan or forces a skip, and every future transaction
+		// snapshots at or above the clock bound loaded inside — while our
+		// own excluded slot is pinned at our start version, so the
+		// watermark always sits strictly below the version we push.
+		let watermark = self.database.inline_gc_watermark(self.slot_id);
+		// Apply each writeset entry, reclaiming superseded versions
+		// inline while the chain write lock is already held.
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
 			// Publish the new version into the datastore, guarding against a
-			// concurrent background gc that may be unlinking this key: the
-			// sweeper calls `Entry::remove` while holding the entry's write
+			// concurrent gc sweep that may be unlinking this key: sweeps
+			// call `Entry::remove` while holding the entry's write
 			// lock, so once we hold that lock `is_removed()` tells us whether
 			// the node is still live. `get_or_insert_with` (unlike `insert`)
 			// never replaces a live node, so a concurrent writer's entry can
-			// never be clobbered; if the sweeper unlinked the node we landed
+			// never be clobbered; if a sweep unlinked the node we landed
 			// on, we retry and get a fresh one. The closure seeds the chain
 			// with this version so a freshly-inserted node is never an empty,
-			// immediately-gc-reclaimable node mid-insert. See
-			// `Inner::run_gc_dirty_inner`.
+			// immediately-gc-reclaimable node mid-insert.
 			loop {
 				let entry = self.database.datastore.get_or_insert_with(key.clone(), || {
 					RwLock::new(Versions::from(Version {
@@ -851,7 +852,7 @@ impl TransactionInner {
 					}))
 				});
 				let mut versions = entry.value().write();
-				// The sweeper unlinked this node between lookup and lock; retry
+				// A sweep unlinked this node between lookup and lock; retry
 				// onto a fresh one rather than writing into a detached node.
 				if entry.is_removed() {
 					continue;
@@ -861,11 +862,20 @@ impl TransactionInner {
 					version,
 					value,
 				});
+				// Reclaim versions no live or future transaction can see,
+				// under the write lock we already hold. When the chain
+				// collapses entirely — the entry visible at the watermark
+				// is a delete tombstone with nothing newer, e.g. our own
+				// delete with no readers below — unlink the node while
+				// still holding the lock, so a concurrent committer
+				// observes `is_removed()` and re-inserts.
+				if let Some(w) = watermark {
+					if versions.gc_older_versions(w) == 0 {
+						entry.remove();
+					}
+				}
 				break;
 			}
-			// Queue the key for background gc. Each commit publishes
-			// fresh stale versions, so every modified key is dirty.
-			self.database.gc_dirty_keys.push(key.clone());
 		}
 		// Append the transaction to the persistence layer
 		#[cfg(not(target_arch = "wasm32"))]
@@ -4516,9 +4526,10 @@ mod tests {
 
 	/// Per-key version chain: many overlapping writers on one key, then
 	/// verify the raw chain is strictly monotonic and holds every committed
-	/// value exactly once. Background workers are disabled so the chain is
-	/// never pruned while the test inspects it: the commit path performs no
-	/// inline GC, so all reclamation happens in the (disabled) worker.
+	/// value exactly once. A reader pinned at the seed version holds every
+	/// commit's inline-GC watermark below the whole test's writes, so the
+	/// chain retains the full history for inspection; background workers
+	/// are disabled so no safety-net sweep runs either.
 	#[test]
 	fn test_version_chain_monotonic_under_concurrent_writers() {
 		const THREADS: usize = 8;
@@ -4532,6 +4543,9 @@ mod tests {
 			tx.set(b"hotkey".to_vec(), b"seed".to_vec()).unwrap();
 			tx.commit().unwrap();
 		}
+		// Pin a reader at the seed version so inline commit-time GC keeps
+		// the seed and every later version alive for the whole test.
+		let pin = db.transaction(false);
 		let barrier = Arc::new(std::sync::Barrier::new(THREADS));
 		let written: Arc<std::sync::Mutex<std::collections::BTreeSet<Vec<u8>>>> =
 			Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
@@ -4579,16 +4593,22 @@ mod tests {
 			chain.iter().filter_map(|v| v.value.as_ref().map(|b| b.to_vec())).collect();
 		got.remove(b"seed".as_slice());
 		assert_eq!(got, committed, "chain values diverge from committed writes");
+		// Release the pinned reader
+		drop(pin);
 	}
 
 	/// Repeated sequential writes to the same keys: each key's raw version
-	/// chain accumulates every committed round in order. Background workers
-	/// are disabled so chains retain all versions during inspection.
+	/// chain accumulates every committed round in order. A reader pinned
+	/// before the first round holds every commit's inline-GC watermark
+	/// below the whole test's writes; background workers are disabled so
+	/// no safety-net sweep runs either.
 	#[test]
 	fn test_version_chain_accumulates_repeated_writes() {
 		let db = Database::new_with_options(
 			crate::DatabaseOptions::default().with_all_workers_disabled(),
 		);
+		// Pin a reader so inline commit-time GC retains every round
+		let pin = db.transaction(false);
 		// Five writes per key, on 200 keys
 		for round in 0..5 {
 			let mut tx = db.transaction(true);
@@ -4619,5 +4639,7 @@ mod tests {
 				);
 			}
 		}
+		// Release the pinned reader
+		drop(pin);
 	}
 }

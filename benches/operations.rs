@@ -964,17 +964,18 @@ fn bench_keys_for_each(c: &mut Criterion) {
 // GC benchmarks: incremental dirty-key GC vs full scan
 // ---------------------------------------------------------------------------
 
-// Sparse dirty keys: large datastore, only a small number of keys updated.
-// Dirty-key GC should be much faster than a full scan because it only visits
-// the keys that were modified, while the full scan iterates the entire
-// datastore.
-fn bench_gc_sparse_dirty(c: &mut Criterion) {
-	let mut group = c.benchmark_group("gc_sparse_dirty");
-	// Fixed number of dirty keys
-	let dirty_count = 100;
+// Safety-net full scan: large datastore with a departed reader's pinned
+// garbage on a subset of keys. Measures the cost of the periodic sweep,
+// which grows linearly with total keys regardless of garbage volume.
+fn bench_gc_full_scan(c: &mut Criterion) {
+	let mut group = c.benchmark_group("gc_full_scan");
+	// Fixed number of keys carrying stale versions
+	let stale_count = 100;
 
 	for total_keys in [1_000, 10_000, 100_000].iter() {
 		// Setup helper: create datastore, then overwrite a small subset
+		// while a reader pins the old versions, then drop the reader —
+		// exactly the garbage shape only the safety net can reclaim.
 		let setup = || {
 			let db =
 				Database::new_with_options(DatabaseOptions::default().with_all_workers_disabled());
@@ -988,36 +989,24 @@ fn bench_gc_sparse_dirty(c: &mut Criterion) {
 				}
 				tx.commit().unwrap();
 			}
-			// Overwrite a small fixed number of keys to create stale versions
+			// Pin the initial versions with a reader while overwriting
 			{
+				let reader = db.transaction(false);
 				let mut tx = db.transaction(true);
-				for i in 0..dirty_count {
+				for i in 0..stale_count {
 					let key = generate_sequential_key(i);
 					let value = Bytes::from(format!("updated_{:08}", i).into_bytes());
 					tx.set(key, value).unwrap();
 				}
 				tx.commit().unwrap();
+				drop(reader);
 			}
 			db
 		};
 
-		// Dirty-key GC: should stay roughly constant regardless of total keys
+		// Full-scan GC: grows linearly with total keys
 		group.bench_function(
-			BenchmarkId::new("dirty_gc", format!("{}total_{}dirty", total_keys, dirty_count)),
-			|b| {
-				b.iter_batched(
-					setup,
-					|db| {
-						db.run_gc_dirty();
-					},
-					criterion::BatchSize::LargeInput,
-				)
-			},
-		);
-
-		// Full-scan GC: should grow linearly with total keys
-		group.bench_function(
-			BenchmarkId::new("full_gc", format!("{}total_{}dirty", total_keys, dirty_count)),
+			BenchmarkId::new("full_gc", format!("{}total_{}stale", total_keys, stale_count)),
 			|b| {
 				b.iter_batched(
 					setup,
@@ -1032,69 +1021,39 @@ fn bench_gc_sparse_dirty(c: &mut Criterion) {
 	group.finish();
 }
 
-// Scaling with dirty ratio: fixed datastore size, varying the fraction of
-// keys that have been updated. Dirty-key GC should scale proportionally to
-// the number of dirty keys, while full scan stays constant.
-fn bench_gc_dirty_ratio(c: &mut Criterion) {
-	let mut group = c.benchmark_group("gc_dirty_ratio");
-	// Fixed datastore size
-	let total_keys = 10_000;
+// Inline commit-time GC overhead: the per-commit cost of the watermark
+// slot scan plus the chain trim under the already-held write lock. The
+// hot-key arm overwrites a single key per commit (worst-case relative
+// overhead); the wide arm amortises the scan across a large writeset.
+fn bench_commit_inline_gc(c: &mut Criterion) {
+	let mut group = c.benchmark_group("commit_inline_gc");
 
-	for dirty_pct in [1, 10, 50].iter() {
-		let dirty_count = total_keys * dirty_pct / 100;
+	// Hot key: repeated single-key overwrite commits
+	group.bench_function("hot_key_overwrite", |b| {
+		let db = Database::new_with_options(DatabaseOptions::default().with_all_workers_disabled());
+		let key = generate_sequential_key(0);
+		let value = generate_sequential_value(0, 100);
+		b.iter(|| {
+			let mut tx = db.transaction(true);
+			tx.set(key.clone(), value.clone()).unwrap();
+			tx.commit().unwrap();
+		})
+	});
 
-		// Setup helper
-		let setup = || {
-			let db =
-				Database::new_with_options(DatabaseOptions::default().with_all_workers_disabled());
-			// Insert initial data
-			{
-				let mut tx = db.transaction(true);
-				for i in 0..total_keys {
-					let key = generate_sequential_key(i);
-					let value = generate_sequential_value(i, 100);
-					tx.put(key, value).unwrap();
-				}
-				tx.commit().unwrap();
+	// Wide writeset: one commit overwriting many keys
+	group.bench_function("wide_writeset_1000", |b| {
+		let db = Database::new_with_options(DatabaseOptions::default().with_all_workers_disabled());
+		let keys: Vec<Bytes> = (0..1_000).map(generate_sequential_key).collect();
+		let value = generate_sequential_value(0, 100);
+		b.iter(|| {
+			let mut tx = db.transaction(true);
+			for key in keys.iter() {
+				tx.set(key.clone(), value.clone()).unwrap();
 			}
-			// Overwrite a percentage of keys
-			{
-				let mut tx = db.transaction(true);
-				for i in 0..dirty_count {
-					let key = generate_sequential_key(i);
-					let value = Bytes::from(format!("updated_{:08}", i).into_bytes());
-					tx.set(key, value).unwrap();
-				}
-				tx.commit().unwrap();
-			}
-			db
-		};
+			tx.commit().unwrap();
+		})
+	});
 
-		// Dirty-key GC
-		group.bench_function(
-			BenchmarkId::new("dirty_gc", format!("{}pct_dirty", dirty_pct)),
-			|b| {
-				b.iter_batched(
-					setup,
-					|db| {
-						db.run_gc_dirty();
-					},
-					criterion::BatchSize::LargeInput,
-				)
-			},
-		);
-
-		// Full-scan GC
-		group.bench_function(BenchmarkId::new("full_gc", format!("{}pct_dirty", dirty_pct)), |b| {
-			b.iter_batched(
-				setup,
-				|db| {
-					db.run_gc();
-				},
-				criterion::BatchSize::LargeInput,
-			)
-		});
-	}
 	group.finish();
 }
 
@@ -1444,8 +1403,8 @@ criterion_group!(
 	optimization_benchmarks,
 	bench_scan_for_each,
 	bench_keys_for_each,
-	bench_gc_sparse_dirty,
-	bench_gc_dirty_ratio,
+	bench_gc_full_scan,
+	bench_commit_inline_gc,
 	bench_readset_bloom_impact,
 	bench_readset_bloom_conflict_path,
 	bench_writeset_bloom_impact,

@@ -21,10 +21,8 @@ use crate::queue::{Commit, Merge};
 use crate::versions::Versions;
 use crate::DatabaseOptions;
 use bytes::Bytes;
-use crossbeam_queue::SegQueue;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
-use std::collections::HashSet;
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
@@ -109,8 +107,6 @@ pub struct Inner {
 	/// Stores a handle to the current garbage collection background thread
 	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) garbage_collection_handle: RwLock<Option<JoinHandle<()>>>,
-	/// Keys with stale versions pending incremental garbage collection
-	pub(crate) gc_dirty_keys: SegQueue<Bytes>,
 	/// Threshold after which transaction state is reset
 	pub(crate) reset_threshold: usize,
 }
@@ -135,7 +131,6 @@ impl Inner {
 			transaction_cleanup_handle: RwLock::new(None),
 			#[cfg(not(target_arch = "wasm32"))]
 			garbage_collection_handle: RwLock::new(None),
-			gc_dirty_keys: SegQueue::new(),
 			reset_threshold: opts.reset_threshold,
 		}
 	}
@@ -182,6 +177,27 @@ impl Inner {
 				e.remove();
 			});
 		}
+	}
+
+	/// Compute the watermark for commit-time inline garbage collection,
+	/// or `None` when a registration is in flight — in which case the
+	/// committer simply skips inline reclamation for this commit and the
+	/// next commit to each key (or the background full scan) catches up.
+	///
+	/// The committer's own slot is excluded: `commit` takes the
+	/// transaction by mutable reference and marks it done, so no further
+	/// reads can occur at its snapshot. Excluding ANY other slot is
+	/// forbidden — in particular a concurrent committer's slot (pinned at
+	/// its start version, strictly below its merge version) is what
+	/// prevents a delete-collapse from unlinking a chain that a slower
+	/// committer is still about to push an earlier version into, which
+	/// would otherwise resurrect deleted data through the
+	/// `get_or_insert_with` re-seed path.
+	pub(crate) fn inline_gc_watermark(&self, own_slot: u64) -> Option<u64> {
+		// Load the clock bound before the fence-and-scan
+		let now = self.oracle.timestamp.load(Ordering::SeqCst);
+		// Bound by every other registered transaction
+		earliest_pinned(&self.readers, |s| &s.version, now, Some(own_slot))
 	}
 
 	/// Compute the next `cleanup_ts` below which no live or future
@@ -250,48 +266,16 @@ impl Inner {
 		}
 	}
 
-	/// Drain the dirty-key queue, reclaiming stale versions on each key and
-	/// unlinking any whose version chain becomes empty.
-	///
-	/// Keys are de-duplicated within a pass: a hot key committed many times
-	/// between gc cycles is enqueued once per commit, but reclaiming it more
-	/// than once under a fixed `cleanup_ts` is wasted lock traffic — every
-	/// pass after the first is a no-op. A version added by a commit that
-	/// re-dirties the key mid-drain is newer than `cleanup_ts` and so not
-	/// reclaimable this pass anyway; it is caught on the next commit or the
-	/// periodic full scan.
-	pub(crate) fn run_gc_dirty_inner(&self, cleanup_ts: u64) {
-		let mut seen = HashSet::new();
-		// Drain all keys from the dirty queue
-		while let Some(key) = self.gc_dirty_keys.pop() {
-			// Skip keys already reclaimed in this pass
-			if !seen.insert(key.clone()) {
-				continue;
-			}
-			// Reclaim stale versions on this key
-			self.gc_key(&key, cleanup_ts);
-		}
-	}
-
 	/// Scan the entire datastore, reclaiming stale versions on every key.
+	///
+	/// Steady-state reclamation happens inline at commit time, so this
+	/// sweep is a low-frequency safety net for garbage which no future
+	/// commit will visit: versions pinned by a since-departed reader on a
+	/// key that is never written again, and the inert below-watermark
+	/// entries which an out-of-order apply can leave behind.
 	pub(crate) fn run_gc_full(&self, cleanup_ts: u64) {
 		// Iterate over the entire datastore
 		for entry in self.datastore.iter() {
-			// Get a mutable reference to the versions list
-			let mut versions = entry.value().write();
-			// Clean up unnecessary older versions
-			if versions.gc_older_versions(cleanup_ts) == 0 {
-				// Remove under the version write lock (see `gc_key`).
-				entry.remove();
-			}
-		}
-	}
-
-	/// Reclaim stale versions on a single key, unlinking the entry if its
-	/// version chain becomes empty.
-	fn gc_key(&self, key: &Bytes, cleanup_ts: u64) {
-		// Look the key up in the datastore
-		if let Some(entry) = self.datastore.get(key) {
 			// Get a mutable reference to the versions list
 			let mut versions = entry.value().write();
 			// Clean up unnecessary older versions

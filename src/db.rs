@@ -17,9 +17,7 @@
 use crate::inner::Inner;
 use crate::options::DatabaseOptions;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::options::{
-	DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_FULL_SCAN_FREQUENCY, DEFAULT_GC_INTERVAL,
-};
+use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::persistence::Persistence;
 use crate::pool::Pool;
@@ -47,9 +45,6 @@ pub struct Database {
 	/// Interval used by the garbage collector thread
 	#[cfg(not(target_arch = "wasm32"))]
 	gc_interval: Duration,
-	/// Number of gc wake-ups between full datastore scans
-	#[cfg(not(target_arch = "wasm32"))]
-	gc_full_scan_frequency: u64,
 	/// Interval used by the cleanup thread
 	#[cfg(not(target_arch = "wasm32"))]
 	cleanup_interval: Duration,
@@ -66,8 +61,6 @@ impl Default for Database {
 			persistence: None,
 			#[cfg(not(target_arch = "wasm32"))]
 			gc_interval: DEFAULT_GC_INTERVAL,
-			#[cfg(not(target_arch = "wasm32"))]
-			gc_full_scan_frequency: DEFAULT_GC_FULL_SCAN_FREQUENCY,
 			#[cfg(not(target_arch = "wasm32"))]
 			cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
 		}
@@ -109,8 +102,6 @@ impl Database {
 			#[cfg(not(target_arch = "wasm32"))]
 			gc_interval: opts.gc_interval,
 			#[cfg(not(target_arch = "wasm32"))]
-			gc_full_scan_frequency: opts.gc_full_scan_frequency,
-			#[cfg(not(target_arch = "wasm32"))]
 			cleanup_interval: opts.cleanup_interval,
 		};
 		// Start background tasks when enabled
@@ -149,7 +140,6 @@ impl Database {
 			pool,
 			persistence: Some(persist),
 			gc_interval: opts.gc_interval,
-			gc_full_scan_frequency: opts.gc_full_scan_frequency,
 			cleanup_interval: opts.cleanup_interval,
 		};
 		// Start background tasks when enabled
@@ -187,35 +177,20 @@ impl Database {
 		self.inner.cleanup_commit_queue();
 	}
 
-	/// Manually perform garbage collection of stale record versions.
+	/// Manually perform a full garbage collection sweep.
 	///
-	/// This function first processes keys that are known to have stale
-	/// versions (tracked during transaction commits), then performs a full
-	/// datastore scan to clean up any remaining old versions. Note that
-	/// inline garbage collection happens automatically during transaction
-	/// commits, but only for keys being modified. This function is useful
-	/// for cleaning up stale versions on keys that haven't been recently
-	/// modified, or when automatic background GC is disabled via
-	/// [`DatabaseOptions::enable_gc`].
+	/// Steady-state reclamation happens inline at commit time: every
+	/// commit trims the chains it touches down to the current watermark.
+	/// This sweep is the safety net for garbage which no future commit
+	/// will visit — versions pinned by a since-departed reader on a key
+	/// that is never written again. It is useful when automatic
+	/// background GC is disabled via [`DatabaseOptions::enable_gc`], for
+	/// example on wasm targets, which have no background threads.
 	pub fn run_gc(&self) {
 		// Skip the pass entirely when registrations are in flight
 		if let Some(cleanup_ts) = self.compute_cleanup_ts() {
-			// First, process keys known to have stale versions
-			self.run_gc_dirty_inner(cleanup_ts);
-			// Then perform a full datastore scan for any remaining stale versions
+			// Perform a full datastore scan for stale versions
 			self.run_gc_full(cleanup_ts);
-		}
-	}
-
-	/// Process only dirty keys that are known to have stale versions.
-	///
-	/// This is a lightweight alternative to a full datastore scan, useful
-	/// for frequent incremental cleanup between full GC passes.
-	pub fn run_gc_dirty(&self) {
-		// Skip the pass entirely when registrations are in flight
-		if let Some(cleanup_ts) = self.compute_cleanup_ts() {
-			// Process dirty keys
-			self.run_gc_dirty_inner(cleanup_ts);
 		}
 	}
 
@@ -297,11 +272,12 @@ impl Database {
 		if db.garbage_collection_handle.read().is_none() {
 			// Get the specified interval
 			let interval = self.gc_interval;
-			// Full scan runs every Nth wake cycle; dirty-key pass runs every cycle
-			let full_scan_frequency = self.gc_full_scan_frequency.max(1);
-			// Spawn a new thread to handle periodic garbage collection
+			// Spawn a new thread to handle the periodic safety-net sweep.
+			// Steady-state reclamation happens inline at commit time, so
+			// this low-frequency full scan only collects garbage which no
+			// future commit will visit: versions pinned by a departed
+			// reader on a key that is never written again.
 			let handle = std::thread::spawn(move || {
-				let mut cycle: u64 = 0;
 				// Check whether the garbage collection process is enabled
 				while db.background_threads_enabled.load(Ordering::Relaxed) {
 					// Wait for a specified time interval
@@ -319,13 +295,8 @@ impl Database {
 					let Some(cleanup_ts) = db.compute_cleanup_ts() else {
 						continue;
 					};
-					// Drain the dirty-key queue every cycle (incremental GC).
-					db.run_gc_dirty_inner(cleanup_ts);
-					// Periodically do a full datastore scan.
-					cycle += 1;
-					if cycle.is_multiple_of(full_scan_frequency) {
-						db.run_gc_full(cleanup_ts);
-					}
+					// Perform the full datastore scan.
+					db.run_gc_full(cleanup_ts);
 				}
 			});
 			// Store and track the thread handle
@@ -1309,6 +1280,89 @@ mod tests {
 			db.commit_watermark.load(Ordering::SeqCst),
 			db.transaction_commit_id.load(Ordering::SeqCst)
 		);
+	}
+
+	#[test]
+	fn inline_gc_trims_hot_key_at_commit() {
+		// The deterministic memory bound: with no readers pinning older
+		// versions, every commit trims the chain it touches down to the
+		// latest version — no background worker, no sleeps, and the same
+		// behaviour on wasm targets which have no threads at all.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..100 {
+			let mut tx = db.transaction(true);
+			tx.set("hotkey", format!("v{i}")).unwrap();
+			tx.commit().unwrap();
+		}
+		let entry = db.datastore.get(b"hotkey".as_slice()).expect("hotkey missing");
+		let guard = entry.value().read();
+		let chain = guard.as_slice();
+		assert_eq!(chain.len(), 1, "inline GC should trim superseded versions at commit");
+		assert_eq!(chain[0].value.as_deref(), Some(b"v99" as &[u8]));
+	}
+
+	#[test]
+	fn inline_gc_unlinks_deleted_key_at_commit() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Scoped: a shadowed-but-live transaction would keep its slot
+		// registered and pin the delete's watermark below the tombstone
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "value").unwrap();
+			tx.commit().unwrap();
+		}
+		assert!(db.datastore.get(b"key".as_slice()).is_some());
+		// With no readers below the delete, the tombstone collapses the
+		// chain at commit time and the node is unlinked immediately.
+		{
+			let mut tx = db.transaction(true);
+			tx.del("key").unwrap();
+			tx.commit().unwrap();
+		}
+		assert!(
+			db.datastore.get(b"key".as_slice()).is_none(),
+			"a delete with no readers should unlink the node at commit"
+		);
+	}
+
+	#[test]
+	fn safety_net_reclaims_after_reader_departs() {
+		// Garbage pinned by a reader on a key that is never written again
+		// is invisible to inline commit-time GC: this is exactly the
+		// scenario that justifies keeping the background full-scan sweep.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v0").unwrap();
+			tx.commit().unwrap();
+		}
+		// Pin the initial version while overwriting the key
+		let reader = db.transaction(false);
+		for i in 1..=50 {
+			let mut tx = db.transaction(true);
+			tx.set("key", format!("v{i}")).unwrap();
+			tx.commit().unwrap();
+		}
+		{
+			let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+			let guard = entry.value().read();
+			assert!(guard.as_slice().len() > 1, "the pinned reader should retain history");
+		}
+		// Drop the reader; no further commits touch the key, so only the
+		// manual (or background) full sweep can reclaim the garbage
+		drop(reader);
+		db.run_gc();
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+		let guard = entry.value().read();
+		let chain = guard.as_slice();
+		assert_eq!(chain.len(), 1, "the safety-net sweep should reclaim departed-reader garbage");
+		assert_eq!(chain[0].value.as_deref(), Some(b"v50" as &[u8]));
 	}
 
 	#[test]
