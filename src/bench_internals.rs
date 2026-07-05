@@ -22,6 +22,7 @@ use crate::queue::{Commit, Merge};
 use bytes::Bytes;
 use papaya::HashSet;
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 /// A prepared readset conflict scenario for benchmarking
@@ -52,6 +53,7 @@ impl ReadsetConflictScenario {
 			id: 1,
 			keys,
 			writeset_bloom,
+			merge_version: AtomicU64::new(0),
 		});
 		// Build the readset and bloom filter
 		let readset = HashSet::new();
@@ -125,6 +127,7 @@ impl WritesetConflictScenario {
 			id,
 			keys,
 			writeset_bloom,
+			merge_version: AtomicU64::new(0),
 		}
 	}
 }

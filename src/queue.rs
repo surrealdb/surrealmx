@@ -19,6 +19,7 @@ use crate::LOG_TARGET_CONFLICTS;
 use bytes::Bytes;
 use papaya::HashSet;
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -33,6 +34,17 @@ pub struct Commit {
 	pub(crate) keys: Arc<[Bytes]>,
 	/// Bloom filter over writeset keys for fast conflict pre-checks
 	pub(crate) writeset_bloom: BloomFilter,
+	/// The merge version this commit published, or zero while the commit
+	/// is still in flight. Set by the owning transaction immediately
+	/// after its merge version becomes loadable from the clock. Consumed
+	/// by the commit-watermark advance (readers must never take a
+	/// conflict-window base covering a commit whose merge version they
+	/// cannot yet see) and by the conflict loop, which skips commits
+	/// whose merge version is visible in the checking transaction's
+	/// snapshot: a visible commit happened strictly before the snapshot
+	/// in version order, so it is not concurrent and first-committer-wins
+	/// does not apply to it.
+	pub(crate) merge_version: AtomicU64,
 }
 
 /// A transaction entry in the transaction merge queue
@@ -206,6 +218,7 @@ mod tests {
 			writeset_bloom,
 			min_key,
 			max_key,
+			merge_version: AtomicU64::new(0),
 		})
 	}
 

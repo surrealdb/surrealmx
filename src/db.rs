@@ -198,11 +198,13 @@ impl Database {
 	/// modified, or when automatic background GC is disabled via
 	/// [`DatabaseOptions::enable_gc`].
 	pub fn run_gc(&self) {
-		let cleanup_ts = self.compute_cleanup_ts();
-		// First, process keys known to have stale versions
-		self.run_gc_dirty_inner(cleanup_ts);
-		// Then perform a full datastore scan for any remaining stale versions
-		self.run_gc_full(cleanup_ts);
+		// Skip the pass entirely when registrations are in flight
+		if let Some(cleanup_ts) = self.compute_cleanup_ts() {
+			// First, process keys known to have stale versions
+			self.run_gc_dirty_inner(cleanup_ts);
+			// Then perform a full datastore scan for any remaining stale versions
+			self.run_gc_full(cleanup_ts);
+		}
 	}
 
 	/// Process only dirty keys that are known to have stale versions.
@@ -210,9 +212,11 @@ impl Database {
 	/// This is a lightweight alternative to a full datastore scan, useful
 	/// for frequent incremental cleanup between full GC passes.
 	pub fn run_gc_dirty(&self) {
-		let cleanup_ts = self.compute_cleanup_ts();
-		// Process dirty keys
-		self.run_gc_dirty_inner(cleanup_ts);
+		// Skip the pass entirely when registrations are in flight
+		if let Some(cleanup_ts) = self.compute_cleanup_ts() {
+			// Process dirty keys
+			self.run_gc_dirty_inner(cleanup_ts);
+		}
 	}
 
 	/// Shutdown the datastore, waiting for background threads to exit
@@ -306,15 +310,15 @@ impl Database {
 					if !db.background_threads_enabled.load(Ordering::Relaxed) {
 						break;
 					}
-					// Compute the next cleanup_ts. This publishes the
-					// proposed value to `gc_floor` and re-scans the
-					// counter map so any reader landing in the
-					// publish-and-scan window is either visible to us
-					// (and bounds the final cleanup_ts) or retries from
-					// a fresh clock read above the floor. The proposed
-					// value is bounded by the published logical clock,
-					// so an idle database can never lock readers out.
-					let cleanup_ts = db.compute_cleanup_ts();
+					// Compute the next cleanup_ts by scanning the slot
+					// map: any transaction registering concurrently is
+					// either visible to the scan (and bounds the final
+					// cleanup_ts) or pins after it (and takes a snapshot
+					// at or above the clock bound). A pass is skipped
+					// entirely while a registration is pinning.
+					let Some(cleanup_ts) = db.compute_cleanup_ts() else {
+						continue;
+					};
 					// Drain the dirty-key queue every cycle (incremental GC).
 					db.run_gc_dirty_inner(cleanup_ts);
 					// Periodically do a full datastore scan.
@@ -1229,5 +1233,165 @@ mod tests {
 		let mut tx = db.transaction(false);
 		assert_eq!(tx.get("key").unwrap().as_deref(), Some(b"value" as &[u8]));
 		tx.cancel().unwrap();
+	}
+
+	#[test]
+	fn slot_lifecycle() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		assert_eq!(db.readers.len(), 0);
+		let tx = db.transaction(false);
+		assert_eq!(db.readers.len(), 1);
+		let first_id = *db.readers.front().unwrap().key();
+		drop(tx);
+		assert_eq!(db.readers.len(), 0);
+		// Pool reuse re-pins the retained slot under a fresh id
+		let tx = db.transaction(false);
+		assert_eq!(db.readers.len(), 1);
+		let second_id = *db.readers.front().unwrap().key();
+		assert!(second_id > first_id);
+		drop(tx);
+		assert_eq!(db.readers.len(), 0);
+	}
+
+	#[test]
+	fn watermark_conservative_while_pinning() {
+		use crate::inner::Slot;
+		use std::sync::Arc;
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Commit some entries which would otherwise be trimmed
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// Insert a slot stuck in the pinning state, simulating a
+		// transaction mid-registration
+		db.readers.insert(u64::MAX, Arc::new(Slot::pinning()));
+		// Every sweep must treat the watermark as unknown and skip
+		assert_eq!(db.compute_cleanup_ts(), None);
+		let before = db.transaction_commit_queue.len();
+		db.run_cleanup();
+		assert_eq!(db.transaction_commit_queue.len(), before);
+		// Remove the pinning slot; sweeps proceed again
+		db.readers.remove(&u64::MAX);
+		assert!(db.compute_cleanup_ts().is_some());
+		db.run_cleanup();
+		assert_eq!(db.transaction_commit_queue.len(), 1);
+	}
+
+	#[test]
+	fn commit_watermark_tracks_commits() {
+		use std::sync::atomic::Ordering;
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// Every commit completed, so the watermark covers all claimed ids
+		assert_eq!(db.commit_watermark.load(Ordering::SeqCst), 5);
+		assert_eq!(db.transaction_commit_id.load(Ordering::SeqCst), 5);
+		// An aborted commit removes its entry, which also counts as
+		// complete: the watermark must still cover the aborted id.
+		let mut tx1 = db.transaction(true);
+		let mut tx2 = db.transaction(true);
+		tx1.set("clash", "one").unwrap();
+		tx2.set("clash", "two").unwrap();
+		tx1.commit().unwrap();
+		assert!(tx2.commit().is_err());
+		assert_eq!(
+			db.commit_watermark.load(Ordering::SeqCst),
+			db.transaction_commit_id.load(Ordering::SeqCst)
+		);
+	}
+
+	#[test]
+	fn pin_then_read_stress() {
+		use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+		use std::sync::Arc;
+		use std::thread;
+		use std::time::{Duration, Instant};
+		// Workers are disabled; a dedicated thread hammers the manual
+		// sweep entry points instead, maximising sweep frequency against
+		// the pin-then-read registration protocol.
+		let db = Arc::new(Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		));
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v0").unwrap();
+			tx.commit().unwrap();
+		}
+		let stop = Arc::new(AtomicBool::new(false));
+		let none_reads = Arc::new(AtomicUsize::new(0));
+		let total_reads = Arc::new(AtomicUsize::new(0));
+		// Single writer thread keeps overwriting the same key
+		let writer = {
+			let db = Arc::clone(&db);
+			let stop = Arc::clone(&stop);
+			thread::spawn(move || {
+				let mut counter: u64 = 0;
+				while !stop.load(Ordering::Relaxed) {
+					let mut tx = db.transaction(true);
+					tx.set("key", format!("v{counter}")).unwrap();
+					tx.commit().unwrap();
+					counter = counter.wrapping_add(1);
+				}
+			})
+		};
+		// Sweeper thread hammers cleanup and gc continuously
+		let sweeper = {
+			let db = Arc::clone(&db);
+			let stop = Arc::clone(&stop);
+			thread::spawn(move || {
+				while !stop.load(Ordering::Relaxed) {
+					db.run_cleanup();
+					db.run_gc();
+				}
+			})
+		};
+		// Reader threads open many short-lived snapshots
+		let mut readers = Vec::new();
+		for _ in 0..6 {
+			let db = Arc::clone(&db);
+			let stop = Arc::clone(&stop);
+			let none_reads = Arc::clone(&none_reads);
+			let total_reads = Arc::clone(&total_reads);
+			readers.push(thread::spawn(move || {
+				while !stop.load(Ordering::Relaxed) {
+					let mut tx = db.transaction(false);
+					let value = tx.get("key").unwrap();
+					total_reads.fetch_add(1, Ordering::Relaxed);
+					if value.is_none() {
+						none_reads.fetch_add(1, Ordering::Relaxed);
+					}
+					tx.cancel().unwrap();
+				}
+			}));
+		}
+		let started = Instant::now();
+		while started.elapsed() < Duration::from_millis(500) {
+			thread::sleep(Duration::from_millis(10));
+		}
+		stop.store(true, Ordering::Relaxed);
+		writer.join().unwrap();
+		sweeper.join().unwrap();
+		for r in readers {
+			r.join().unwrap();
+		}
+		let nones = none_reads.load(Ordering::Relaxed);
+		let total = total_reads.load(Ordering::Relaxed);
+		assert_eq!(
+			nones, 0,
+			"reader observed `None` for a key that always has a committed \
+			 value ({nones} of {total} reads): the pin-then-read protocol \
+			 failed to protect a registering reader from a sweep"
+		);
 	}
 }

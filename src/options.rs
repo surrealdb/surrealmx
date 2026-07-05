@@ -5,7 +5,7 @@ use std::time::Duration;
 pub(crate) const DEFAULT_RESET_THRESHOLD: usize = 100;
 
 /// Default interval at which garbage collection is performed. With the
-/// `gc_floor` barrier in `register_counter`, the sweeper is race-free
+/// pin-then-read slot registration protocol, the sweeper is race-free
 /// against concurrent reader registration, so we can run it frequently
 /// to keep memory bounded.
 pub(crate) const DEFAULT_GC_INTERVAL: Duration = Duration::from_millis(500);

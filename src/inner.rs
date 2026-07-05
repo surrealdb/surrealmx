@@ -30,11 +30,40 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
 
-/// Sentinel value stored in a counter entry while its owning [`Inner`]
-/// SkipMap entry is being removed by [`crate::tx::Transaction::drop`]. A
-/// concurrent `register_counter` will observe this marker and retry with a
-/// fresh entry rather than incrementing a detached counter.
-pub(crate) const COUNTER_TOMBSTONE: u64 = u64::MAX;
+/// Sentinel published in a slot field while its owning transaction is
+/// choosing its snapshot. Merge versions and commit ids are logical
+/// counters seeded from persisted data and guarded at load time, so they
+/// can never reach this value.
+pub(crate) const SLOT_PINNING: u64 = u64::MAX;
+
+/// A pinned transaction registration.
+///
+/// A slot is inserted into [`Inner::readers`] with both fields holding
+/// [`SLOT_PINNING`] BEFORE the owning transaction loads its snapshot
+/// (pin-then-read), so every watermark scan either observes the final
+/// snapshot values or the sentinel — and a sentinel forces the sweeper
+/// to treat the watermark as unknown and skip reclamation for that pass.
+/// Each field independently carries the sentinel: a sweeper can scan
+/// between the two value stores, so neither field may be interpreted
+/// before it has left the pinning state. One slot exists per live
+/// transaction and is exclusively owned by it, so state transitions are
+/// plain stores — no CAS protocol is required.
+pub(crate) struct Slot {
+	/// The owner's snapshot merge version, or SLOT_PINNING
+	pub(crate) version: AtomicU64,
+	/// The owner's snapshot commit id, or SLOT_PINNING
+	pub(crate) commit: AtomicU64,
+}
+
+impl Slot {
+	/// Create a new slot in the pinning state
+	pub(crate) fn pinning() -> Self {
+		Self {
+			version: AtomicU64::new(SLOT_PINNING),
+			commit: AtomicU64::new(SLOT_PINNING),
+		}
+	}
+}
 
 /// The inner structure of the transactional in-memory database
 pub struct Inner {
@@ -42,10 +71,25 @@ pub struct Inner {
 	pub(crate) oracle: Arc<Oracle>,
 	/// The underlying lock-free skip-list datastructure
 	pub(crate) datastore: SkipMap<Bytes, RwLock<Versions>>,
-	/// A count of total transactions grouped by oracle version
-	pub(crate) counter_by_oracle: SkipMap<u64, Arc<AtomicU64>>,
-	/// A count of total transactions grouped by commit id
-	pub(crate) counter_by_commit: SkipMap<u64, Arc<AtomicU64>>,
+	/// Registered transaction snapshot slots, keyed by allocation order.
+	/// Contains exactly the live transactions: slots are inserted at
+	/// registration and removed on transaction drop, so watermark scans
+	/// walk a map sized by concurrency, not by the transaction pool.
+	pub(crate) readers: SkipMap<u64, Arc<Slot>>,
+	/// Monotonic slot id allocator for the readers map
+	pub(crate) reader_slot_id: AtomicU64,
+	/// The contiguous completed prefix of the commit queue: every commit
+	/// with an id at or below this watermark has either published its
+	/// merge version or aborted. Readers take their commit snapshot from
+	/// here rather than from `transaction_commit_id`, which closes a
+	/// lost-update anomaly: a commit id becomes visible before its merge
+	/// version is published, so a reader snapshotting the raw commit id
+	/// could exclude a commit from its conflict window while also being
+	/// unable to see that commit's writes. Every commit at or below the
+	/// watermark published its merge version before the watermark
+	/// advanced past it, so a reader's version snapshot (loaded after
+	/// its commit snapshot) always covers its entire excluded prefix.
+	pub(crate) commit_watermark: AtomicU64,
 	/// The transaction commit queue attempt sequence number
 	pub(crate) transaction_queue_id: AtomicU64,
 	/// The transaction commit queue success sequence number
@@ -67,19 +111,6 @@ pub struct Inner {
 	pub(crate) garbage_collection_handle: RwLock<Option<JoinHandle<()>>>,
 	/// Keys with stale versions pending incremental garbage collection
 	pub(crate) gc_dirty_keys: SegQueue<Bytes>,
-	/// Watermark below which versions are about to be (or have been)
-	/// reclaimed by the garbage collector. The GC sweeper publishes its
-	/// intended `cleanup_ts` here with a SeqCst `fetch_max` *before*
-	/// actually reclaiming any versions. `register_counter` validates
-	/// `v_r >= gc_floor` after publishing its counter; if a reader
-	/// finds `gc_floor > v_r`, it rolls back and reloads the oracle,
-	/// landing on a fresh snapshot above the floor. This closes the
-	/// scan/gc race in the BG sweeper: a sweeper that misses an
-	/// in-flight reader on its first scan publishes `gc_floor`, fences,
-	/// then re-scans — and either the reader saw the new floor and
-	/// retried, or its publish is now visible to the re-scan so the
-	/// sweeper's final cleanup_ts is bounded by it.
-	pub(crate) gc_floor: AtomicU64,
 	/// Threshold after which transaction state is reset
 	pub(crate) reset_threshold: usize,
 }
@@ -90,8 +121,9 @@ impl Inner {
 		Self {
 			oracle: Oracle::new(),
 			datastore: SkipMap::new(),
-			counter_by_oracle: SkipMap::new(),
-			counter_by_commit: SkipMap::new(),
+			readers: SkipMap::new(),
+			reader_slot_id: AtomicU64::new(0),
+			commit_watermark: AtomicU64::new(0),
 			transaction_queue_id: AtomicU64::new(0),
 			transaction_commit_id: AtomicU64::new(0),
 			transaction_commit_queue: SkipMap::new(),
@@ -104,76 +136,118 @@ impl Inner {
 			#[cfg(not(target_arch = "wasm32"))]
 			garbage_collection_handle: RwLock::new(None),
 			gc_dirty_keys: SegQueue::new(),
-			gc_floor: AtomicU64::new(0),
 			reset_threshold: opts.reset_threshold,
 		}
 	}
 }
 
 impl Inner {
-	/// Returns the earliest active reader's snapshot version, or `fallback`
-	/// if no reader is currently registered. Pairs with the SeqCst
-	/// load-and-fence in `register_counter` to give writers a watermark
-	/// that observes every reader whose registration is totally ordered
-	/// before the fence below.
+	/// Returns the minimum snapshot merge version across all pinned
+	/// transaction slots, bounded by `fallback`, or `None` when any slot
+	/// is mid-registration. See [`earliest_pinned`].
 	#[inline]
-	pub(crate) fn earliest_active_version(&self, fallback: u64) -> u64 {
-		earliest_active(&self.counter_by_oracle, fallback)
+	pub(crate) fn earliest_active_version(&self, fallback: u64) -> Option<u64> {
+		earliest_pinned(&self.readers, |s| &s.version, fallback, None)
 	}
 
-	/// Returns the earliest active reader's start commit id, or `fallback`
-	/// if no reader is currently registered. See `earliest_active_version`.
+	/// Returns the minimum snapshot commit id across all pinned
+	/// transaction slots, bounded by `fallback`, or `None` when any slot
+	/// is mid-registration. See [`earliest_pinned`].
 	#[inline]
-	pub(crate) fn earliest_active_commit(&self, fallback: u64) -> u64 {
-		earliest_active(&self.counter_by_commit, fallback)
+	pub(crate) fn earliest_active_commit(&self, fallback: u64) -> Option<u64> {
+		earliest_pinned(&self.readers, |s| &s.commit, fallback, None)
 	}
 
 	/// Trim commit-queue entries which no active or future transaction can
 	/// need for conflict detection.
 	///
 	/// The fallback bound for an idle database is the current commit id,
-	/// loaded BEFORE the fence-and-scan inside `earliest_active_commit`.
-	/// This ordering is load-bearing: a reader missed by the scan has its
-	/// registration revalidation load of `transaction_commit_id` ordered
-	/// after our bound load in the SeqCst total order, so (the counter
-	/// being monotonic) its snapshot is at least our bound, and its
-	/// conflict window `snapshot + 1 ..` sits strictly above everything
-	/// we trim. A reader seen by the scan bounds the trim directly. A
-	/// writer mid-commit holds its own registration until drop, so its
-	/// conflict-check iteration is protected identically.
+	/// loaded BEFORE the fence-and-scan over the slots. This ordering is
+	/// load-bearing: a transaction missed by the scan pinned its slot
+	/// after the scan, so its subsequent commit-snapshot load is ordered
+	/// after our bound load in the SeqCst total order and (the watermark
+	/// being monotonic) returns at least our bound — its conflict window
+	/// `snapshot + 1 ..` sits strictly above everything we trim. A
+	/// transaction seen by the scan bounds the trim directly, and a slot
+	/// still pinning aborts the pass entirely. A writer mid-commit holds
+	/// its own slot until drop, so its conflict-check iteration is
+	/// protected identically.
 	pub(crate) fn cleanup_commit_queue(&self) {
 		// Load the idle-database bound before the fence-and-scan
 		let fallback = self.transaction_commit_id.load(Ordering::SeqCst);
-		// Bound by the earliest registered reader, if any
-		let oldest = self.earliest_active_commit(fallback);
-		// Remove all entries below the bound
-		self.transaction_commit_queue.range(..oldest).for_each(|e| {
-			e.remove();
-		});
+		// Bound by the earliest registered transaction, if any
+		if let Some(oldest) = self.earliest_active_commit(fallback) {
+			// Remove all entries below the bound
+			self.transaction_commit_queue.range(..oldest).for_each(|e| {
+				e.remove();
+			});
+		}
 	}
 
-	/// Compute the next `cleanup_ts`, publishing it into `gc_floor` so
-	/// concurrent `register_counter` retries any reader whose snapshot
-	/// is below it, then re-scan to bound by any newly-arrived reader.
+	/// Compute the next `cleanup_ts` below which no live or future
+	/// transaction can observe a version, or `None` when registrations
+	/// are in flight and the watermark cannot be established.
 	///
-	/// The proposed value is bounded by the published logical clock: a
-	/// future reader's snapshot load returns at least the value we load
-	/// here, so the floor can never exceed what a future reader can
-	/// observe — the frozen-clock hazard the old wall-clock cap guarded
-	/// against is now inherent to the single monotonic counter.
-	pub(crate) fn compute_cleanup_ts(&self) -> u64 {
-		let now = self.oracle.timestamp.load(Ordering::SeqCst);
-		let earliest_tx = self.earliest_active_version(now);
-		let proposed = now.min(earliest_tx);
-		// Publish proposed cleanup_ts via `gc_floor` BEFORE reclaiming.
-		// A `register_counter` that fences after CAS-publish will see
-		// either the old floor (and its publish becomes visible to our
-		// re-scan below via fence-fence SC ordering) or the new floor
-		// (and will retry to a fresh snapshot above it).
-		self.gc_floor.fetch_max(proposed, Ordering::SeqCst);
-		fence(Ordering::SeqCst);
-		let earliest_after = self.earliest_active_version(now);
-		proposed.min(earliest_after)
+	/// The proposed value is bounded by the published logical clock,
+	/// loaded BEFORE the fence-and-scan over the slots: a transaction
+	/// missed by the scan pinned after the scan, so its snapshot load
+	/// returns at least the clock value we load here, and version
+	/// reclamation always retains the entry visible at the watermark.
+	/// A bounded number of retries absorbs the nanosecond-scale window
+	/// in which a registering transaction is still pinning.
+	pub(crate) fn compute_cleanup_ts(&self) -> Option<u64> {
+		// Retry a bounded number of times while registrations are pinning
+		for _ in 0..3 {
+			// Load the clock bound before the fence-and-scan
+			let now = self.oracle.timestamp.load(Ordering::SeqCst);
+			// Bound by the earliest registered transaction, if any
+			if let Some(earliest) = self.earliest_active_version(now) {
+				return Some(earliest.min(now));
+			}
+			// A registration is mid-pin; give it a beat and retry
+			std::hint::spin_loop();
+		}
+		// Registrations kept arriving; skip this reclamation pass
+		None
+	}
+
+	/// Advance the contiguous completed prefix of the commit queue.
+	///
+	/// Called by every committer once its commit-queue entry completes:
+	/// either its merge version has been published, or it aborted and
+	/// removed its entry (a missing entry at or below the current commit
+	/// id therefore counts as complete — aborted-and-removed, or already
+	/// trimmed by cleanup). The watermark is the value readers snapshot
+	/// as their conflict-window base, so it must only ever cover commits
+	/// whose merge versions are already published. Amortised O(1): every
+	/// slot is stepped over exactly once across all callers, and the CAS
+	/// simply resolves which caller performs each step.
+	pub(crate) fn advance_commit_watermark(&self) {
+		loop {
+			// Load the current watermark and the claimed commit ids
+			let wm = self.commit_watermark.load(Ordering::SeqCst);
+			let next = wm + 1;
+			// Stop at the end of the claimed commit id range
+			if next > self.transaction_commit_id.load(Ordering::SeqCst) {
+				break;
+			}
+			// Check whether the next commit in sequence has completed
+			let complete = match self.transaction_commit_queue.get(&next) {
+				Some(entry) => entry.value().merge_version.load(Ordering::SeqCst) != 0,
+				None => true,
+			};
+			if !complete {
+				break;
+			}
+			// Advance by one step; on CAS failure another caller advanced
+			// past us, so reload and continue from the fresh watermark
+			let _ = self.commit_watermark.compare_exchange(
+				wm,
+				next,
+				Ordering::SeqCst,
+				Ordering::SeqCst,
+			);
+		}
 	}
 
 	/// Drain the dirty-key queue, reclaiming stale versions on each key and
@@ -233,16 +307,37 @@ impl Inner {
 	}
 }
 
+/// Returns the minimum value of one slot dimension across all pinned
+/// slots, bounded by `fallback`, or `None` when any scanned slot still
+/// holds [`SLOT_PINNING`] in that dimension.
+///
+/// The fence pairs with the fence in the pin-then-read registration
+/// protocol: a transaction whose pin-fence precedes ours in the SeqCst
+/// total order is visible to this scan (as a value or as the sentinel);
+/// a transaction whose pin-fence follows ours performs its snapshot
+/// loads after the caller's bound load, so its snapshot is at least the
+/// caller's fallback bound. `exclude` skips a single slot id — used by
+/// a committer to exclude its own slot, which is safe only because a
+/// committing transaction performs no further reads.
 #[inline]
-fn earliest_active(map: &SkipMap<u64, Arc<AtomicU64>>, fallback: u64) -> u64 {
+pub(crate) fn earliest_pinned(
+	map: &SkipMap<u64, Arc<Slot>>,
+	dim: impl Fn(&Slot) -> &AtomicU64,
+	fallback: u64,
+	exclude: Option<u64>,
+) -> Option<u64> {
 	fence(Ordering::SeqCst);
+	let mut min = fallback;
 	for entry in map.iter() {
-		let c = entry.value().load(Ordering::Acquire);
-		if c != 0 && c != COUNTER_TOMBSTONE {
-			return *entry.key();
+		if Some(*entry.key()) == exclude {
+			continue;
+		}
+		match dim(entry.value()).load(Ordering::SeqCst) {
+			SLOT_PINNING => return None,
+			v => min = min.min(v),
 		}
 	}
-	fallback
+	Some(min)
 }
 
 impl Default for Inner {
