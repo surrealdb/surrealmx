@@ -37,10 +37,11 @@ pub struct ReadsetConflictScenario {
 impl ReadsetConflictScenario {
 	/// Build a scenario with the given writeset and readset keys
 	pub fn new(writeset_keys: &[Bytes], readset_keys: &[Bytes]) -> Self {
-		// Build the sorted writeset keys
-		let mut keys = writeset_keys.to_vec();
-		keys.sort();
-		keys.dedup();
+		// Build the sorted writeset key list (inputs may be unsorted)
+		let mut ws: Vec<Bytes> = writeset_keys.to_vec();
+		ws.sort();
+		ws.dedup();
+		let keys: Arc<[Bytes]> = ws.into();
 		// Build the writeset bloom filter
 		let mut writeset_bloom = BloomFilter::new();
 		for k in keys.iter() {
@@ -108,11 +109,12 @@ impl WritesetConflictScenario {
 	}
 
 	/// Build a Commit entry from a set of keys
-	fn build_commit(keys: &[Bytes], id: u64) -> Commit {
-		// Build the sorted writeset keys
-		let mut keys = keys.to_vec();
-		keys.sort();
-		keys.dedup();
+	fn build_commit(input: &[Bytes], id: u64) -> Commit {
+		// Build the sorted writeset key list (inputs may be unsorted)
+		let mut ws: Vec<Bytes> = input.to_vec();
+		ws.sort();
+		ws.dedup();
+		let keys: Arc<[Bytes]> = ws.into();
 		// Build the writeset bloom filter
 		let mut writeset_bloom = BloomFilter::new();
 		for k in keys.iter() {

@@ -766,16 +766,16 @@ impl TransactionInner {
 		}
 		// Take ownership over the local modifications
 		let writeset = Arc::new(std::mem::take(&mut self.writeset));
+		// Collect the sorted writeset keys for conflict detection. The
+		// commit queue entry retains only these keys: conflict detection
+		// never reads values, and the entry outlives the merge queue's
+		// value-bearing writeset by the whole cleanup window.
+		let keys: Arc<[Bytes]> = writeset.keys().cloned().collect();
 		// Build a bloom filter over the writeset keys
 		let mut writeset_bloom = BloomFilter::new();
-		for key in writeset.keys() {
+		for key in keys.iter() {
 			writeset_bloom.insert(key);
 		}
-		// Collect the sorted writeset keys for conflict detection. The
-		// commit queue stores keys only: its entries outlive the merge
-		// queue entry (they are trimmed later by the cleanup worker),
-		// and storing the values would pin them in memory until then.
-		let keys = writeset.keys().cloned().collect();
 		// Insert this transaction into the commit queue
 		let (version, entry) = self.atomic_commit(Commit {
 			keys,
