@@ -269,64 +269,6 @@ Different persistence configurations provide different durability guarantees:
 
 Choose the configuration that best balances your durability requirements against performance needs.
 
-#### Historical reads
-
-SurrealMX's MVCC (Multi-Version Concurrency Control) design allows you to read data as it existed at any point in time. This enables powerful use cases like:
-
-- **Audit trails**: See what data looked like at specific timestamps
-- **Time-travel debugging**: Examine application state at the time of an issue
-- **Consistent reporting**: Generate reports based on a snapshot of data from a specific point in time
-- **Conflict resolution**: Compare different versions of data to understand changes
-
-```rust
-use surrealmx::Database;
-
-fn main() {
-    let db = Database::new();
-    
-    // Insert some initial data
-    let mut tx = db.transaction(true);
-    tx.put("user:1", "Alice").unwrap();
-    tx.commit().unwrap();
-    
-    // Capture timestamp after first commit
-    let version_1 = db.oracle.current_timestamp();
-    
-    // Wait a moment to ensure different timestamps
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    
-    // Make some changes
-    let mut tx = db.transaction(true);
-    tx.set("user:1", "Alice Smith").unwrap(); // Update name
-    tx.put("user:2", "Bob").unwrap();         // Add new user
-    tx.commit().unwrap();
-    
-    // Read historical data
-    let mut tx = db.transaction(false);
-    
-    // Read current state
-    assert_eq!(tx.get("user:1").unwrap().as_deref(), Some(b"Alice Smith" as &[u8]));
-    assert_eq!(tx.get("user:2").unwrap().as_deref(), Some(b"Bob" as &[u8]));
-    
-    // Read state as it was at version_1 (before changes)
-    assert_eq!(tx.get_at_version("user:1", version_1).unwrap().as_deref(), Some(b"Alice" as &[u8]));
-    assert_eq!(tx.get_at_version("user:2", version_1).unwrap(), None);
-    
-    // Range operations also support historical reads
-    let historical_keys = tx.keys_at_version("user:0".."user:9", None, None, version_1).unwrap();
-    assert_eq!(historical_keys.len(), 1);
-    assert_eq!(historical_keys[0].as_ref(), b"user:1");
-    
-    tx.cancel().unwrap();
-}
-```
-
-**Available historical read methods:**
-- `get_at_version(key, version)`: Read a single key's value at a specific version
-- `keys_at_version(range, skip, limit, version)`: Get keys in range at a specific version
-- `scan_at_version(range, skip, limit, version)`: Get key-value pairs at a specific version
-- `total_at_version(range, skip, limit, version)`: Count keys at a specific version
-
 #### Isolation levels
 
 SurrealMX supports two isolation levels to balance between performance and consistency guarantees:
@@ -447,7 +389,6 @@ SurrealMX provides powerful range-based operations for scanning, counting, and i
 
 - **Forward and reverse iteration**
 - **Skip and limit parameters** for pagination  
-- **Historical versions** for time-travel queries
 - **Efficient range scans** using the underlying B+ tree structure
 
 ##### Basic range scanning
@@ -520,71 +461,16 @@ fn main() {
 }
 ```
 
-##### Historical range operations
-
-```rust
-use surrealmx::Database;
-
-fn main() {
-    let db = Database::new();
-    
-    // Insert initial data
-    let mut tx = db.transaction(true);
-    tx.put("a", "1").unwrap();
-    tx.put("b", "2").unwrap();
-    tx.commit().unwrap();
-    let version_1 = db.oracle.current_timestamp();
-    
-    // Wait a moment to ensure different timestamps
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    
-    // Add more data
-    let mut tx = db.transaction(true);
-    tx.put("c", "3").unwrap();
-    tx.put("d", "4").unwrap();
-    tx.commit().unwrap();
-    
-    let mut tx = db.transaction(false);
-    
-    // Current state: all 4 keys
-    let current_keys = tx.keys("a".."z", None, None).unwrap();
-    assert_eq!(current_keys.len(), 4);
-    assert_eq!(current_keys[0].as_ref(), b"a");
-    assert_eq!(current_keys[3].as_ref(), b"d");
-    
-    // Historical state: only first 2 keys  
-    let historical_keys = tx.keys_at_version("a".."z", None, None, version_1).unwrap();
-    assert_eq!(historical_keys.len(), 2);
-    assert_eq!(historical_keys[0].as_ref(), b"a");
-    assert_eq!(historical_keys[1].as_ref(), b"b");
-    
-    // Count at different versions
-    let current_count = tx.total("a".."z", None, None).unwrap();
-    let historical_count = tx.total_at_version("a".."z", None, None, version_1).unwrap();
-    assert_eq!(current_count, 4);
-    assert_eq!(historical_count, 2);
-    
-    tx.cancel().unwrap();
-}
-```
-
 **Available range operation methods:**
 
-**Current version:**
 - `keys(range, skip, limit)` / `keys_reverse(...)`: Get keys in range
 - `scan(range, skip, limit)` / `scan_reverse(...)`: Get key-value pairs in range
 - `total(range, skip, limit)`: Count keys in range
-
-**Historical versions:**
-- `keys_at_version(range, skip, limit, version)` / `keys_at_version_reverse(...)`
-- `scan_at_version(range, skip, limit, version)` / `scan_at_version_reverse(...)`
-- `total_at_version(range, skip, limit, version)`
 
 **Range parameters:**
 - `range`: Rust range syntax (`"start".."end"`) - start inclusive, end exclusive
 - `skip`: Optional number of items to skip (for pagination)
 - `limit`: Optional maximum number of items to return
-- `version`: Specific version timestamp for historical operations
 
 #### Project History
 
