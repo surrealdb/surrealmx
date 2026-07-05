@@ -359,47 +359,6 @@ fn read_conflict_error_ssi() {
 }
 
 // =============================================================================
-// Version In Future Error
-// =============================================================================
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-#[test]
-fn get_at_future_version_fails() {
-	let db = Database::new();
-
-	// Create data
-	let mut tx = db.transaction(true);
-	tx.set("key", "value").unwrap();
-	tx.commit().unwrap();
-
-	// Try to read at a future version
-	let tx = db.transaction(false);
-	let current_version = tx.version();
-
-	// Future version
-	let future_version = current_version + 1_000_000_000; // Way in the future
-
-	let result = tx.get_at_version("key", future_version);
-	assert!(matches!(result, Err(Error::VersionInFuture)), "reading future version should fail");
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-#[test]
-fn exists_at_future_version_fails() {
-	let db = Database::new();
-
-	let mut tx = db.transaction(true);
-	tx.set("key", "value").unwrap();
-	tx.commit().unwrap();
-
-	let tx = db.transaction(false);
-	let future_version = tx.version() + 1_000_000_000;
-
-	let result = tx.exists_at_version("key", future_version);
-	assert!(matches!(result, Err(Error::VersionInFuture)), "exists at future version should fail");
-}
-
-// =============================================================================
 // Iterator/Cursor with Closed Transaction
 // =============================================================================
 

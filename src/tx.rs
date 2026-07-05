@@ -140,14 +140,6 @@ impl Transaction {
 		self.inner.as_ref().unwrap().exists(key)
 	}
 
-	/// Check if a key exists in the database at a specific version
-	pub fn exists_at_version<K>(&self, key: K, version: u64) -> Result<bool, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().exists_at_version(key, version)
-	}
-
 	/// Fetch a key from the database
 	pub fn get<K>(&self, key: K) -> Result<Option<Bytes>, Error>
 	where
@@ -156,32 +148,12 @@ impl Transaction {
 		self.inner.as_ref().unwrap().get(key)
 	}
 
-	/// Fetch a key from the database at a specific version
-	pub fn get_at_version<K>(&self, key: K, version: u64) -> Result<Option<Bytes>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().get_at_version(key, version)
-	}
-
 	/// Fetch multiple keys from the database
 	pub fn getm<K>(&self, keys: Vec<K>) -> Result<Vec<Option<Bytes>>, Error>
 	where
 		K: IntoBytes,
 	{
 		self.inner.as_ref().unwrap().getm(keys)
-	}
-
-	/// Fetch multiple keys from the database at a specific version
-	pub fn getm_at_version<K>(
-		&self,
-		keys: Vec<K>,
-		version: u64,
-	) -> Result<Vec<Option<Bytes>>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().getm_at_version(keys, version)
 	}
 
 	/// Insert or update a key in the database
@@ -242,20 +214,6 @@ impl Transaction {
 		self.inner.as_ref().unwrap().total(rng, skip, limit)
 	}
 
-	/// Retrieve a count of keys from the database at a specific version
-	pub fn total_at_version<K>(
-		&self,
-		rng: Range<K>,
-		skip: Option<usize>,
-		limit: Option<usize>,
-		version: u64,
-	) -> Result<usize, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().total_at_version(rng, skip, limit, version)
-	}
-
 	/// Retrieve a range of keys from the database
 	pub fn keys<K>(
 		&self,
@@ -282,35 +240,6 @@ impl Transaction {
 		self.inner.as_ref().unwrap().keys_reverse(rng, skip, limit)
 	}
 
-	/// Retrieve a range of keys from the database at a specific version
-	pub fn keys_at_version<K>(
-		&self,
-		rng: Range<K>,
-		skip: Option<usize>,
-		limit: Option<usize>,
-		version: u64,
-	) -> Result<Vec<Bytes>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().keys_at_version(rng, skip, limit, version)
-	}
-
-	/// Retrieve a range of keys from the database at a specific version, in
-	/// reverse order
-	pub fn keys_at_version_reverse<K>(
-		&self,
-		rng: Range<K>,
-		skip: Option<usize>,
-		limit: Option<usize>,
-		version: u64,
-	) -> Result<Vec<Bytes>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().keys_at_version_reverse(rng, skip, limit, version)
-	}
-
 	/// Retrieve a range of keys and values from the database
 	pub fn scan<K>(
 		&self,
@@ -335,52 +264,6 @@ impl Transaction {
 		K: IntoBytes,
 	{
 		self.inner.as_ref().unwrap().scan_reverse(rng, skip, limit)
-	}
-
-	/// Retrieve a range of keys and values from the database at a specific
-	/// version
-	pub fn scan_at_version<K>(
-		&self,
-		rng: Range<K>,
-		skip: Option<usize>,
-		limit: Option<usize>,
-		version: u64,
-	) -> Result<Vec<(Bytes, Bytes)>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().scan_at_version(rng, skip, limit, version)
-	}
-
-	/// Retrieve a range of keys and values from the database at a specific
-	/// version, in reverse order
-	pub fn scan_at_version_reverse<K>(
-		&self,
-		rng: Range<K>,
-		skip: Option<usize>,
-		limit: Option<usize>,
-		version: u64,
-	) -> Result<Vec<(Bytes, Bytes)>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().scan_at_version_reverse(rng, skip, limit, version)
-	}
-
-	/// Retrieve all versions of keys within a range from the database
-	/// Returns tuples of (key, version, value) for all historical versions
-	/// The skip and limit parameters apply to the number of keys, not the
-	/// number of versions
-	pub fn scan_all_versions<K>(
-		&self,
-		rng: Range<K>,
-		skip: Option<usize>,
-		limit: Option<usize>,
-	) -> Result<Vec<(Bytes, u64, Option<Bytes>)>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().scan_all_versions(rng, skip, limit)
 	}
 
 	// --------------------------------------------------
@@ -474,14 +357,6 @@ impl Transaction {
 		self.inner.as_ref().unwrap().cursor(rng)
 	}
 
-	/// Create a cursor over a range of keys at a specific version.
-	pub fn cursor_at_version<K>(&self, rng: Range<K>, version: u64) -> Result<Cursor<'_>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().cursor_at_version(rng, version)
-	}
-
 	/// Iterate over keys in a range.
 	///
 	/// Returns an iterator that yields keys in forward order.
@@ -509,30 +384,6 @@ impl Transaction {
 		self.inner.as_ref().unwrap().keys_iter_reverse(rng)
 	}
 
-	/// Iterate over keys in a range at a specific version.
-	pub fn keys_iter_at_version<K>(
-		&self,
-		rng: Range<K>,
-		version: u64,
-	) -> Result<KeyIterator<'_>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().keys_iter_at_version(rng, version)
-	}
-
-	/// Iterate over keys in a range at a specific version, in reverse order.
-	pub fn keys_iter_at_version_reverse<K>(
-		&self,
-		rng: Range<K>,
-		version: u64,
-	) -> Result<KeyIterator<'_>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().keys_iter_at_version_reverse(rng, version)
-	}
-
 	/// Iterate over key-value pairs in a range.
 	///
 	/// Returns an iterator that yields (key, value) pairs in forward order.
@@ -558,31 +409,6 @@ impl Transaction {
 		K: IntoBytes,
 	{
 		self.inner.as_ref().unwrap().scan_iter_reverse(rng)
-	}
-
-	/// Iterate over key-value pairs in a range at a specific version.
-	pub fn scan_iter_at_version<K>(
-		&self,
-		rng: Range<K>,
-		version: u64,
-	) -> Result<ScanIterator<'_>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().scan_iter_at_version(rng, version)
-	}
-
-	/// Iterate over key-value pairs in a range at a specific version, in
-	/// reverse order.
-	pub fn scan_iter_at_version_reverse<K>(
-		&self,
-		rng: Range<K>,
-		version: u64,
-	) -> Result<ScanIterator<'_>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.inner.as_ref().unwrap().scan_iter_at_version_reverse(rng, version)
 	}
 }
 
@@ -1160,27 +986,6 @@ impl TransactionInner {
 		Ok(res)
 	}
 
-	/// Check if a key exists in the database at a specific version
-	pub fn exists_at_version<K>(&self, key: K, version: u64) -> Result<bool, Error>
-	where
-		K: IntoBytes,
-	{
-		// Get the key reference
-		let lookup = key.as_slice();
-		// Check to see if transaction is closed
-		if self.done == true {
-			return Err(Error::TxClosed);
-		}
-		// Check the specified key version
-		if self.version <= version {
-			return Err(Error::VersionInFuture);
-		}
-		// Check the key
-		let res = self.exists_in_datastore(lookup, version);
-		// Return result
-		Ok(res)
-	}
-
 	/// Fetch a key from the database
 	pub fn get<K>(&self, key: K) -> Result<Option<Bytes>, Error>
 	where
@@ -1217,27 +1022,6 @@ impl TransactionInner {
 			// This is a readonly transaction
 			false => self.fetch_in_datastore(lookup, self.version),
 		};
-		// Return result
-		Ok(res)
-	}
-
-	/// Fetch a key from the database at a specific version
-	pub fn get_at_version<K>(&self, key: K, version: u64) -> Result<Option<Bytes>, Error>
-	where
-		K: IntoBytes,
-	{
-		// Get the key reference
-		let lookup = key.as_slice();
-		// Check to see if transaction is closed
-		if self.done == true {
-			return Err(Error::TxClosed);
-		}
-		// Check the specified key version
-		if self.version <= version {
-			return Err(Error::VersionInFuture);
-		}
-		// Get the key
-		let res = self.fetch_in_datastore(lookup, version);
 		// Return result
 		Ok(res)
 	}
@@ -1292,37 +1076,6 @@ impl TransactionInner {
 					results.push(res);
 				}
 			}
-		}
-		// Return results
-		Ok(results)
-	}
-
-	/// Fetch multiple keys from the database at a specific version
-	pub fn getm_at_version<K>(
-		&self,
-		keys: Vec<K>,
-		version: u64,
-	) -> Result<Vec<Option<Bytes>>, Error>
-	where
-		K: IntoBytes,
-	{
-		// Check to see if transaction is closed
-		if self.done == true {
-			return Err(Error::TxClosed);
-		}
-		// Check the specified key version
-		if self.version <= version {
-			return Err(Error::VersionInFuture);
-		}
-		// Prepare result vector with the same capacity
-		let mut results = Vec::with_capacity(keys.len());
-		// Fetch all keys at the specified version
-		for key in keys {
-			// Get the key reference
-			let lookup = key.as_slice();
-			// Get the key at the specified version
-			let res = self.fetch_in_datastore(lookup, version);
-			results.push(res);
 		}
 		// Return results
 		Ok(results)
@@ -1497,20 +1250,6 @@ impl TransactionInner {
 		self.total_any(rng, skip, limit, Direction::Forward, self.version)
 	}
 
-	/// Retrieve a count of keys from the database at a specific version
-	pub fn total_at_version<K>(
-		&self,
-		rng: Range<K>,
-		skip: Option<usize>,
-		limit: Option<usize>,
-		version: u64,
-	) -> Result<usize, Error>
-	where
-		K: IntoBytes,
-	{
-		self.total_any(rng, skip, limit, Direction::Forward, version)
-	}
-
 	/// Retrieve a range of keys from the database
 	pub fn keys<K>(
 		&self,
@@ -1537,35 +1276,6 @@ impl TransactionInner {
 		self.keys_any(rng, skip, limit, Direction::Reverse, self.version)
 	}
 
-	/// Retrieve a range of keys from the database at a specific version
-	pub fn keys_at_version<K>(
-		&self,
-		rng: Range<K>,
-		skip: Option<usize>,
-		limit: Option<usize>,
-		version: u64,
-	) -> Result<Vec<Bytes>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.keys_any(rng, skip, limit, Direction::Forward, version)
-	}
-
-	/// Retrieve a range of keys from the database at a specific version, in
-	/// reverse order
-	pub fn keys_at_version_reverse<K>(
-		&self,
-		rng: Range<K>,
-		skip: Option<usize>,
-		limit: Option<usize>,
-		version: u64,
-	) -> Result<Vec<Bytes>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.keys_any(rng, skip, limit, Direction::Reverse, version)
-	}
-
 	/// Retrieve a range of keys and values from the database
 	pub fn scan<K>(
 		&self,
@@ -1590,52 +1300,6 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		self.scan_any(rng, skip, limit, Direction::Reverse, self.version)
-	}
-
-	/// Retrieve a range of keys and values from the database at a specific
-	/// version
-	pub fn scan_at_version<K>(
-		&self,
-		rng: Range<K>,
-		skip: Option<usize>,
-		limit: Option<usize>,
-		version: u64,
-	) -> Result<Vec<(Bytes, Bytes)>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.scan_any(rng, skip, limit, Direction::Forward, version)
-	}
-
-	/// Retrieve a range of keys and values from the database at a specific
-	/// version, in reverse order
-	pub fn scan_at_version_reverse<K>(
-		&self,
-		rng: Range<K>,
-		skip: Option<usize>,
-		limit: Option<usize>,
-		version: u64,
-	) -> Result<Vec<(Bytes, Bytes)>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.scan_any(rng, skip, limit, Direction::Reverse, version)
-	}
-
-	/// Retrieve all versions of keys within a range from the database
-	/// Returns tuples of (key, version, value) for all historical versions
-	/// The skip and limit parameters apply to the number of keys, not the
-	/// number of versions
-	pub fn scan_all_versions<K>(
-		&self,
-		rng: Range<K>,
-		skip: Option<usize>,
-		limit: Option<usize>,
-	) -> Result<Vec<(Bytes, u64, Option<Bytes>)>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.scan_all_versions_any(rng, skip, limit, self.version)
 	}
 
 	/// Call a closure for each key-value pair in a range
@@ -2363,108 +2027,12 @@ impl TransactionInner {
 		Ok(res)
 	}
 
-	/// Retrieve all versions of keys within a range from the database
-	fn scan_all_versions_any<K>(
-		&self,
-		rng: Range<K>,
-		skip: Option<usize>,
-		limit: Option<usize>,
-		version: u64,
-	) -> Result<Vec<(Bytes, u64, Option<Bytes>)>, Error>
-	where
-		K: IntoBytes,
-	{
-		// Check to see if transaction is closed
-		if self.done == true {
-			return Err(Error::TxClosed);
-		}
-		// Prepare result vector
-		let mut res = Vec::new();
-		// Compute the range
-		let beg = &rng.start.into_bytes();
-		let end = &rng.end.into_bytes();
-		// Calculate how many items to skip
-		let skip = skip.unwrap_or_default();
-		// Check wether we should track range scan reads
-		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-			// Track scans if scanning the latest version
-			if version == self.version {
-				self.track_scan_range(beg, end);
-			}
-		}
-		// Lazy k-way merge over the merge-queue writesets. The
-		// `snapshot_merge_sources` helper returns an empty vector when the
-		// queue is empty, so the iterator is effectively a no-op in that case.
-		let join_iter = Box::new(MergeQueueIter::new(
-			self.snapshot_merge_sources(version),
-			beg.clone(),
-			end.clone(),
-			Direction::Forward,
-		));
-		// Create the 3-way merge iterator to iterate over keys
-		let iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
-			join_iter,
-			self.writeset.range::<Bytes, _>(beg..end),
-			Direction::Forward,
-			version,
-			skip,
-		);
-		// Track how many keys we've processed
-		let mut count = 0;
-		// Process entries with skip and limit
-		for (key, _) in iter {
-			// Use a BTreeMap to collect and merge versions by version number
-			let mut all_versions: BTreeMap<u64, Option<Bytes>> = BTreeMap::new();
-			// Collect all versions from the datastore
-			if let Some(entry) = self.database.datastore.get(&key) {
-				let versions = entry.value().read();
-				for (ver, val) in versions.all_versions() {
-					if ver <= version {
-						all_versions.insert(ver, val);
-					}
-				}
-			}
-			// Collect version from the current writeset
-			if self.write {
-				if let Some(val) = self.writeset.get(&key) {
-					// Set a temporary version for the new version entry
-					all_versions.insert(self.version + 1, val.clone());
-				}
-			}
-			// Add all versions for this key to the result
-			for (ver, val) in all_versions {
-				res.push((key.clone(), ver, val));
-			}
-			// Increment key counter
-			count += 1;
-			// Check limit on keys
-			if let Some(l) = limit {
-				if count >= l {
-					break;
-				}
-			}
-		}
-		// Return result
-		Ok(res)
-	}
-
 	// --------------------------------------------------
 	// Cursor and Iterator API
 	// --------------------------------------------------
 
 	/// Create a cursor over a range of keys.
 	pub fn cursor<K>(&self, rng: Range<K>) -> Result<Cursor<'_>, Error>
-	where
-		K: IntoBytes,
-	{
-		self.cursor_at_version(rng, self.version)
-	}
-
-	/// Create a cursor over a range of keys at a specific version.
-	pub fn cursor_at_version<K>(&self, rng: Range<K>, version: u64) -> Result<Cursor<'_>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -2477,13 +2045,10 @@ impl TransactionInner {
 		let end = rng.end.into_bytes();
 		// Check whether we should track range scan reads
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-			// Track scans if scanning the latest version
-			if version == self.version {
-				self.track_scan_range(&beg, &end);
-			}
+			self.track_scan_range(&beg, &end);
 		}
 		// Create and return the cursor
-		Ok(Cursor::new(&self.database, &self.writeset, beg, end, version))
+		Ok(Cursor::new(&self.database, &self.writeset, beg, end, self.version))
 	}
 
 	/// Iterate over keys in a range.
@@ -2504,32 +2069,6 @@ impl TransactionInner {
 		Ok(KeyIterator::new_reverse(cursor))
 	}
 
-	/// Iterate over keys in a range at a specific version.
-	pub fn keys_iter_at_version<K>(
-		&self,
-		rng: Range<K>,
-		version: u64,
-	) -> Result<KeyIterator<'_>, Error>
-	where
-		K: IntoBytes,
-	{
-		let cursor = self.cursor_at_version(rng, version)?;
-		Ok(KeyIterator::new(cursor))
-	}
-
-	/// Iterate over keys in a range at a specific version, in reverse order.
-	pub fn keys_iter_at_version_reverse<K>(
-		&self,
-		rng: Range<K>,
-		version: u64,
-	) -> Result<KeyIterator<'_>, Error>
-	where
-		K: IntoBytes,
-	{
-		let cursor = self.cursor_at_version(rng, version)?;
-		Ok(KeyIterator::new_reverse(cursor))
-	}
-
 	/// Iterate over key-value pairs in a range.
 	pub fn scan_iter<K>(&self, rng: Range<K>) -> Result<ScanIterator<'_>, Error>
 	where
@@ -2545,33 +2084,6 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		let cursor = self.cursor(rng)?;
-		Ok(ScanIterator::new_reverse(cursor))
-	}
-
-	/// Iterate over key-value pairs in a range at a specific version.
-	pub fn scan_iter_at_version<K>(
-		&self,
-		rng: Range<K>,
-		version: u64,
-	) -> Result<ScanIterator<'_>, Error>
-	where
-		K: IntoBytes,
-	{
-		let cursor = self.cursor_at_version(rng, version)?;
-		Ok(ScanIterator::new(cursor))
-	}
-
-	/// Iterate over key-value pairs in a range at a specific version, in
-	/// reverse order.
-	pub fn scan_iter_at_version_reverse<K>(
-		&self,
-		rng: Range<K>,
-		version: u64,
-	) -> Result<ScanIterator<'_>, Error>
-	where
-		K: IntoBytes,
-	{
-		let cursor = self.cursor_at_version(rng, version)?;
 		Ok(ScanIterator::new_reverse(cursor))
 	}
 
@@ -4062,172 +3574,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_scan_all_versions() {
-		let db = Database::new();
-
-		// Transaction 1: Add initial data
-		let mut tx1 = db.transaction(true);
-		tx1.set("key1", "v1").unwrap();
-		tx1.set("key2", "v1").unwrap();
-		tx1.set("key3", "v1").unwrap();
-		tx1.commit().unwrap();
-
-		// Transaction 2: Update key1 and key2
-		let mut tx2 = db.transaction(true);
-		tx2.set("key1", "v2").unwrap();
-		tx2.set("key2", "v2").unwrap();
-		tx2.commit().unwrap();
-
-		// Transaction 3: Update key1 again and delete key3
-		let mut tx3 = db.transaction(true);
-		tx3.set("key1", "v3").unwrap();
-		tx3.del("key3").unwrap();
-		tx3.commit().unwrap();
-
-		// Transaction 4: Read all versions
-		let tx4 = db.transaction(false);
-		let results = tx4.scan_all_versions("key0".."key9", None, None).unwrap();
-
-		// Verify we have all versions:
-		// key1: should have 3 versions (v1, v2, v3)
-		// key2: should have 2 versions (v1, v2)
-		// key3: should have 2 versions (v1, None/deleted)
-		let key1_versions: Vec<_> =
-			results.iter().filter(|(k, _, _)| k.as_ref() == b"key1").collect();
-		let key2_versions: Vec<_> =
-			results.iter().filter(|(k, _, _)| k.as_ref() == b"key2").collect();
-		let key3_versions: Vec<_> =
-			results.iter().filter(|(k, _, _)| k.as_ref() == b"key3").collect();
-
-		assert_eq!(key1_versions.len(), 3, "key1 should have 3 versions");
-		assert_eq!(key2_versions.len(), 2, "key2 should have 2 versions");
-		assert_eq!(key3_versions.len(), 2, "key3 should have 2 versions (including delete)");
-
-		// Verify key1 versions are correct
-		assert_eq!(key1_versions[0].2.as_deref(), Some(b"v1" as &[u8]));
-		assert_eq!(key1_versions[1].2.as_deref(), Some(b"v2" as &[u8]));
-		assert_eq!(key1_versions[2].2.as_deref(), Some(b"v3" as &[u8]));
-
-		// Verify key2 versions are correct
-		assert_eq!(key2_versions[0].2.as_deref(), Some(b"v1" as &[u8]));
-		assert_eq!(key2_versions[1].2.as_deref(), Some(b"v2" as &[u8]));
-
-		// Verify key3 versions are correct (last one is deleted)
-		assert_eq!(key3_versions[0].2.as_deref(), Some(b"v1" as &[u8]));
-		assert_eq!(key3_versions[1].2, None); // Deleted
-
-		// Test with skip: skip first key (key1)
-		let tx5 = db.transaction(false);
-		let results = tx5.scan_all_versions("key0".."key9", Some(1), None).unwrap();
-
-		// Should have key2 and key3 only
-		let has_key1 = results.iter().any(|(k, _, _)| k.as_ref() == b"key1");
-		let has_key2 = results.iter().any(|(k, _, _)| k.as_ref() == b"key2");
-		let has_key3 = results.iter().any(|(k, _, _)| k.as_ref() == b"key3");
-		assert!(!has_key1, "key1 should be skipped");
-		assert!(has_key2, "key2 should be included");
-		assert!(has_key3, "key3 should be included");
-
-		// Verify we still have all versions of the remaining keys
-		let key2_versions: Vec<_> =
-			results.iter().filter(|(k, _, _)| k.as_ref() == b"key2").collect();
-		assert_eq!(key2_versions.len(), 2, "key2 should still have all 2 versions");
-
-		// Test with limit: limit to first 2 keys (key1 and key2)
-		let tx6 = db.transaction(false);
-		let results = tx6.scan_all_versions("key0".."key9", None, Some(2)).unwrap();
-
-		// Should have key1 and key2 only (all their versions)
-		let has_key1 = results.iter().any(|(k, _, _)| k.as_ref() == b"key1");
-		let has_key2 = results.iter().any(|(k, _, _)| k.as_ref() == b"key2");
-		let has_key3 = results.iter().any(|(k, _, _)| k.as_ref() == b"key3");
-		assert!(has_key1, "key1 should be included");
-		assert!(has_key2, "key2 should be included");
-		assert!(!has_key3, "key3 should not be included (limit)");
-
-		// Verify we have all versions of the limited keys
-		let key1_versions: Vec<_> =
-			results.iter().filter(|(k, _, _)| k.as_ref() == b"key1").collect();
-		assert_eq!(key1_versions.len(), 3, "key1 should still have all 3 versions");
-
-		// Test with skip and limit: skip 1, limit 1 (should get only key2)
-		let tx7 = db.transaction(false);
-		let results = tx7.scan_all_versions("key0".."key9", Some(1), Some(1)).unwrap();
-
-		let has_key1 = results.iter().any(|(k, _, _)| k.as_ref() == b"key1");
-		let has_key2 = results.iter().any(|(k, _, _)| k.as_ref() == b"key2");
-		let has_key3 = results.iter().any(|(k, _, _)| k.as_ref() == b"key3");
-		assert!(!has_key1, "key1 should be skipped");
-		assert!(has_key2, "key2 should be included");
-		assert!(!has_key3, "key3 should not be included (limit)");
-
-		let key2_versions: Vec<_> =
-			results.iter().filter(|(k, _, _)| k.as_ref() == b"key2").collect();
-		assert_eq!(key2_versions.len(), 2, "key2 should have all 2 versions");
-	}
-
-	#[test]
-	fn test_scan_all_versions_with_writeset() {
-		let db = Database::new();
-
-		// Transaction 1: Add initial data
-		let mut tx1 = db.transaction(true);
-		tx1.set("key1", "v1").unwrap();
-		tx1.set("key2", "v1").unwrap();
-		tx1.commit().unwrap();
-
-		// Transaction 2: Update key1
-		let mut tx2 = db.transaction(true);
-		tx2.set("key1", "v2").unwrap();
-		tx2.commit().unwrap();
-
-		// Transaction 3: Start a write transaction and scan all versions
-		// The writeset changes should be included in the scan
-		let mut tx3 = db.transaction(true);
-		tx3.set("key1", "v3").unwrap(); // Update key1 in writeset
-		tx3.set("key3", "new").unwrap(); // Add new key in writeset
-
-		let results = tx3.scan_all_versions("key0".."key9", None, None).unwrap();
-
-		// key1 should have 3 versions: v1 (datastore), v2 (datastore), v3 (writeset)
-		let key1_versions: Vec<_> =
-			results.iter().filter(|(k, _, _)| k.as_ref() == b"key1").collect();
-		assert_eq!(key1_versions.len(), 3, "key1 should have 3 versions including writeset");
-		assert_eq!(
-			key1_versions[2].2.as_deref(),
-			Some(b"v3" as &[u8]),
-			"Latest version should be from writeset"
-		);
-
-		// key2 should have 1 version: v1 (datastore)
-		let key2_versions: Vec<_> =
-			results.iter().filter(|(k, _, _)| k.as_ref() == b"key2").collect();
-		assert_eq!(key2_versions.len(), 1, "key2 should have 1 version");
-		assert_eq!(key2_versions[0].2.as_deref(), Some(b"v1" as &[u8]));
-
-		// key3 should have 1 version: new (writeset only)
-		let key3_versions: Vec<_> =
-			results.iter().filter(|(k, _, _)| k.as_ref() == b"key3").collect();
-		assert_eq!(key3_versions.len(), 1, "key3 should have 1 version from writeset");
-		assert_eq!(key3_versions[0].2.as_deref(), Some(b"new" as &[u8]));
-
-		// Cancel the transaction so it doesn't commit
-		tx3.cancel().unwrap();
-
-		// Transaction 4: Read-only transaction should not see tx3's writeset
-		let tx4 = db.transaction(false);
-		let results = tx4.scan_all_versions("key0".."key9", None, None).unwrap();
-
-		let key1_versions: Vec<_> =
-			results.iter().filter(|(k, _, _)| k.as_ref() == b"key1").collect();
-		assert_eq!(key1_versions.len(), 2, "key1 should only have 2 versions (tx3 was cancelled)");
-
-		let key3_versions: Vec<_> =
-			results.iter().filter(|(k, _, _)| k.as_ref() == b"key3").collect();
-		assert_eq!(key3_versions.len(), 0, "key3 should not exist (tx3 was cancelled)");
-	}
-
-	#[test]
 	fn test_savepoint_errors() {
 		let db = Database::new();
 
@@ -5011,131 +4357,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_getm_at_version_basic() {
-		let db = Database::new();
-
-		// Version 1: Set initial values
-		let mut tx = db.transaction(true);
-		tx.set("key1", "v1_value1").unwrap();
-		tx.set("key2", "v1_value2").unwrap();
-		tx.commit().unwrap();
-		let version1 = db.oracle.current_timestamp();
-
-		// Wait to ensure different timestamps
-		thread::sleep(std::time::Duration::from_millis(1));
-
-		// Version 2: Update values
-		let mut tx = db.transaction(true);
-		tx.set("key1", "v2_value1").unwrap();
-		tx.set("key2", "v2_value2").unwrap();
-		tx.set("key3", "v2_value3").unwrap();
-		tx.commit().unwrap();
-
-		// Read at version 1
-		let tx = db.transaction(false);
-		let keys = vec!["key1", "key2", "key3"];
-		let results = tx.getm_at_version(keys, version1).unwrap();
-		assert_eq!(results.len(), 3);
-		assert_eq!(results[0].as_deref(), Some(b"v1_value1" as &[u8]));
-		assert_eq!(results[1].as_deref(), Some(b"v1_value2" as &[u8]));
-		assert_eq!(results[2], None); // key3 didn't exist at version1
-	}
-
-	#[test]
-	fn test_getm_at_version_with_deletes() {
-		let db = Database::new();
-
-		// Version 1: Set values
-		let mut tx = db.transaction(true);
-		tx.set("key1", "value1").unwrap();
-		tx.set("key2", "value2").unwrap();
-		tx.commit().unwrap();
-		let version1 = db.oracle.current_timestamp();
-
-		// Wait to ensure different timestamps
-		thread::sleep(std::time::Duration::from_millis(1));
-
-		// Version 2: Delete key1
-		let mut tx = db.transaction(true);
-		tx.del("key1").unwrap();
-		tx.commit().unwrap();
-
-		// Read at version 1 (before delete)
-		let tx = db.transaction(false);
-		let keys = vec!["key1", "key2"];
-		let results = tx.getm_at_version(keys.clone(), version1).unwrap();
-		assert_eq!(results[0].as_deref(), Some(b"value1" as &[u8]));
-		assert_eq!(results[1].as_deref(), Some(b"value2" as &[u8]));
-
-		// Read at current version (after delete)
-		let results = tx.getm(keys).unwrap();
-		assert_eq!(results[0], None); // key1 is deleted
-		assert_eq!(results[1].as_deref(), Some(b"value2" as &[u8]));
-	}
-
-	#[test]
-	fn test_getm_at_version_future_version() {
-		let db = Database::new();
-		let tx = db.transaction(false);
-		let future_version = tx.version() + 1000;
-
-		let keys = vec!["key1"];
-		let result = tx.getm_at_version(keys, future_version);
-		assert!(matches!(result, Err(Error::VersionInFuture)));
-	}
-
-	#[test]
-	fn test_getm_at_version_closed_transaction() {
-		let db = Database::new();
-		let mut tx = db.transaction(false);
-		let version = tx.version();
-		tx.cancel().unwrap();
-
-		let keys = vec!["key1"];
-		let result = tx.getm_at_version(keys, version);
-		assert!(matches!(result, Err(Error::TxClosed)));
-	}
-
-	#[test]
-	fn test_getm_at_version_multiple_versions() {
-		let db = Database::new();
-
-		// Create multiple versions
-		let mut tx = db.transaction(true);
-		tx.set("key", "v1").unwrap();
-		tx.commit().unwrap();
-		let version1 = db.oracle.current_timestamp();
-
-		// Wait to ensure different timestamps
-		thread::sleep(std::time::Duration::from_millis(1));
-
-		let mut tx = db.transaction(true);
-		tx.set("key", "v2").unwrap();
-		tx.commit().unwrap();
-		let version2 = db.oracle.current_timestamp();
-
-		// Wait to ensure different timestamps
-		thread::sleep(std::time::Duration::from_millis(1));
-
-		let mut tx = db.transaction(true);
-		tx.set("key", "v3").unwrap();
-		tx.commit().unwrap();
-
-		// Test reading at different versions
-		let tx = db.transaction(false);
-		let keys = vec!["key"];
-
-		let results = tx.getm_at_version(keys.clone(), version1).unwrap();
-		assert_eq!(results[0].as_deref(), Some(b"v1" as &[u8]));
-
-		let results = tx.getm_at_version(keys.clone(), version2).unwrap();
-		assert_eq!(results[0].as_deref(), Some(b"v2" as &[u8]));
-
-		let results = tx.getm(keys).unwrap();
-		assert_eq!(results[0].as_deref(), Some(b"v3" as &[u8]));
-	}
-
-	#[test]
 	fn test_getm_concurrent_reads() {
 		let db = Arc::new(Database::new());
 
@@ -5179,7 +4400,7 @@ mod tests {
 	fn snapshot_isolation_reader_registration_race_does_not_lose_versions() {
 		// Reproduces a snapshot-isolation registration race in
 		// `TransactionInner::new` and `TransactionInner::reset`:
-		// `oracle.current_timestamp()` is loaded *before* the new
+		// `oracle.inner.timestamp` is loaded *before* the new
 		// transaction's start version is registered in `counter_by_oracle`.
 		//
 		// A committer running in that load-then-register window computes
@@ -5279,11 +4500,118 @@ mod tests {
 			 and never deleted ({nones} of {total} reads returned `None`). \
 			 This is a snapshot-isolation registration race: \
 			 `TransactionInner::new` (and `::reset`) load \
-			 `oracle.current_timestamp()` before registering the \
+			 `oracle.inner.timestamp` before registering the \
 			 transaction's start version in `counter_by_oracle`, so a \
 			 concurrent committer's inline GC can advance `cleanup_ts` \
 			 past the reader's snapshot. The reader then sees no visible \
 			 version at its snapshot timestamp."
 		);
+	}
+
+	/// Per-key version chain: many overlapping writers on one key, then
+	/// verify the raw chain is strictly monotonic and holds every committed
+	/// value exactly once. Background workers are disabled so the chain is
+	/// never pruned while the test inspects it: the commit path performs no
+	/// inline GC, so all reclamation happens in the (disabled) worker.
+	#[test]
+	fn test_version_chain_monotonic_under_concurrent_writers() {
+		const THREADS: usize = 8;
+		const PER_THREAD: usize = 200;
+		let db: Arc<Database> = Arc::new(Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		));
+		// Pre-seed the key so all updates land on the same Versions entry.
+		{
+			let mut tx = db.transaction(true);
+			tx.set(b"hotkey".to_vec(), b"seed".to_vec()).unwrap();
+			tx.commit().unwrap();
+		}
+		let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+		let written: Arc<std::sync::Mutex<std::collections::BTreeSet<Vec<u8>>>> =
+			Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+		let mut handles = Vec::new();
+		for tid in 0..THREADS {
+			let db = db.clone();
+			let barrier = barrier.clone();
+			let written = written.clone();
+			handles.push(thread::spawn(move || {
+				barrier.wait();
+				for i in 0..PER_THREAD {
+					let val = format!("t{tid}-{i:05}").into_bytes();
+					let mut tx = db.transaction(true);
+					tx.set(b"hotkey".to_vec(), val.clone()).unwrap();
+					if tx.commit().is_ok() {
+						written.lock().unwrap().insert(val);
+					}
+				}
+			}));
+		}
+		for h in handles {
+			h.join().unwrap();
+		}
+		// Inspect the raw version chain directly.
+		let entry = db.datastore.get(b"hotkey".as_slice()).expect("hotkey entry missing");
+		let guard = entry.value().read();
+		let chain = guard.as_slice();
+		// Versions are strictly increasing: every commit is minted a unique
+		// version, and every written value is unique, so no push dedups.
+		for w in chain.windows(2) {
+			assert!(
+				w[0].version < w[1].version,
+				"versions not strictly monotonic: {} then {}",
+				w[0].version,
+				w[1].version
+			);
+		}
+		// No tombstones: this key was never deleted.
+		assert!(chain.iter().all(|v| v.value.is_some()), "unexpected tombstone in chain");
+		// Lossless and duplicate-free: the chain holds the seed plus every
+		// successfully committed value, and nothing else.
+		let committed = written.lock().unwrap().clone();
+		assert_eq!(chain.len(), 1 + committed.len(), "chain length diverges from committed writes");
+		let mut got: std::collections::BTreeSet<Vec<u8>> =
+			chain.iter().filter_map(|v| v.value.as_ref().map(|b| b.to_vec())).collect();
+		got.remove(b"seed".as_slice());
+		assert_eq!(got, committed, "chain values diverge from committed writes");
+	}
+
+	/// Repeated sequential writes to the same keys: each key's raw version
+	/// chain accumulates every committed round in order. Background workers
+	/// are disabled so chains retain all versions during inspection.
+	#[test]
+	fn test_version_chain_accumulates_repeated_writes() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Five writes per key, on 200 keys
+		for round in 0..5 {
+			let mut tx = db.transaction(true);
+			for i in 0..200 {
+				tx.set(
+					format!("doc:{i:010}").into_bytes(),
+					format!("round{round}-i{i}").into_bytes(),
+				)
+				.unwrap();
+			}
+			tx.commit().unwrap();
+		}
+		// Each key's chain holds all five rounds, in commit order.
+		for i in 0..200 {
+			let key = format!("doc:{i:010}").into_bytes();
+			let entry = db.datastore.get(key.as_slice()).expect("doc entry missing");
+			let guard = entry.value().read();
+			let chain = guard.as_slice();
+			assert_eq!(chain.len(), 5, "chain should hold all five rounds");
+			for w in chain.windows(2) {
+				assert!(w[0].version < w[1].version, "versions not strictly monotonic");
+			}
+			for (round, v) in chain.iter().enumerate() {
+				assert_eq!(
+					v.value.as_deref(),
+					Some(format!("round{round}-i{i}").as_bytes()),
+					"unexpected value at round {round} for key {i}"
+				);
+			}
+		}
 	}
 }

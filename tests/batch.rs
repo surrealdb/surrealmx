@@ -15,10 +15,9 @@
 
 //! Batch operation tests for SurrealMX.
 //!
-//! Tests `getm()` and `getm_at_version()` for multi-key operations.
+//! Tests `getm()` for multi-key operations.
 
 use bytes::Bytes;
-use std::time::Duration;
 use surrealmx::Database;
 
 // =============================================================================
@@ -172,153 +171,6 @@ fn getm_large_batch() {
 	for (i, result) in results.iter().enumerate() {
 		assert_eq!(*result, Some(Bytes::from(format!("value_{}", i))));
 	}
-}
-
-// =============================================================================
-// getm_at_version() Tests
-// =============================================================================
-
-#[test]
-fn getm_at_version_reads_historical() {
-	let db = Database::new();
-
-	// Version 1: Create keys
-	let mut tx = db.transaction(true);
-	tx.set("key1", "v1_value1").unwrap();
-	tx.set("key2", "v1_value2").unwrap();
-	tx.commit().unwrap();
-
-	std::thread::sleep(Duration::from_millis(5));
-
-	// Capture version after v1 commits
-	let mut read_tx = db.transaction(false);
-	let version1 = read_tx.version();
-	read_tx.cancel().unwrap();
-
-	std::thread::sleep(Duration::from_millis(5));
-
-	// Version 2: Update keys
-	let mut tx = db.transaction(true);
-	tx.set("key1", "v2_value1").unwrap();
-	tx.set("key2", "v2_value2").unwrap();
-	tx.set("key3", "v2_value3").unwrap();
-	tx.commit().unwrap();
-
-	// Get at version1
-	let tx = db.transaction(false);
-	let keys = vec!["key1", "key2", "key3"];
-	let results = tx.getm_at_version(keys, version1).unwrap();
-
-	assert_eq!(results[0], Some(Bytes::from("v1_value1")));
-	assert_eq!(results[1], Some(Bytes::from("v1_value2")));
-	assert_eq!(results[2], None, "key3 didn't exist at version1");
-}
-
-#[test]
-fn getm_at_version_sees_deletes() {
-	let db = Database::new();
-
-	// Create key
-	let mut tx = db.transaction(true);
-	tx.set("key", "value").unwrap();
-	tx.commit().unwrap();
-
-	std::thread::sleep(Duration::from_millis(5));
-
-	// Start tx_between to capture a version where key exists
-	let tx_between = db.transaction(false);
-	let version_between = tx_between.version();
-
-	std::thread::sleep(Duration::from_millis(5));
-
-	// Delete key (after tx_between started)
-	let mut tx = db.transaction(true);
-	tx.del("key").unwrap();
-	tx.commit().unwrap();
-
-	std::thread::sleep(Duration::from_millis(5));
-
-	// New transaction can see delete
-	let tx = db.transaction(false);
-
-	// Using version_between from a tx started after create but before delete
-	// - tx's version > version_between, so no VersionInFuture error
-	// - version_between is after commit, so data is visible
-	let result = tx.getm_at_version(vec!["key"], version_between).unwrap();
-	assert_eq!(result[0], Some(Bytes::from("value")), "Key should exist at version_between");
-
-	// Current view should show deletion
-	let current = tx.getm(vec!["key"]).unwrap();
-	assert_eq!(current[0], None, "Key should be deleted in current view");
-}
-
-#[test]
-fn getm_at_version_preserves_order() {
-	let db = Database::new();
-
-	// Create keys in different order
-	let mut tx = db.transaction(true);
-	tx.set("c", "3").unwrap();
-	tx.set("a", "1").unwrap();
-	tx.set("b", "2").unwrap();
-	tx.commit().unwrap();
-
-	std::thread::sleep(Duration::from_millis(10));
-
-	// Start tx_after to capture a version after commit
-	let tx_after = db.transaction(false);
-	let version = tx_after.version();
-
-	// Wait and create a dummy transaction to advance the oracle timestamp
-	std::thread::sleep(Duration::from_millis(10));
-	let mut dummy = db.transaction(true);
-	dummy.set("dummy", "dummy").unwrap();
-	dummy.commit().unwrap();
-
-	std::thread::sleep(Duration::from_millis(10));
-
-	// Get in specific order from an even newer transaction
-	let tx = db.transaction(false);
-	let keys = vec!["b", "a", "c"];
-	let results = tx.getm_at_version(keys, version).unwrap();
-
-	// Results should match request order
-	assert_eq!(results[0], Some(Bytes::from("2")), "First should be 'b'");
-	assert_eq!(results[1], Some(Bytes::from("1")), "Second should be 'a'");
-	assert_eq!(results[2], Some(Bytes::from("3")), "Third should be 'c'");
-}
-
-#[test]
-fn getm_at_version_mixed_exists_and_missing() {
-	let db = Database::new();
-
-	// Create only key1
-	let mut tx = db.transaction(true);
-	tx.set("key1", "exists").unwrap();
-	tx.commit().unwrap();
-
-	std::thread::sleep(Duration::from_millis(5));
-
-	// Capture version when only key1 exists
-	let mut read_tx = db.transaction(false);
-	let version1 = read_tx.version();
-	read_tx.cancel().unwrap();
-
-	std::thread::sleep(Duration::from_millis(5));
-
-	// Create key2
-	let mut tx = db.transaction(true);
-	tx.set("key2", "new").unwrap();
-	tx.commit().unwrap();
-
-	// Get at version1 when only key1 existed
-	let tx = db.transaction(false);
-	let keys = vec!["key1", "key2", "key3"];
-	let results = tx.getm_at_version(keys, version1).unwrap();
-
-	assert_eq!(results[0], Some(Bytes::from("exists")));
-	assert_eq!(results[1], None, "key2 didn't exist at version1");
-	assert_eq!(results[2], None, "key3 never existed");
 }
 
 // =============================================================================

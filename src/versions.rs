@@ -209,6 +209,12 @@ impl Versions {
 		self.inner.iter().map(|v| (v.version, v.value.clone())).collect()
 	}
 
+	/// Test-only view of the raw version chain, oldest first.
+	#[cfg(test)]
+	pub(crate) fn as_slice(&self) -> &[Version] {
+		&self.inner
+	}
+
 	/// Remove versions that no reader at a snapshot `>= version` can observe.
 	///
 	/// `version` is the GC floor: no reader exists below it, but readers may

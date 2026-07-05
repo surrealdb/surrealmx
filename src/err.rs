@@ -47,10 +47,6 @@ pub enum Error {
 	#[error("Write conflict, retry the transaction")]
 	KeyWriteConflict,
 
-	/// Can not fetch value at a future version.
-	#[error("Can not fetch value at a future version")]
-	VersionInFuture,
-
 	/// No savepoint has been set.
 	#[error("No savepoint has been set")]
 	NoSavepoint,
