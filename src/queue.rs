@@ -37,8 +37,6 @@ pub struct Commit {
 
 /// A transaction entry in the transaction merge queue
 pub struct Merge {
-	/// The unique id of this commit attempt
-	pub(crate) id: u64,
 	/// The local set of updates and deletes
 	pub(crate) writeset: Arc<BTreeMap<Bytes, Option<Bytes>>>,
 }

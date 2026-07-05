@@ -568,7 +568,7 @@ impl TransactionInner {
 	pub(crate) fn new(db: Arc<Inner>, write: bool) -> Self {
 		// Register against both watermark counters
 		let (version, counter_version) =
-			register_counter(&db.counter_by_oracle, &db.oracle.inner.timestamp, Some(&db.gc_floor));
+			register_counter(&db.counter_by_oracle, &db.oracle.timestamp, Some(&db.gc_floor));
 		let (commit, counter_commit) =
 			register_counter(&db.counter_by_commit, &db.transaction_commit_id, None);
 		// Store the threshold separately before moving db
@@ -601,7 +601,7 @@ impl TransactionInner {
 		// Re-register against both watermark counters
 		let (version, counter_version) = register_counter(
 			&self.database.counter_by_oracle,
-			&self.database.oracle.inner.timestamp,
+			&self.database.oracle.timestamp,
 			Some(&self.database.gc_floor),
 		);
 		let (commit, counter_commit) = register_counter(
@@ -865,7 +865,6 @@ impl TransactionInner {
 		// Insert this transaction into the merge queue
 		let (version, entry) = self.atomic_merge(Merge {
 			writeset,
-			id: self.database.transaction_merge_id.fetch_add(1, Ordering::AcqRel) + 1,
 		});
 		// Apply each writeset entry. Inline gc has intentionally been
 		// removed from this path: the registration race in PR #77 stems
@@ -2226,29 +2225,34 @@ impl TransactionInner {
 	fn atomic_merge(&self, updates: Merge) -> (u64, Arc<Merge>) {
 		// Store the number of spins
 		let mut spins = 0;
-		// Get the commit attempt id
-		let id = updates.id;
 		// Store the commit in an Arc
 		let updates = Arc::new(updates);
-		// Get the database timestamp oracle
+		// Get the database logical clock
 		let oracle = self.database.oracle.clone();
 		// Get the database transaction merge queue
 		let queue = &self.database.transaction_merge_queue;
-		// Loop until we reach the next incremental timestamp
+		// Claim a unique merge version from the allocation counter. The
+		// claim must NOT come from probing merge-queue slots: entries are
+		// removed from the queue once applied, and a slow concurrent
+		// committer could re-claim the vacated slot — minting the same
+		// version twice and overwriting a committed value in the chain.
+		let version = oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
+		// Insert the merge entry at the claimed version, before the
+		// version is published: readers snapshot from `timestamp`, so a
+		// published version must imply its merge entry is visible in the
+		// queue (or already applied).
+		let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
+		// Publish strictly in claim order: wait until every lower version
+		// has been published, then advance the clock to ours. In-order
+		// publication gives readers a complete prefix — a snapshot at `v`
+		// covers every merge `<= v` with no holes.
 		loop {
-			// Get the current nanoseconds since the Unix epoch
-			let mut version = oracle.current_time_ns();
-			// Get the last timestamp for this oracle
-			let last_ts = oracle.inner.timestamp.load(Ordering::Acquire);
-			// Increase the timestamp to ensure monotonicity
-			if version <= last_ts {
-				version = last_ts + 1;
-			}
-			// Insert into the queue if the number is the same
-			let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
-			// Check if the entry was inserted correctly
-			if id == entry.value().id {
-				oracle.inner.timestamp.fetch_max(version, Ordering::SeqCst);
+			// Attempt to advance the published clock from our predecessor
+			if oracle
+				.timestamp
+				.compare_exchange_weak(version - 1, version, Ordering::SeqCst, Ordering::Acquire)
+				.is_ok()
+			{
 				return (version, entry.value().clone());
 			}
 			// Ensure the thread backs off when under contention
@@ -4452,7 +4456,7 @@ mod tests {
 	fn snapshot_isolation_reader_registration_race_does_not_lose_versions() {
 		// Reproduces a snapshot-isolation registration race in
 		// `TransactionInner::new` and `TransactionInner::reset`:
-		// `oracle.inner.timestamp` is loaded *before* the new
+		// `oracle.timestamp` is loaded *before* the new
 		// transaction's start version is registered in `counter_by_oracle`.
 		//
 		// A committer running in that load-then-register window computes
@@ -4552,7 +4556,7 @@ mod tests {
 			 and never deleted ({nones} of {total} reads returned `None`). \
 			 This is a snapshot-isolation registration race: \
 			 `TransactionInner::new` (and `::reset`) load \
-			 `oracle.inner.timestamp` before registering the \
+			 `oracle.timestamp` before registering the \
 			 transaction's start version in `counter_by_oracle`, so a \
 			 concurrent committer's inline GC can advance `cleanup_ts` \
 			 past the reader's snapshot. The reader then sees no visible \

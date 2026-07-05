@@ -361,6 +361,16 @@ impl Persistence {
 	/// 1. Loads the latest snapshot if it exists
 	/// 2. Applies any changes from the append-only log
 	fn load(&self) -> Result<(), PersistenceError> {
+		// Track the maximum version seen across EVERY decoded record —
+		// snapshot entries (including keys skipped as tombstone-topped)
+		// and every append-only log record (including deletes). The
+		// logical clock is seeded from this so newly minted merge
+		// versions continue strictly above every persisted version.
+		// Seeding from anything less (the last record, or only entries
+		// carrying values) would let a new write mint a version below a
+		// stale persisted tombstone and silently vanish once the clock
+		// crosses it.
+		let mut max_version: u64 = 0;
 		// Check if snapshot file exists
 		if self.snapshot_path.exists() {
 			// Read and deserialize the snapshot data
@@ -396,6 +406,9 @@ impl Persistence {
 							// entirely - absent and deleted are the same
 							// observable state.
 							if let Some((version, value)) = versions.into_iter().last() {
+								// Count the version towards the clock seed
+								// even when the key itself is skipped
+								max_version = max_version.max(version);
 								// Skip keys which were deleted
 								if value.is_some() {
 									// Create a new versions entry
@@ -450,6 +463,11 @@ impl Persistence {
 					// Detech any end of file errors
 					match result {
 						Ok((k, version, val)) => {
+							// Count the version towards the clock seed. The
+							// append-only log is not version-ordered (async
+							// appends race), so the maximum must be tracked
+							// over every record, not taken from the last.
+							max_version = max_version.max(version);
 							// Check if the key already exists
 							if let Some(entry) = self.inner.datastore.get(&k) {
 								// Update existing key with stored version
@@ -482,6 +500,25 @@ impl Persistence {
 				}
 			}
 		}
+		// Guard against corrupted or pathological persisted versions: the
+		// slot protocol reserves values near u64::MAX as sentinels, and
+		// version minting adds one to the clock. Legitimate versions from
+		// wall-clock releases (~1.7e18 nanoseconds) sit six orders of
+		// magnitude below this bound.
+		if max_version > u64::MAX / 2 {
+			return Err(PersistenceError::SnapshotFailed(format!(
+				"persisted version {max_version} exceeds the maximum supported version"
+			)));
+		}
+		// Seed the logical clock so newly minted merge versions continue
+		// strictly above every persisted version. Both the allocation
+		// counter and the published clock are seeded: the next claim
+		// takes max_version + 1, and its in-order publication advances
+		// the clock from max_version. This runs before any transaction
+		// or background worker exists; fetch_max is used for safety
+		// under refactoring rather than necessity.
+		self.inner.oracle.alloc.fetch_max(max_version, Ordering::SeqCst);
+		self.inner.oracle.timestamp.fetch_max(max_version, Ordering::SeqCst);
 		// Return success
 		Ok(())
 	}

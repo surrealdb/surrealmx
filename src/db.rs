@@ -311,9 +311,9 @@ impl Database {
 					// counter map so any reader landing in the
 					// publish-and-scan window is either visible to us
 					// (and bounds the final cleanup_ts) or retries from
-					// a fresh oracle read above the floor. The proposed
-					// value is capped at the current oracle so an idle
-					// database does not lock readers out forever.
+					// a fresh clock read above the floor. The proposed
+					// value is bounded by the published logical clock,
+					// so an idle database can never lock readers out.
 					let cleanup_ts = db.compute_cleanup_ts();
 					// Drain the dirty-key queue every cycle (incremental GC).
 					db.run_gc_dirty_inner(cleanup_ts);
@@ -1185,5 +1185,49 @@ mod tests {
 		db.run_cleanup();
 		// With the reader gone the idle fallback applies again
 		assert_eq!(db.transaction_commit_queue.len(), 1);
+	}
+
+	#[test]
+	fn logical_clock_is_dense() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..10 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// Merge versions are dense sequential integers: ten commits
+		// publish exactly versions 1 through 10.
+		assert_eq!(db.oracle.timestamp.load(std::sync::atomic::Ordering::SeqCst), 10);
+		let entry = db.datastore.get(b"key0".as_slice()).expect("key0 missing");
+		let guard = entry.value().read();
+		assert_eq!(guard.as_slice()[0].version, 1);
+		let entry = db.datastore.get(b"key9".as_slice()).expect("key9 missing");
+		let guard = entry.value().read();
+		assert_eq!(guard.as_slice()[0].version, 10);
+	}
+
+	#[test]
+	fn logical_clock_continues_above_seed() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Simulate a datastore seeded from files written by a release
+		// which minted wall-clock nanosecond versions.
+		let seed = 1_700_000_000_000_000_000u64;
+		db.oracle.alloc.store(seed, std::sync::atomic::Ordering::SeqCst);
+		db.oracle.timestamp.store(seed, std::sync::atomic::Ordering::SeqCst);
+		let mut tx = db.transaction(true);
+		tx.set("key", "value").unwrap();
+		tx.commit().unwrap();
+		// The next minted version continues strictly above the seed
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+		let guard = entry.value().read();
+		assert_eq!(guard.as_slice()[0].version, seed + 1);
+		// And the write is visible to a fresh reader
+		let mut tx = db.transaction(false);
+		assert_eq!(tx.get("key").unwrap().as_deref(), Some(b"value" as &[u8]));
+		tx.cancel().unwrap();
 	}
 }

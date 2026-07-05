@@ -153,7 +153,6 @@ impl MergeQueueScenario {
 				ws.insert(key, Some(Bytes::from_static(b"v")));
 			}
 			sources.push(Arc::new(Merge {
-				id: i as u64,
 				writeset: Arc::new(ws),
 			}));
 		}

@@ -19,10 +19,6 @@ pub(crate) const DEFAULT_GC_FULL_SCAN_FREQUENCY: u64 = 20;
 /// Default interval at which transaction queue cleanup is performed.
 pub(crate) const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Default interval at which the timestamp oracle resyncs with the system
-/// clock.
-pub(crate) const DEFAULT_RESYNC_INTERVAL: Duration = Duration::from_secs(5);
-
 /// Configuration options for [`crate::Database`].
 #[derive(Debug, Clone)]
 pub struct DatabaseOptions {
@@ -44,9 +40,6 @@ pub struct DatabaseOptions {
 	pub cleanup_interval: Duration,
 	/// Threshold after which transaction state maps are reset (default: 100).
 	pub reset_threshold: usize,
-	/// Interval at which the timestamp oracle resyncs with the system clock
-	/// (default: 5 seconds).
-	pub resync_interval: Duration,
 }
 
 impl Default for DatabaseOptions {
@@ -59,7 +52,6 @@ impl Default for DatabaseOptions {
 			enable_cleanup: true,
 			cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
 			reset_threshold: DEFAULT_RESET_THRESHOLD,
-			resync_interval: DEFAULT_RESYNC_INTERVAL,
 		}
 	}
 }
@@ -114,13 +106,6 @@ impl DatabaseOptions {
 		self
 	}
 
-	/// Set the interval at which the timestamp oracle resyncs with the system
-	/// clock.
-	pub fn with_resync_interval(mut self, interval: Duration) -> Self {
-		self.resync_interval = interval;
-		self
-	}
-
 	/// Disable all background worker threads (gc and cleanup).
 	pub fn with_all_workers_disabled(mut self) -> Self {
 		self.enable_gc = false;
@@ -138,7 +123,6 @@ impl DatabaseOptions {
 		self.gc_full_scan_frequency = 30;
 		self.cleanup_interval = Duration::from_millis(100);
 		self.reset_threshold *= 2;
-		self.resync_interval = Duration::from_secs(2);
 		self
 	}
 
@@ -151,7 +135,6 @@ impl DatabaseOptions {
 		self.gc_full_scan_frequency = 12;
 		self.cleanup_interval = Duration::from_millis(500);
 		self.reset_threshold /= 2;
-		self.resync_interval = Duration::from_secs(10);
 		self
 	}
 

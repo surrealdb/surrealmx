@@ -50,8 +50,6 @@ pub struct Inner {
 	pub(crate) transaction_queue_id: AtomicU64,
 	/// The transaction commit queue success sequence number
 	pub(crate) transaction_commit_id: AtomicU64,
-	/// The transaction merge queue attempt sequence number
-	pub(crate) transaction_merge_id: AtomicU64,
 	/// The transaction commit queue list of modifications
 	pub(crate) transaction_commit_queue: SkipMap<u64, Arc<Commit>>,
 	/// Transaction updates which are committed but not yet applied
@@ -87,16 +85,15 @@ pub struct Inner {
 }
 
 impl Inner {
-	/// Create a new [`Inner`] structure with the given oracle resync interval.
+	/// Create a new [`Inner`] structure with the given options.
 	pub fn new(opts: &DatabaseOptions) -> Self {
 		Self {
-			oracle: Oracle::new(opts.resync_interval),
+			oracle: Oracle::new(),
 			datastore: SkipMap::new(),
 			counter_by_oracle: SkipMap::new(),
 			counter_by_commit: SkipMap::new(),
 			transaction_queue_id: AtomicU64::new(0),
 			transaction_commit_id: AtomicU64::new(0),
-			transaction_merge_id: AtomicU64::new(0),
 			transaction_commit_queue: SkipMap::new(),
 			transaction_merge_queue: SkipMap::new(),
 			#[cfg(not(target_arch = "wasm32"))]
@@ -159,22 +156,15 @@ impl Inner {
 	/// concurrent `register_counter` retries any reader whose snapshot
 	/// is below it, then re-scan to bound by any newly-arrived reader.
 	///
-	/// The proposed value is capped at the current oracle timestamp.
-	/// Without that cap, an idle database (oracle frozen while wall
-	/// clock advances) would push `gc_floor` above any value a future
-	/// reader could load — causing `register_counter` to spin forever
-	/// retrying.
+	/// The proposed value is bounded by the published logical clock: a
+	/// future reader's snapshot load returns at least the value we load
+	/// here, so the floor can never exceed what a future reader can
+	/// observe — the frozen-clock hazard the old wall-clock cap guarded
+	/// against is now inherent to the single monotonic counter.
 	pub(crate) fn compute_cleanup_ts(&self) -> u64 {
-		let now = self.oracle.current_time_ns();
+		let now = self.oracle.timestamp.load(Ordering::SeqCst);
 		let earliest_tx = self.earliest_active_version(now);
-		let oracle_now = self.oracle.inner.timestamp.load(Ordering::SeqCst);
-		// `gc_floor` must stay <= oracle so any future reader's load
-		// (which returns >= current oracle) satisfies the floor check.
-		// `now` participates in the min: under same-nanosecond commit
-		// bursts the oracle timestamp is minted as `last_ts + 1` and can
-		// run ahead of the estimated wall clock, so the wall-clock bound
-		// keeps reclamation from advancing past real time.
-		let proposed = now.min(earliest_tx).min(oracle_now);
+		let proposed = now.min(earliest_tx);
 		// Publish proposed cleanup_ts via `gc_floor` BEFORE reclaiming.
 		// A `register_counter` that fences after CAS-publish will see
 		// either the old floor (and its publish becomes visible to our
