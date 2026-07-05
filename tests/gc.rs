@@ -15,7 +15,7 @@
 
 //! Garbage collection tests for SurrealMX.
 //!
-//! Tests manual `run_gc()`, background GC behavior, and GC history modes.
+//! Tests manual `run_gc()` and background GC behavior.
 
 use bytes::Bytes;
 use std::sync::Arc;
@@ -32,8 +32,7 @@ fn manual_gc_removes_stale_versions() {
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_secs(3600)) // Disable background GC
 			.with_cleanup_interval(Duration::from_secs(3600)),
-	)
-	.with_gc();
+	);
 
 	// Create multiple versions
 	for i in 0..10 {
@@ -59,8 +58,7 @@ fn manual_gc_respects_active_transactions() {
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_secs(3600))
 			.with_cleanup_interval(Duration::from_secs(3600)),
-	)
-	.with_gc();
+	);
 
 	// Create initial version
 	let mut tx = db.transaction(true);
@@ -97,8 +95,7 @@ fn manual_gc_removes_deleted_keys() {
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_secs(3600))
 			.with_cleanup_interval(Duration::from_secs(3600)),
-	)
-	.with_gc();
+	);
 
 	// Create and delete key
 	let mut tx = db.transaction(true);
@@ -131,8 +128,7 @@ fn background_gc_runs_automatically() {
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(100))
 			.with_cleanup_interval(Duration::from_millis(100)),
-	)
-	.with_gc();
+	);
 
 	// Create many versions quickly
 	for i in 0..20 {
@@ -151,33 +147,6 @@ fn background_gc_runs_automatically() {
 	tx.cancel().unwrap();
 }
 
-#[test]
-fn gc_with_zero_history_cleans_aggressively() {
-	// with_gc() sets history to None/zero - most aggressive cleanup
-	let db = Database::new_with_options(
-		DatabaseOptions::default()
-			.with_gc_interval(Duration::from_millis(50))
-			.with_cleanup_interval(Duration::from_millis(50)),
-	)
-	.with_gc();
-
-	// Create versions quickly
-	for i in 0..10 {
-		let mut tx = db.transaction(true);
-		tx.set("key", format!("v{}", i)).unwrap();
-		tx.commit().unwrap();
-	}
-
-	// Wait for aggressive GC
-	std::thread::sleep(Duration::from_millis(300));
-
-	// Current should exist
-	let mut tx = db.transaction(false);
-	let current = tx.get("key").unwrap();
-	assert!(current.is_some());
-	tx.cancel().unwrap();
-}
-
 // =============================================================================
 // GC with Multiple Keys
 // =============================================================================
@@ -188,8 +157,7 @@ fn gc_handles_multiple_keys() {
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(100))
 			.with_cleanup_interval(Duration::from_millis(100)),
-	)
-	.with_gc();
+	);
 
 	// Create multiple keys with multiple versions
 	for key_id in 0..10 {
@@ -218,8 +186,7 @@ fn gc_with_mixed_deletes() {
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
 			.with_cleanup_interval(Duration::from_millis(50)),
-	)
-	.with_gc();
+	);
 
 	// Create some keys
 	let mut tx = db.transaction(true);
@@ -309,14 +276,11 @@ fn manual_cleanup() {
 
 #[test]
 fn concurrent_gc_and_transactions() {
-	let db = Arc::new(
-		Database::new_with_options(
-			DatabaseOptions::default()
-				.with_gc_interval(Duration::from_millis(50))
-				.with_cleanup_interval(Duration::from_millis(50)),
-		)
-		.with_gc(),
-	);
+	let db = Arc::new(Database::new_with_options(
+		DatabaseOptions::default()
+			.with_gc_interval(Duration::from_millis(50))
+			.with_cleanup_interval(Duration::from_millis(50)),
+	));
 
 	let num_threads = 4;
 	let ops_per_thread = 50;
@@ -368,8 +332,7 @@ fn gc_with_only_deleted_keys() {
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
 			.with_cleanup_interval(Duration::from_millis(50)),
-	)
-	.with_gc();
+	);
 
 	// Create and immediately delete
 	let mut tx = db.transaction(true);
@@ -401,8 +364,7 @@ fn gc_empty_database() {
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
 			.with_cleanup_interval(Duration::from_millis(50)),
-	)
-	.with_gc();
+	);
 
 	// Run GC on empty database
 	db.run_gc();
@@ -424,8 +386,7 @@ fn gc_preserves_tombstones_for_active_readers() {
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
 			.with_cleanup_interval(Duration::from_millis(50)),
-	)
-	.with_gc();
+	);
 
 	// Create and then delete a key
 	let mut tx = db.transaction(true);

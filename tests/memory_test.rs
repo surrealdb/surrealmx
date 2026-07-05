@@ -13,8 +13,7 @@ fn test_version_cleanup_with_updates() {
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(100))
 			.with_cleanup_interval(Duration::from_millis(50)),
-	)
-	.with_gc(); // Enable aggressive inline GC
+	);
 
 	let num_keys = 1000;
 	let num_updates = 10;
@@ -68,7 +67,7 @@ fn test_version_cleanup_with_updates() {
 
 #[test]
 fn test_version_cleanup_with_deletes() {
-	let db = Database::new().with_gc();
+	let db = Database::new();
 
 	let num_keys = 500;
 
@@ -127,8 +126,7 @@ fn test_version_cleanup_with_deletes() {
 fn test_memory_with_batch_operations() {
 	let db = Database::new_with_options(
 		DatabaseOptions::default().with_gc_interval(Duration::from_millis(100)),
-	)
-	.with_gc();
+	);
 
 	let num_batches = 10;
 	let batch_size = 100;

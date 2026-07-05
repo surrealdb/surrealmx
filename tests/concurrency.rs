@@ -30,14 +30,11 @@ use surrealmx::{Database, DatabaseOptions};
 
 #[test]
 fn gc_does_not_remove_versions_needed_by_active_readers() {
-	let db = Arc::new(
-		Database::new_with_options(
-			DatabaseOptions::default()
-				.with_gc_interval(Duration::from_millis(50))
-				.with_cleanup_interval(Duration::from_millis(50)),
-		)
-		.with_gc(),
-	);
+	let db = Arc::new(Database::new_with_options(
+		DatabaseOptions::default()
+			.with_gc_interval(Duration::from_millis(50))
+			.with_cleanup_interval(Duration::from_millis(50)),
+	));
 
 	// Create initial data
 	{
@@ -72,14 +69,11 @@ fn gc_does_not_remove_versions_needed_by_active_readers() {
 
 #[test]
 fn gc_cleans_up_after_readers_complete() {
-	let db = Arc::new(
-		Database::new_with_options(
-			DatabaseOptions::default()
-				.with_gc_interval(Duration::from_millis(50))
-				.with_cleanup_interval(Duration::from_millis(50)),
-		)
-		.with_gc(),
-	);
+	let db = Arc::new(Database::new_with_options(
+		DatabaseOptions::default()
+			.with_gc_interval(Duration::from_millis(50))
+			.with_cleanup_interval(Duration::from_millis(50)),
+	));
 
 	// Create initial data
 	{

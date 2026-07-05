@@ -29,7 +29,6 @@ use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 /// Sentinel value stored in a counter entry while its owning [`Inner`]
 /// SkipMap entry is being removed by [`crate::tx::Transaction::drop`]. A
@@ -57,8 +56,6 @@ pub struct Inner {
 	pub(crate) transaction_commit_queue: SkipMap<u64, Arc<Commit>>,
 	/// Transaction updates which are committed but not yet applied
 	pub(crate) transaction_merge_queue: SkipMap<u64, Arc<Merge>>,
-	/// The epoch duration to determine how long to store versioned data
-	pub(crate) garbage_collection_epoch: RwLock<Option<Duration>>,
 	/// Optional persistence handler
 	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) persistence: RwLock<Option<Arc<Persistence>>>,
@@ -102,7 +99,6 @@ impl Inner {
 			transaction_merge_id: AtomicU64::new(0),
 			transaction_commit_queue: SkipMap::new(),
 			transaction_merge_queue: SkipMap::new(),
-			garbage_collection_epoch: RwLock::new(None),
 			#[cfg(not(target_arch = "wasm32"))]
 			persistence: RwLock::new(None),
 			background_threads_enabled: AtomicBool::new(true),
@@ -146,13 +142,15 @@ impl Inner {
 	/// retrying.
 	pub(crate) fn compute_cleanup_ts(&self) -> u64 {
 		let now = self.oracle.current_time_ns();
-		let history = self.garbage_collection_epoch.read().unwrap_or_default().as_nanos();
-		let history_cutoff = now.saturating_sub(history as u64);
 		let earliest_tx = self.earliest_active_version(now);
 		let oracle_now = self.oracle.inner.timestamp.load(Ordering::SeqCst);
 		// `gc_floor` must stay <= oracle so any future reader's load
 		// (which returns >= current oracle) satisfies the floor check.
-		let proposed = history_cutoff.min(earliest_tx).min(oracle_now);
+		// `now` participates in the min: under same-nanosecond commit
+		// bursts the oracle timestamp is minted as `last_ts + 1` and can
+		// run ahead of the estimated wall clock, so the wall-clock bound
+		// keeps reclamation from advancing past real time.
+		let proposed = now.min(earliest_tx).min(oracle_now);
 		// Publish proposed cleanup_ts via `gc_floor` BEFORE reclaiming.
 		// A `register_counter` that fences after CAS-publish will see
 		// either the old floor (and its publish becomes visible to our
