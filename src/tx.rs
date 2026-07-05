@@ -945,16 +945,16 @@ impl TransactionInner {
 		for key in writeset.keys() {
 			writeset_bloom.insert(key);
 		}
-		// Extract the min and max keys from the writeset
-		let min_key = writeset.keys().next().cloned().unwrap_or_default();
-		let max_key = writeset.keys().next_back().cloned().unwrap_or_default();
+		// Collect the sorted writeset keys for conflict detection. The
+		// commit queue stores keys only: its entries outlive the merge
+		// queue entry (they are trimmed later by the cleanup worker),
+		// and storing the values would pin them in memory until then.
+		let keys = writeset.keys().cloned().collect();
 		// Insert this transaction into the commit queue
 		let (version, entry) = self.atomic_commit(Commit {
-			writeset: writeset.clone(),
+			keys,
 			id: self.database.transaction_queue_id.fetch_add(1, Ordering::AcqRel) + 1,
 			writeset_bloom,
-			min_key,
-			max_key,
 		});
 		// Check wether we should check reads conflicts on commit
 		if self.mode >= IsolationLevel::SnapshotIsolation {
@@ -1010,7 +1010,7 @@ impl TransactionInner {
 					// Only iterate writeset keys if ranges may overlap
 					if scan_overlap {
 						// A previous transaction has conflicts against scans
-						for k in tx.value().writeset.keys() {
+						for k in tx.value().keys.iter() {
 							// Check if this key may be within a scan range
 							if let Some(entry) = self.scanset.range::<Bytes, _>(..=k).next_back() {
 								// Check if the range includes this key (load from ArcSwap)

@@ -37,26 +37,20 @@ pub struct ReadsetConflictScenario {
 impl ReadsetConflictScenario {
 	/// Build a scenario with the given writeset and readset keys
 	pub fn new(writeset_keys: &[Bytes], readset_keys: &[Bytes]) -> Self {
-		// Build the writeset BTreeMap
-		let mut ws = BTreeMap::new();
-		for k in writeset_keys {
-			ws.insert(k.clone(), Some(Bytes::from_static(b"v")));
-		}
+		// Build the sorted writeset keys
+		let mut keys = writeset_keys.to_vec();
+		keys.sort();
+		keys.dedup();
 		// Build the writeset bloom filter
 		let mut writeset_bloom = BloomFilter::new();
-		for k in ws.keys() {
+		for k in keys.iter() {
 			writeset_bloom.insert(k);
 		}
-		// Extract min and max keys
-		let min_key = ws.keys().next().cloned().unwrap_or_default();
-		let max_key = ws.keys().next_back().cloned().unwrap_or_default();
 		// Build the commit entry
 		let commit = Arc::new(Commit {
 			id: 1,
-			writeset: Arc::new(ws),
+			keys,
 			writeset_bloom,
-			min_key,
-			max_key,
 		});
 		// Build the readset and bloom filter
 		let readset = HashSet::new();
@@ -115,26 +109,20 @@ impl WritesetConflictScenario {
 
 	/// Build a Commit entry from a set of keys
 	fn build_commit(keys: &[Bytes], id: u64) -> Commit {
-		// Build the writeset BTreeMap
-		let mut ws = BTreeMap::new();
-		for k in keys {
-			ws.insert(k.clone(), Some(Bytes::from_static(b"v")));
-		}
+		// Build the sorted writeset keys
+		let mut keys = keys.to_vec();
+		keys.sort();
+		keys.dedup();
 		// Build the writeset bloom filter
 		let mut writeset_bloom = BloomFilter::new();
-		for k in ws.keys() {
+		for k in keys.iter() {
 			writeset_bloom.insert(k);
 		}
-		// Extract min and max keys
-		let min_key = ws.keys().next().cloned().unwrap_or_default();
-		let max_key = ws.keys().next_back().cloned().unwrap_or_default();
 		// Build the commit entry
 		Commit {
 			id,
-			writeset: Arc::new(ws),
+			keys,
 			writeset_bloom,
-			min_key,
-			max_key,
 		}
 	}
 }
