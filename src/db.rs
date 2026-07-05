@@ -184,7 +184,7 @@ impl Database {
 	/// This should be called when automatic cleanup is disabled via
 	/// [`DatabaseOptions::enable_cleanup`].
 	pub fn run_cleanup(&self) {
-		self.inner.run_cleanup_inner();
+		self.inner.cleanup_commit_queue();
 	}
 
 	/// Manually perform garbage collection of stale record versions.
@@ -276,7 +276,7 @@ impl Database {
 						break;
 					}
 					// Clean up the transaction commit queue
-					db.run_cleanup_inner();
+					db.cleanup_commit_queue();
 				}
 			});
 			// Store and track the thread handle
@@ -1133,5 +1133,57 @@ mod tests {
 		assert_eq!(keys[1].as_ref(), b"c");
 		let res = tx.cancel();
 		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn cleanup_trims_commit_queue_when_idle() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..10 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		assert_eq!(db.transaction_commit_queue.len(), 10);
+		db.run_cleanup();
+		// With no registered readers the trim bound falls back to the
+		// current commit id: everything below it is unreachable by any
+		// future transaction's conflict window, which starts strictly
+		// above the commit id the transaction registers at. The exclusive
+		// bound leaves exactly the entry at the current commit id.
+		assert_eq!(db.transaction_commit_queue.len(), 1);
+	}
+
+	#[test]
+	fn cleanup_respects_active_reader() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Commit five transactions before the reader starts
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("pre{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// Register a reader pinned at the current commit id
+		let reader = db.transaction(false);
+		// Commit five more transactions after the reader registered
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("post{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		assert_eq!(db.transaction_commit_queue.len(), 10);
+		db.run_cleanup();
+		// Entries above the reader's snapshot commit id must survive:
+		// they sit inside its potential conflict window. Entries at ids
+		// 1-4 are trimmed; the entry at the reader's snapshot (5) and
+		// everything above remain.
+		assert_eq!(db.transaction_commit_queue.len(), 6);
+		drop(reader);
+		db.run_cleanup();
+		// With the reader gone the idle fallback applies again
+		assert_eq!(db.transaction_commit_queue.len(), 1);
 	}
 }

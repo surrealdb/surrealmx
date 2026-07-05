@@ -131,28 +131,25 @@ impl Inner {
 		earliest_active(&self.counter_by_commit, fallback)
 	}
 
-	/// Trim the transaction commit queue below the earliest active
-	/// transaction's commit snapshot, or below the current commit id when
-	/// no transaction is registered at all.
+	/// Trim commit-queue entries which no active or future transaction can
+	/// need for conflict detection.
 	///
-	/// Commit queue entries are only ever read by conflict detection,
-	/// which scans `(tx.commit, version)` — strictly above the committing
-	/// transaction's registered snapshot — so entries at or below every
-	/// registered snapshot are unreachable.
-	///
-	/// The idle fallback is safe against concurrent registration because
-	/// the fallback is loaded from `transaction_commit_id` *before* the
-	/// counter map is scanned: a registering transaction that the scan
-	/// misses validates `transaction_commit_id` against its snapshot
-	/// *after* publishing its counter (see `register_counter`), so by
-	/// monotonicity of the commit id its snapshot is `>=` our fallback,
-	/// and its conflict window `(snapshot, ..)` is untouched by the trim.
-	pub(crate) fn run_cleanup_inner(&self) {
-		// Load the idle fallback BEFORE scanning the counter map (see above)
+	/// The fallback bound for an idle database is the current commit id,
+	/// loaded BEFORE the fence-and-scan inside `earliest_active_commit`.
+	/// This ordering is load-bearing: a reader missed by the scan has its
+	/// registration revalidation load of `transaction_commit_id` ordered
+	/// after our bound load in the SeqCst total order, so (the counter
+	/// being monotonic) its snapshot is at least our bound, and its
+	/// conflict window `snapshot + 1 ..` sits strictly above everything
+	/// we trim. A reader seen by the scan bounds the trim directly. A
+	/// writer mid-commit holds its own registration until drop, so its
+	/// conflict-check iteration is protected identically.
+	pub(crate) fn cleanup_commit_queue(&self) {
+		// Load the idle-database bound before the fence-and-scan
 		let fallback = self.transaction_commit_id.load(Ordering::SeqCst);
-		// Find the earliest registered commit snapshot, if any
+		// Bound by the earliest registered reader, if any
 		let oldest = self.earliest_active_commit(fallback);
-		// Trim all commit queue entries below the watermark
+		// Remove all entries below the bound
 		self.transaction_commit_queue.range(..oldest).for_each(|e| {
 			e.remove();
 		});
