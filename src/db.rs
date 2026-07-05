@@ -207,17 +207,15 @@ impl Database {
 
 	/// Manually perform transaction queue cleanup.
 	///
+	/// This trims commit queue entries below the earliest active
+	/// transaction's commit snapshot — or, when no transaction is
+	/// registered, below the current commit id — so an idle database
+	/// releases the whole queue rather than pinning it at its peak.
+	///
 	/// This should be called when automatic cleanup is disabled via
 	/// [`DatabaseOptions::enable_cleanup`].
 	pub fn run_cleanup(&self) {
-		// Use `u64::MAX` as the "no readers" fallback to preserve the
-		// original semantics (trim nothing when nothing is registered).
-		let oldest = self.earliest_active_commit(u64::MAX);
-		if oldest != u64::MAX {
-			self.transaction_commit_queue.range(..oldest).for_each(|e| {
-				e.remove();
-			});
-		}
+		self.inner.run_cleanup_inner();
 	}
 
 	/// Manually perform garbage collection of stale record versions.
@@ -309,13 +307,7 @@ impl Database {
 						break;
 					}
 					// Clean up the transaction commit queue
-					let oldest = db.earliest_active_commit(u64::MAX);
-					// Ensure the oldest value is not the max
-					if oldest != u64::MAX {
-						db.transaction_commit_queue.range(..oldest).for_each(|e| {
-							e.remove();
-						});
-					}
+					db.run_cleanup_inner();
 				}
 			});
 			// Store and track the thread handle
