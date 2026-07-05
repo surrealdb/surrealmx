@@ -4537,6 +4537,58 @@ mod tests {
 	}
 
 	#[test]
+	fn test_cleanup_trims_commit_queue_when_idle() {
+		use crate::DatabaseOptions;
+
+		// Disable all background workers so the commit queue is only
+		// ever trimmed by the manual cleanup calls in this test
+		let db = Database::new_with_options(DatabaseOptions::default().with_all_workers_disabled());
+
+		// Commit a number of transactions
+		for i in 0..10 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key_{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+
+		// Every commit is still queued for conflict detection
+		assert_eq!(db.transaction_commit_queue.len(), 10);
+
+		// With no transaction registered, cleanup trims everything below
+		// the current commit id, leaving only the most recent entry
+		db.run_cleanup();
+		assert_eq!(db.transaction_commit_queue.len(), 1);
+
+		// The datastore itself is untouched by the queue trim. Scope the
+		// reader so it is dropped: counters are released on Drop, not on
+		// cancel, and a live reader pins the cleanup watermark below.
+		{
+			let mut tx = db.transaction(false);
+			for i in 0..10 {
+				assert!(tx.exists(format!("key_{i}")).unwrap());
+			}
+			tx.cancel().unwrap();
+		}
+
+		// An active transaction pins the queue at its own commit
+		// snapshot, so entries in its conflict window must survive
+		let pin = db.transaction(false);
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("extra_{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		assert_eq!(db.transaction_commit_queue.len(), 6);
+		db.run_cleanup();
+		assert_eq!(db.transaction_commit_queue.len(), 6);
+
+		// Once the pinning transaction is dropped, cleanup trims fully
+		drop(pin);
+		db.run_cleanup();
+		assert_eq!(db.transaction_commit_queue.len(), 1);
+	}
+
+	#[test]
 	fn test_concurrent_write_read_merge_queue_race() {
 		// This test specifically targets the race condition where readers check
 		// is_removed() on merge queue entries and miss data that's being merged.
