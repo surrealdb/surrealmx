@@ -315,13 +315,16 @@ impl Persistence {
 			};
 			// Stream write each key-value pair to reduce memory usage
 			for entry in self.inner.datastore.iter() {
-				// Get all versions for this key
-				let versions = entry.value().read().all_versions();
-				// Ensure that there are version entries
-				if !versions.is_empty() {
+				// Persist only the latest committed version of each key. Keys
+				// whose newest entry is a delete tombstone are omitted: on
+				// reload the key is simply absent, which is the same
+				// observable state. The encoded element type is unchanged, so
+				// snapshot files remain readable across releases in both
+				// directions.
+				if let Some((version, value)) = entry.value().read().latest() {
 					// Serialize and write this single entry
 					bincode::serde::encode_into_std_write(
-						&(entry.key().clone(), versions),
+						&(entry.key().clone(), vec![(version, Some(value))]),
 						&mut writer,
 						config::standard(),
 					)?;
@@ -384,19 +387,27 @@ impl Persistence {
 					// Detech any end of file errors
 					match result {
 						Ok((k, versions)) => {
-							// Ensure that there are version entries
-							if !versions.is_empty() {
-								// Create a new versions entry
-								let mut entries = Versions::new();
-								// Add all of the version entries
-								for (version, value) in versions.into_iter() {
+							// Load only the newest version of each key: older
+							// versions in files written by previous releases
+							// are unreadable by construction (there is no
+							// historical read API), so materializing them
+							// would only bloat startup memory. A key whose
+							// newest entry is a delete tombstone is skipped
+							// entirely - absent and deleted are the same
+							// observable state.
+							if let Some((version, value)) = versions.into_iter().last() {
+								// Skip keys which were deleted
+								if value.is_some() {
+									// Create a new versions entry
+									let mut entries = Versions::new();
+									// Add the latest version entry
 									entries.push(Version {
 										version,
 										value,
 									});
+									// Insert the entry into the datastore
+									self.inner.datastore.insert(k, RwLock::new(entries));
 								}
-								// Insert the entry into the datastore
-								self.inner.datastore.insert(k, RwLock::new(entries));
 							}
 						}
 						Err(e) => match e {
@@ -637,13 +648,13 @@ impl Persistence {
 						};
 						// Stream write each entry to reduce memory usage
 						for entry in db.datastore.iter() {
-							// Get all versions for this key
-							let versions = entry.value().read().all_versions();
-							// Ensure that there are version entries
-							if !versions.is_empty() {
+							// Persist only the latest committed version of
+							// each key, omitting keys whose newest entry is
+							// a delete tombstone. See `snapshot()` above.
+							if let Some((version, value)) = entry.value().read().latest() {
 								// Serialize and write this single entry
 								bincode::serde::encode_into_std_write(
-									&(entry.key().clone(), versions),
+									&(entry.key().clone(), vec![(version, Some(value))]),
 									&mut writer,
 									config::standard(),
 								)?;
