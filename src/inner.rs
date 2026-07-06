@@ -22,6 +22,7 @@ use crate::versions::Versions;
 use crate::DatabaseOptions;
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
+use papaya::HashSet;
 use parking_lot::RwLock;
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -135,6 +136,22 @@ pub struct Inner {
 	/// Bounded by, and advanced only after, the published merge clock
 	/// (`oracle.timestamp`).
 	pub(crate) merge_retire_id: AtomicU64,
+	/// Keys whose version chains may still hold reclaimable garbage:
+	/// chains a commit could not trim to a single live value because a
+	/// reader watermark pinned older versions (or the watermark scan was
+	/// skipped mid-registration), and chains whose newest entry is a
+	/// delete tombstone awaiting collapse. The background sweep visits
+	/// only these keys instead of scanning the whole datastore, so sweep
+	/// cost scales with the amount of pinned garbage rather than the
+	/// dataset size. Only keys are stored (deduplicated, refcounted
+	/// `Bytes` clones) — never values, which would pin the very memory
+	/// the sweep exists to reclaim. While a long-lived reader pins the
+	/// watermark, every distinct key overwritten during its lifetime
+	/// stays tracked and is revisited (and re-tracked) by each sweep
+	/// tick until the reader departs — the deliberate trade for exact
+	/// reclamation the moment the pin clears; the per-tick cost is one
+	/// chain-lock-and-trim attempt per tracked key.
+	pub(crate) gc_candidates: HashSet<Bytes>,
 	/// Optional persistence handler
 	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) persistence: RwLock<Option<Arc<Persistence>>>,
@@ -164,6 +181,7 @@ impl Inner {
 			transaction_commit_queue: SkipMap::new(),
 			transaction_merge_queue: SkipMap::new(),
 			merge_retire_id: AtomicU64::new(0),
+			gc_candidates: HashSet::new(),
 			#[cfg(not(target_arch = "wasm32"))]
 			persistence: RwLock::new(None),
 			background_threads_enabled: AtomicBool::new(true),
@@ -226,8 +244,10 @@ impl Inner {
 
 	/// Compute the watermark for commit-time inline garbage collection,
 	/// or `None` when a registration is in flight — in which case the
-	/// committer simply skips inline reclamation for this commit and the
-	/// next commit to each key (or the background full scan) catches up.
+	/// committer skips inline reclamation for this commit and instead
+	/// tracks each key it touched in [`Inner::gc_candidates`], so the
+	/// tracked background sweep (or the next commit to the key) catches
+	/// up.
 	///
 	/// The committer's own slot is excluded: `commit` takes the
 	/// transaction by mutable reference and marks it done, so no further
@@ -462,13 +482,77 @@ impl Inner {
 		}
 	}
 
+	/// Reclaim stale versions on the tracked candidate keys only.
+	///
+	/// Steady-state reclamation happens inline at commit time; whenever a
+	/// commit cannot trim a chain to a single live value it tracks the
+	/// key in [`Inner::gc_candidates`], so this sweep visits exactly the
+	/// keys which may still hold garbage — cost scales with the amount of
+	/// pinned garbage, not the dataset size.
+	///
+	/// A key is removed from the candidate set BEFORE its chain is
+	/// examined. That ordering makes the untrack race-free against
+	/// concurrent commits: a committer inserts its key only after
+	/// pushing the garbage-leaving version under the chain write lock,
+	/// so any garbage added after this sweep's trim re-inserts the key
+	/// for the next pass — the removal here can never orphan it. When
+	/// the trimmed chain still holds reclaimable versions (a reader
+	/// watermark is pinning them), the key is re-tracked for the next
+	/// sweep.
+	pub(crate) fn run_gc_tracked(&self, cleanup_ts: u64) {
+		// A single map guard serves the whole sweep: guard churn per
+		// candidate costs more than holding one across the pass, and the
+		// candidate map holds only keys, so delaying its internal
+		// reclamation for the duration of a sweep is immaterial.
+		let candidates = self.gc_candidates.pin();
+		// The steady state is an empty candidate set: every chain fully
+		// trimmed at commit time. Skip the snapshot allocation entirely.
+		if candidates.is_empty() {
+			return;
+		}
+		// Snapshot the candidate keys: the snapshot is the sweep's
+		// working set, and keys tracked by commits racing with this
+		// sweep are picked up by the next pass.
+		let mut keys: Vec<Bytes> = Vec::with_capacity(candidates.len());
+		keys.extend(candidates.iter().cloned());
+		// Process each candidate key in turn
+		for key in keys {
+			// Untrack the key first — see the ordering argument above
+			candidates.remove(&key);
+			// The chain may have been unlinked by an earlier collapse
+			let Some(entry) = self.datastore.get(&key) else {
+				continue;
+			};
+			// Get a mutable reference to the versions list
+			let mut versions = entry.value().write();
+			// A sweep or commit-time collapse unlinked this node between
+			// lookup and lock; any recreation re-tracks the key itself
+			if entry.is_removed() {
+				continue;
+			}
+			// Clean up unnecessary older versions
+			if versions.gc_older_versions(cleanup_ts) == 0 {
+				// Remove the entry while still holding the version write
+				// lock — see the equivalent removal in `run_gc_full`.
+				entry.remove();
+			} else if versions.needs_gc() {
+				// Versions remain pinned by a reader watermark: re-track
+				// the key so a later sweep can finish the job.
+				candidates.insert(key);
+			}
+		}
+	}
+
 	/// Scan the entire datastore, reclaiming stale versions on every key.
 	///
-	/// Steady-state reclamation happens inline at commit time, so this
-	/// sweep is a low-frequency safety net for garbage which no future
-	/// commit will visit: versions pinned by a since-departed reader on a
-	/// key that is never written again, and the inert below-watermark
-	/// entries which an out-of-order apply can leave behind.
+	/// The background sweep visits only tracked candidate keys (see
+	/// [`Inner::run_gc_tracked`]); this full scan backs the manual
+	/// [`crate::Database::run_gc`] entry point and the one-shot pass at
+	/// persistence load time, which collapses the multi-version chains
+	/// that append-only-log replay builds up. Since a full scan visits
+	/// every key, it supersedes the candidate set: callers clear the set
+	/// before scanning (commits racing with the scan re-track their keys
+	/// as usual).
 	pub(crate) fn run_gc_full(&self, cleanup_ts: u64) {
 		// Iterate over the entire datastore
 		for entry in self.datastore.iter() {
@@ -482,6 +566,13 @@ impl Inner {
 				// to unlink. `Entry::remove` also unlinks at the cursor with
 				// no second key lookup.
 				entry.remove();
+			} else if versions.needs_gc() {
+				// A reader watermark is pinning reclaimable versions. Track
+				// the key so the targeted sweep revisits it once the pin
+				// clears: the caller cleared the candidate set before this
+				// scan, and no future commit or sweep would otherwise ever
+				// visit a key that is never written again.
+				self.gc_candidates.pin().insert(entry.key().clone());
 			}
 		}
 	}

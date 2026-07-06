@@ -975,7 +975,7 @@ fn bench_gc_full_scan(c: &mut Criterion) {
 	for total_keys in [1_000, 10_000, 100_000].iter() {
 		// Setup helper: create datastore, then overwrite a small subset
 		// while a reader pins the old versions, then drop the reader —
-		// exactly the garbage shape only the safety net can reclaim.
+		// exactly the garbage shape only a background sweep can reclaim.
 		let setup = || {
 			let db =
 				Database::new_with_options(DatabaseOptions::default().with_all_workers_disabled());
@@ -1004,7 +1004,9 @@ fn bench_gc_full_scan(c: &mut Criterion) {
 			db
 		};
 
-		// Full-scan GC: grows linearly with total keys
+		// Full-scan GC: grows linearly with total keys. The database is
+		// returned from the routine so its O(n) teardown is dropped
+		// outside the timed region rather than polluting the measurement.
 		group.bench_function(
 			BenchmarkId::new("full_gc", format!("{}total_{}stale", total_keys, stale_count)),
 			|b| {
@@ -1012,6 +1014,23 @@ fn bench_gc_full_scan(c: &mut Criterion) {
 					setup,
 					|db| {
 						db.run_gc();
+						db
+					},
+					criterion::BatchSize::LargeInput,
+				)
+			},
+		);
+
+		// Tracked sweep: visits only the keys commits tracked as holding
+		// garbage, so cost scales with the stale count, not total keys
+		group.bench_function(
+			BenchmarkId::new("tracked_gc", format!("{}total_{}stale", total_keys, stale_count)),
+			|b| {
+				b.iter_batched(
+					setup,
+					|db| {
+						db.run_gc_tracked();
+						db
 					},
 					criterion::BatchSize::LargeInput,
 				)

@@ -523,6 +523,15 @@ impl Persistence {
 		self.inner.oracle.alloc.fetch_max(max_version, Ordering::SeqCst);
 		self.inner.oracle.timestamp.fetch_max(max_version, Ordering::SeqCst);
 		self.inner.merge_retire_id.fetch_max(max_version, Ordering::SeqCst);
+		// Collapse the multi-version chains that append-only-log replay
+		// builds up: a key updated N times across the log holds N chain
+		// entries here, and no future commit or tracked sweep would ever
+		// visit the ones on keys that are never written again. This runs
+		// before any transaction exists, so the cleanup bound is simply
+		// the seeded clock and every chain trims to its latest version.
+		if let Some(cleanup_ts) = self.inner.compute_cleanup_ts() {
+			self.inner.run_gc_full(cleanup_ts);
+		}
 		// Return success
 		Ok(())
 	}

@@ -872,6 +872,11 @@ impl TransactionInner {
 		// own excluded slot is pinned at our start version, so the
 		// watermark can never sit above the version we push.
 		let watermark = self.database.inline_gc_watermark(self.slot_id);
+		// Keys whose chains could not be trimmed to a single live value,
+		// collected here and tracked in one batch after the apply loop so
+		// no hash-set work happens inside a chain write-lock critical
+		// section. Empty in the steady state, so no allocation occurs.
+		let mut tracked: Vec<Bytes> = Vec::new();
 		// Apply each writeset entry, reclaiming superseded versions
 		// inline while the chain write lock is already held.
 		for (key, value) in entry.writeset.iter() {
@@ -911,13 +916,44 @@ impl TransactionInner {
 				// is a delete tombstone with nothing newer, e.g. our own
 				// delete with no readers below — unlink the node while
 				// still holding the lock, so a concurrent committer
-				// observes `is_removed()` and re-inserts.
-				if let Some(w) = watermark {
-					if versions.gc_older_versions(w) == 0 {
-						entry.remove();
+				// observes `is_removed()` and re-inserts. When the chain
+				// could NOT be trimmed to a single live value (a reader
+				// watermark pins older versions, our newest entry is a
+				// tombstone awaiting collapse, or the watermark scan was
+				// skipped mid-registration), collect the key for tracking
+				// so the background sweep revisits exactly this chain once
+				// the pin clears — the sweep never scans the datastore.
+				match watermark {
+					Some(w) => {
+						if versions.gc_older_versions(w) == 0 {
+							entry.remove();
+						} else if versions.needs_gc() {
+							tracked.push(key.clone());
+						}
+					}
+					None => {
+						if versions.needs_gc() {
+							tracked.push(key.clone());
+						}
 					}
 				}
 				break;
+			}
+		}
+		// Track the collected keys in one batch, outside every chain
+		// write lock and under a single map guard. Insert-after-unlock
+		// is race-free against the sweep's remove-then-trim ordering:
+		// the garbage these keys refer to was pushed before this insert,
+		// so a sweep that untracks a key here either trims that garbage
+		// in the same pass (and re-tracks it if a reader still pins it)
+		// or ran entirely before it existed — in which case this insert
+		// lands after the removal and the key stays tracked. At worst a
+		// key is tracked for an already-terminal chain, which the next
+		// sweep simply untracks.
+		if !tracked.is_empty() {
+			let candidates = self.database.gc_candidates.pin();
+			for key in tracked {
+				candidates.insert(key);
 			}
 		}
 		// Append the transaction to the persistence layer
@@ -4635,7 +4671,7 @@ mod tests {
 	/// value exactly once. A reader pinned at the seed version holds every
 	/// commit's inline-GC watermark below the whole test's writes, so the
 	/// chain retains the full history for inspection; background workers
-	/// are disabled so no safety-net sweep runs either.
+	/// are disabled so no background sweep runs either.
 	#[test]
 	fn test_version_chain_monotonic_under_concurrent_writers() {
 		const THREADS: usize = 8;
@@ -4707,7 +4743,7 @@ mod tests {
 	/// chain accumulates every committed round in order. A reader pinned
 	/// before the first round holds every commit's inline-GC watermark
 	/// below the whole test's writes; background workers are disabled so
-	/// no safety-net sweep runs either.
+	/// no background sweep runs either.
 	#[test]
 	fn test_version_chain_accumulates_repeated_writes() {
 		let db = Database::new_with_options(

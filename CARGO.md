@@ -61,8 +61,11 @@ fn main() {
 
 Background worker threads perform cleanup and garbage collection at regular
 intervals. These workers can be disabled through `DatabaseOptions` by setting
-`enable_cleanup` or `enable_gc` to `false`. When disabled, the tasks can be
-triggered manually using the `run_cleanup` and `run_gc` methods.
+`enable_cleanup` or `enable_gc` to `false`. When disabled, trigger the tasks
+manually: `run_cleanup` trims the transaction commit queue, `run_gc_tracked`
+sweeps just the keys tracked as holding reclaimable version garbage (cheap —
+its cost scales with the amount of pinned garbage, not the dataset size), and
+`run_gc` performs a full datastore scan, useful as an occasional deep sweep.
 
 ```rust
 use surrealmx::{Database, DatabaseOptions};
@@ -82,10 +85,13 @@ fn main() {
     tx.put("key", "value2").unwrap();
     tx.commit().unwrap();
 
-	// Manually remove unused transaction stale versions
+	// Manually trim the transaction commit queue
     db.run_cleanup();
 	
-	// Manually remove old queue entries
+	// Manually sweep the tracked garbage-candidate keys
+    db.run_gc_tracked();
+	
+	// Occasionally, perform a full-scan sweep of the datastore
     db.run_gc();
 }
 ```
