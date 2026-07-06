@@ -19,14 +19,12 @@ use crate::LOG_TARGET_CONFLICTS;
 use bytes::Bytes;
 use papaya::HashSet;
 use std::collections::BTreeMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use tracing::debug;
 
 /// A transaction entry in the transaction commit queue
 pub struct Commit {
-	/// The unique id of this commit attempt
-	pub(crate) id: u64,
 	/// The sorted writeset keys. Values are never read during conflict
 	/// detection, so they are not retained here: the merge queue holds
 	/// the full writeset only until the commit is applied, while this
@@ -34,16 +32,17 @@ pub struct Commit {
 	pub(crate) keys: Arc<[Bytes]>,
 	/// Bloom filter over writeset keys for fast conflict pre-checks
 	pub(crate) writeset_bloom: BloomFilter,
-	/// The merge version this commit published, or zero while the commit
-	/// is still in flight. Set by the owning transaction immediately
-	/// after its merge version becomes loadable from the clock. Consumed
-	/// by the commit-watermark advance (readers must never take a
-	/// conflict-window base covering a commit whose merge version they
-	/// cannot yet see) and by the conflict loop, which skips commits
-	/// whose merge version is visible in the checking transaction's
-	/// snapshot: a visible commit happened strictly before the snapshot
-	/// in version order, so it is not concurrent and first-committer-wins
-	/// does not apply to it.
+	/// The merge version this commit published, zero while the commit is
+	/// still in flight, or [`crate::inner::COMMIT_ABORTED`] when the
+	/// owning transaction unwound without completing. Set by the owning
+	/// transaction immediately after its merge version becomes loadable
+	/// from the clock. Consumed by the commit-watermark advance (readers
+	/// must never take a conflict-window base covering a commit whose
+	/// merge version they cannot yet see) and by the conflict loop, which
+	/// skips aborted commits and commits whose merge version is visible
+	/// in the checking transaction's snapshot: a visible commit happened
+	/// strictly before the snapshot in version order, so it is not
+	/// concurrent and first-committer-wins does not apply to it.
 	pub(crate) merge_version: AtomicU64,
 }
 
@@ -51,6 +50,14 @@ pub struct Commit {
 pub struct Merge {
 	/// The local set of updates and deletes
 	pub(crate) writeset: Arc<BTreeMap<Bytes, Option<Bytes>>>,
+	/// Whether this merge has been fully applied to the datastore.
+	/// Consumed by the in-order retirement advance: merge entries are
+	/// removed from the queue strictly in version order, over the
+	/// contiguous applied prefix, so a surviving queue entry for a key
+	/// is always at least as new as anything the datastore chain holds
+	/// at or below a reader's snapshot — the property that lets reads
+	/// resolve the queue overlay with priority over the chain.
+	pub(crate) applied: AtomicBool,
 }
 
 impl Commit {
@@ -210,14 +217,9 @@ mod tests {
 		for k in keys.iter() {
 			writeset_bloom.insert(k);
 		}
-		let min_key = keys.first().cloned().unwrap_or_default();
-		let max_key = keys.last().cloned().unwrap_or_default();
 		Arc::new(Commit {
-			id: 1,
 			keys,
 			writeset_bloom,
-			min_key,
-			max_key,
 			merge_version: AtomicU64::new(0),
 		})
 	}

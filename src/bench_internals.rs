@@ -22,7 +22,7 @@ use crate::queue::{Commit, Merge};
 use bytes::Bytes;
 use papaya::HashSet;
 use std::collections::BTreeMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
 /// A prepared readset conflict scenario for benchmarking
@@ -50,7 +50,6 @@ impl ReadsetConflictScenario {
 		}
 		// Build the commit entry
 		let commit = Arc::new(Commit {
-			id: 1,
 			keys,
 			writeset_bloom,
 			merge_version: AtomicU64::new(0),
@@ -95,8 +94,8 @@ impl WritesetConflictScenario {
 	/// Build a scenario with two writesets
 	pub fn new(committed_keys: &[Bytes], current_keys: &[Bytes]) -> Self {
 		Self {
-			committed: Arc::new(Self::build_commit(committed_keys, 1)),
-			current: Arc::new(Self::build_commit(current_keys, 2)),
+			committed: Arc::new(Self::build_commit(committed_keys)),
+			current: Arc::new(Self::build_commit(current_keys)),
 		}
 	}
 
@@ -111,7 +110,7 @@ impl WritesetConflictScenario {
 	}
 
 	/// Build a Commit entry from a set of keys
-	fn build_commit(input: &[Bytes], id: u64) -> Commit {
+	fn build_commit(input: &[Bytes]) -> Commit {
 		// Build the sorted writeset key list (inputs may be unsorted)
 		let mut ws: Vec<Bytes> = input.to_vec();
 		ws.sort();
@@ -124,7 +123,6 @@ impl WritesetConflictScenario {
 		}
 		// Build the commit entry
 		Commit {
-			id,
 			keys,
 			writeset_bloom,
 			merge_version: AtomicU64::new(0),
@@ -157,6 +155,7 @@ impl MergeQueueScenario {
 			}
 			sources.push(Arc::new(Merge {
 				writeset: Arc::new(ws),
+				applied: AtomicBool::new(false),
 			}));
 		}
 		let beg = Bytes::from(b"key_00000000".to_vec());

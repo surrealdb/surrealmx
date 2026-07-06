@@ -18,7 +18,7 @@ use crate::bloom::BloomFilter;
 use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
-use crate::inner::{Inner, Slot, SLOT_PINNING};
+use crate::inner::{Inner, Slot, COMMIT_ABORTED, SLOT_PINNING};
 use crate::iter::{MergeIterator, MergeQueueIter};
 use crate::kv::IntoBytes;
 use crate::pool::Pool;
@@ -34,7 +34,7 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::Range;
-use std::sync::atomic::{fence, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::debug;
 
@@ -705,10 +705,26 @@ impl TransactionInner {
 		// Insert this transaction into the commit queue
 		let (commit_slot, commit_entry) = self.atomic_commit(Commit {
 			keys,
-			id: self.database.transaction_queue_id.fetch_add(1, Ordering::AcqRel) + 1,
 			writeset_bloom,
 			merge_version: AtomicU64::new(0),
 		});
+		// Unwind guard: if this transaction panics after publishing its
+		// commit slot, mark the entry aborted and advance the completed
+		// watermark, so an abandoned in-flight entry can never wedge the
+		// contiguous prefix that every future reader's conflict window is
+		// based on. The abort-on-conflict paths below also rely on this
+		// guard for their watermark advance after removing the entry.
+		let mut commit_guard = OnUnwind {
+			armed: true,
+			action: {
+				let database = self.database.clone();
+				let entry = commit_entry.clone();
+				move || {
+					entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
+					database.advance_commit_watermark();
+				}
+			},
+		};
 		// Check wether we should check reads conflicts on commit
 		if self.mode >= IsolationLevel::SnapshotIsolation {
 			// Retrieve all transactions committed since we began. The
@@ -716,22 +732,32 @@ impl TransactionInner {
 			// taken from, which over-approximates concurrency: it can
 			// include commits our version snapshot already sees.
 			for tx in self.database.transaction_commit_queue.range(self.commit + 1..commit_slot) {
+				// Skip aborted commits: their writes will never publish
+				let merge_version = tx.value().merge_version.load(Ordering::SeqCst);
+				if merge_version == COMMIT_ABORTED {
+					continue;
+				}
 				// Skip commits whose merge version is visible in our
 				// snapshot: a visible commit happened strictly before our
 				// snapshot in version order, so it is not concurrent with
 				// this transaction and first-committer-wins does not
 				// apply — we read its effects rather than raced with it.
-				let merge_version = tx.value().merge_version.load(Ordering::SeqCst);
 				if merge_version != 0 && merge_version <= self.version {
 					continue;
 				}
 				// Check if a previous transaction conflicts against writes
 				if !tx.value().is_disjoint_writeset_bloom(&commit_entry) {
-					// Remove the transaction from the commit queue, then
-					// advance the completed watermark: a removed entry
-					// counts as complete and may unblock the prefix
-					self.database.transaction_commit_queue.remove(&commit_slot);
-					self.database.advance_commit_watermark();
+					// Do NOT remove the entry here: the commit-queue
+					// insertion-order watermark is advanced opportunistically
+					// (see `Inner::try_advance_commit_prefix`) rather than
+					// synchronously by this slot's own claim, so an entry
+					// must stay visible until that watermark has confirmably
+					// passed it — otherwise a concurrent advance could
+					// mistake "removed early" for "never inserted" and stall
+					// forever. The unwind guard (dropped below, on return)
+					// marks the entry aborted and advances the completed
+					// watermark; `cleanup_commit_queue` removes it later,
+					// once it is safely below every reader's visibility.
 					// Clear the transaction state
 					self.scanset.clear();
 					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
@@ -751,10 +777,9 @@ impl TransactionInner {
 						.value()
 						.is_disjoint_readset_bloom(&self.readset, &self.readset_bloom.lock())
 					{
-						// Remove the transaction from the commit queue, then
-						// advance the completed watermark
-						self.database.transaction_commit_queue.remove(&commit_slot);
-						self.database.advance_commit_watermark();
+						// Do not remove the entry here — see the comment
+						// on the writeset-conflict branch above. The
+						// unwind guard marks it aborted on return.
 						// Clear the transaction state
 						self.scanset.clear();
 						self.readset.pin().clear();
@@ -785,10 +810,10 @@ impl TransactionInner {
 							if let Some(entry) = self.scanset.range::<Bytes, _>(..=k).next_back() {
 								// Check if the range includes this key (load from ArcSwap)
 								if **entry.value().load() > *k {
-									// Remove the transaction from the commit queue,
-									// then advance the completed watermark
-									self.database.transaction_commit_queue.remove(&commit_slot);
-									self.database.advance_commit_watermark();
+									// Do not remove the entry here — see the
+									// comment on the writeset-conflict branch
+									// above. The unwind guard marks it
+									// aborted on return.
 									// Clear the transaction state
 									self.readset.pin().clear();
 									self.readset_bloom.lock().clear();
@@ -811,15 +836,33 @@ impl TransactionInner {
 		// Insert this transaction into the merge queue
 		let (version, entry) = self.atomic_merge(Merge {
 			writeset,
+			applied: AtomicBool::new(false),
 		});
 		// Our merge version is now published, so record it on the
-		// commit-queue entry and advance the contiguous completed
-		// watermark: readers snapshotting the watermark from here on may
-		// exclude this commit from their conflict windows, because their
-		// version snapshot (loaded after the watermark) is guaranteed to
-		// cover our merge version — in the queue overlay or applied below.
+		// commit-queue entry, disarm the abort guard, and advance the
+		// contiguous completed watermark: readers snapshotting the
+		// watermark from here on may exclude this commit from their
+		// conflict windows, because their version snapshot (loaded after
+		// the watermark) is guaranteed to cover our merge version — in
+		// the queue overlay or applied below.
 		commit_entry.merge_version.store(version, Ordering::SeqCst);
+		commit_guard.armed = false;
 		self.database.advance_commit_watermark();
+		// Unwind guard for the apply phase: a panic mid-apply leaves the
+		// chains partially updated (a pre-existing atomicity limitation),
+		// but must not wedge the in-order merge retirement — mark the
+		// entry applied and advance so later merges can still retire.
+		let mut merge_guard = OnUnwind {
+			armed: true,
+			action: {
+				let database = self.database.clone();
+				let entry = entry.clone();
+				move || {
+					entry.applied.store(true, Ordering::SeqCst);
+					database.advance_merge_retirement();
+				}
+			},
+		};
 		// Compute the inline-GC watermark ONCE for this commit, after our
 		// merge version is published and before the apply loop. The
 		// pin-then-read slot protocol makes this safe where it once was
@@ -827,7 +870,7 @@ impl TransactionInner {
 		// the slot scan or forces a skip, and every future transaction
 		// snapshots at or above the clock bound loaded inside — while our
 		// own excluded slot is pinned at our start version, so the
-		// watermark always sits strictly below the version we push.
+		// watermark can never sit above the version we push.
 		let watermark = self.database.inline_gc_watermark(self.slot_id);
 		// Apply each writeset entry, reclaiming superseded versions
 		// inline while the chain write lock is already held.
@@ -881,8 +924,18 @@ impl TransactionInner {
 		#[cfg(not(target_arch = "wasm32"))]
 		if let Some(p) = self.database.persistence.read().clone() {
 			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
-				// Remove this transaction from the merge queue
-				self.database.transaction_merge_queue.remove(&version);
+				// Do NOT remove the entry here: the merge clock's
+				// insertion-order advance is opportunistic (see
+				// `Inner::try_advance_merge_clock`), so an entry must stay
+				// visible until the clock has confirmably passed it —
+				// removing it early would be indistinguishable from "never
+				// inserted" to a concurrent advance and could stall it
+				// forever. The unwind guard (dropped below, on return)
+				// marks this entry applied and lets retirement remove it
+				// once the clock naturally reaches this version — the
+				// datastore chains already hold this data regardless (the
+				// pre-existing applied-but-unpersisted limitation of this
+				// error path).
 				// Clear the transaction state
 				self.scanset.clear();
 				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
@@ -896,8 +949,15 @@ impl TransactionInner {
 				return Err(Error::TxCommitNotPersisted(e));
 			}
 		}
-		// Remove this transaction from the merge queue
-		self.database.transaction_merge_queue.remove(&version);
+		// Mark this merge as applied and retire the contiguous applied
+		// prefix of the merge queue. Entries are NEVER removed directly
+		// here: removal out of version order would let a reader find an
+		// older in-flight version's surviving entry in the overlay while
+		// a newer version already sits applied in the chain, returning a
+		// stale value for a snapshot that should see the newer write.
+		entry.applied.store(true, Ordering::SeqCst);
+		merge_guard.armed = false;
+		self.database.advance_merge_retirement();
 		// Clear the transaction state
 		self.scanset.clear();
 		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
@@ -2159,22 +2219,46 @@ impl TransactionInner {
 	fn atomic_commit(&self, updates: Commit) -> (u64, Arc<Commit>) {
 		// Store the number of spins
 		let mut spins = 0;
-		// Get the commit attempt id
-		let id = updates.id;
 		// Store the commit in an Arc
 		let updates = Arc::new(updates);
-		// Get the database transaction merge queue
+		// Get the database transaction commit queue
 		let queue = &self.database.transaction_commit_queue;
-		// Loop until the atomic operation is successful
+		// Claim a unique commit slot from the allocation counter. A dense
+		// claim is always unique, so no collision retry is needed, unlike
+		// probing a queue whose entries can be removed and (if probed by
+		// value) re-claimed out from under a slow concurrent committer.
+		let slot = self.database.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1;
+		// Insert the commit entry at the claimed slot
+		let entry = queue.get_or_insert_with(slot, || Arc::clone(&updates));
+		// Publish strictly in claim order: wait until every lower slot
+		// has been published, then advance the inserted-prefix bound to
+		// cover our own. This is NOT purely a courtesy to others — a
+		// subsequent transaction on this same thread relies on being
+		// able to see this commit's effects via the published bound
+		// alone (it has no other source of "how recent" information),
+		// so our own slot must be reflected before we return.
 		loop {
-			// Get the current commit queue number
-			let version = self.database.transaction_commit_id.load(Ordering::Acquire) + 1;
-			// Insert into the queue if the number is the same
-			let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
-			// Check if the entry was inserted correctly
-			if id == entry.value().id {
-				self.database.transaction_commit_id.fetch_add(1, Ordering::SeqCst);
-				return (version, entry.value().clone());
+			// Reload the current bound rather than retrying a fixed CAS:
+			// a concurrent opportunistic helper (`try_advance_commit_prefix`,
+			// used by the cleanup/GC paths) can advance this same bound on
+			// our behalf once our entry is inserted, using only presence
+			// in the queue as its criterion. If we kept retrying a stale
+			// `compare_exchange(slot - 1, slot)` after that happens, the
+			// bound can never return to `slot - 1` (it is monotonic), so
+			// our CAS would never succeed again — a livelock. Treat the
+			// bound already having reached our slot as success.
+			let cur = self.database.transaction_commit_id.load(Ordering::SeqCst);
+			if cur >= slot {
+				return (slot, entry.value().clone());
+			}
+			if cur == slot - 1
+				&& self
+					.database
+					.transaction_commit_id
+					.compare_exchange_weak(cur, slot, Ordering::SeqCst, Ordering::Acquire)
+					.is_ok()
+			{
+				return (slot, entry.value().clone());
 			}
 			// Ensure the thread backs off when under contention
 			backoff(spins);
@@ -2194,27 +2278,27 @@ impl TransactionInner {
 		let oracle = self.database.oracle.clone();
 		// Get the database transaction merge queue
 		let queue = &self.database.transaction_merge_queue;
-		// Claim a unique merge version from the allocation counter. The
-		// claim must NOT come from probing merge-queue slots: entries are
-		// removed from the queue once applied, and a slow concurrent
-		// committer could re-claim the vacated slot — minting the same
-		// version twice and overwriting a committed value in the chain.
+		// Claim a unique merge version from the allocation counter. See
+		// the equivalent comment in `atomic_commit`: a dense claim is
+		// always unique, so no collision retry is needed.
 		let version = oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
-		// Insert the merge entry at the claimed version, before the
-		// version is published: readers snapshot from `timestamp`, so a
-		// published version must imply its merge entry is visible in the
-		// queue (or already applied).
+		// Insert the merge entry at the claimed version
 		let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
-		// Publish strictly in claim order: wait until every lower version
-		// has been published, then advance the clock to ours. In-order
-		// publication gives readers a complete prefix — a snapshot at `v`
-		// covers every merge `<= v` with no holes.
+		// Publish strictly in claim order — see the equivalent comment
+		// in `atomic_commit` for why this must cover our own version
+		// before we return, and why we reload rather than retry a fixed
+		// CAS (a concurrent `try_advance_merge_clock` call can publish
+		// our version on our behalf).
 		loop {
-			// Attempt to advance the published clock from our predecessor
-			if oracle
-				.timestamp
-				.compare_exchange_weak(version - 1, version, Ordering::SeqCst, Ordering::Acquire)
-				.is_ok()
+			let cur = oracle.timestamp.load(Ordering::SeqCst);
+			if cur >= version {
+				return (version, entry.value().clone());
+			}
+			if cur == version - 1
+				&& oracle
+					.timestamp
+					.compare_exchange_weak(cur, version, Ordering::SeqCst, Ordering::Acquire)
+					.is_ok()
 			{
 				return (version, entry.value().clone());
 			}
@@ -2228,7 +2312,7 @@ impl TransactionInner {
 
 /// Progressive backoff strategy for contention in atomic queues.
 #[inline(always)]
-fn backoff(spins: usize) {
+pub(crate) fn backoff(spins: usize) {
 	if spins < 10 {
 		std::hint::spin_loop();
 	} else {
@@ -2240,6 +2324,28 @@ fn backoff(spins: usize) {
 		}
 		#[cfg(target_arch = "wasm32")]
 		std::hint::spin_loop();
+	}
+}
+
+/// Runs a completion action when dropped while still armed.
+///
+/// Used by the commit path to guarantee forward progress of the
+/// contiguous commit and merge watermarks when a transaction unwinds
+/// mid-commit: an abandoned in-flight queue entry would otherwise wedge
+/// the prefix forever. Disarmed on the success path once the completion
+/// has been performed explicitly.
+struct OnUnwind<F: FnMut()> {
+	/// The completion action to run on an armed drop
+	action: F,
+	/// Whether the action still needs to run
+	armed: bool,
+}
+
+impl<F: FnMut()> Drop for OnUnwind<F> {
+	fn drop(&mut self) {
+		if self.armed {
+			(self.action)();
+		}
 	}
 }
 

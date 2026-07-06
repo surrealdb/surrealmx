@@ -514,11 +514,15 @@ impl Persistence {
 		// strictly above every persisted version. Both the allocation
 		// counter and the published clock are seeded: the next claim
 		// takes max_version + 1, and its in-order publication advances
-		// the clock from max_version. This runs before any transaction
-		// or background worker exists; fetch_max is used for safety
-		// under refactoring rather than necessity.
+		// the clock from max_version. The merge retirement watermark is
+		// seeded identically so its in-order advance starts at the first
+		// live merge version rather than walking the persisted range.
+		// This runs before any transaction or background worker exists;
+		// fetch_max is used for safety under refactoring rather than
+		// necessity.
 		self.inner.oracle.alloc.fetch_max(max_version, Ordering::SeqCst);
 		self.inner.oracle.timestamp.fetch_max(max_version, Ordering::SeqCst);
+		self.inner.merge_retire_id.fetch_max(max_version, Ordering::SeqCst);
 		// Return success
 		Ok(())
 	}

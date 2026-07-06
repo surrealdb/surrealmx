@@ -26,7 +26,9 @@ impl From<Version> for Versions {
 }
 
 impl Versions {
-	/// Create a new versions object.
+	/// Create a new versions object. Only the persistence loader builds
+	/// chains incrementally, so this is unused on wasm targets.
+	#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 	#[inline]
 	pub(crate) fn new() -> Self {
 		Versions {
@@ -35,6 +37,14 @@ impl Versions {
 	}
 
 	/// Appends or inserts an element into its sorted position.
+	///
+	/// Entries are NEVER deduplicated by value across different versions:
+	/// versions can arrive out of order (concurrent commit applies, and
+	/// append-only log replay, both race), so dropping a strictly-newer
+	/// version because its value matches an older neighbour silently loses
+	/// the write once an intermediate version is inserted between them.
+	/// Only pushes of the SAME version are collapsed, which keeps replay
+	/// idempotent.
 	#[inline]
 	pub(crate) fn push(&mut self, value: Version) {
 		// Fast path: check if appending to the end
@@ -42,11 +52,8 @@ impl Versions {
 			// Compare the new value with the last value
 			match value.version.cmp(&last.version) {
 				std::cmp::Ordering::Greater => {
-					// Newer version - append if value is different
-					if value.value != last.value {
-						self.inner.push(value);
-					}
-					// Same value, ignore duplicate
+					// Newer version - append
+					self.inner.push(value);
 					return;
 				}
 				std::cmp::Ordering::Equal => {
@@ -62,7 +69,8 @@ impl Versions {
 				}
 			}
 		} else {
-			// Empty list - push if not a delete
+			// Empty list - push if not a delete. An initial delete is
+			// ignored: an absent prefix already reads as `None`.
 			if value.value.is_some() {
 				self.inner.push(value);
 			}
@@ -91,17 +99,13 @@ impl Versions {
 	///
 	/// This function works in the following way:
 	/// - Return IndexOrUpdate::Ignore if:
-	///   - The latest entry with a version <= value.version has the same value
-	///     as the new value
-	///   - The latest entry with a version <= value.version is a delete and the
-	///     new value is a delete
+	///   - There is no entry with a version <= value.version and the new
+	///     value is a delete (an absent prefix already reads as `None`)
 	/// - Return IndexOrUpdate::Update(version) if:
 	///   - The new value version is the same as an existing version and we
 	///     should update the entry
 	/// - Return IndexOrUpdate::Index(index) if:
-	///   - There is no entry with a version <= value.version
-	///   - The new value version is different to the latest entry with a
-	///     version <= value.version
+	///   - The entry belongs at any other sorted position
 	#[inline]
 	pub(crate) fn fetch_index_or_update(&mut self, value: &Version) -> IndexOrUpdate<'_> {
 		// Find the index of the item where item.version <= value.version
@@ -127,12 +131,8 @@ impl Versions {
 				// Same version, different value - update
 				return IndexOrUpdate::Update(existing);
 			}
-			// Different version - check if values are the same
-			if existing.value == value.value {
-				// Latest entry has the same value - ignore
-				return IndexOrUpdate::Ignore;
-			}
-			// Different version, different value - insert
+			// Different version - insert in sorted position. No value
+			// deduplication here: see the `push` doc comment.
 			return IndexOrUpdate::Index(idx);
 		}
 		// Fallback - should not reach here
@@ -624,15 +624,17 @@ mod tests {
 		// Push first version
 		versions.push(make_version(10, Some("v1")));
 		assert_eq!(versions.inner.len(), 1);
-		// Push same value at newer version - should be skipped
+		// Push same value at newer version - kept: value deduplication
+		// across versions is unsound under out-of-order insertion (a
+		// later insert between the two would silently lose this write)
 		versions.push(make_version(20, Some("v1")));
-		assert_eq!(versions.inner.len(), 1);
+		assert_eq!(versions.inner.len(), 2);
 		// Push different value - should be added
 		versions.push(make_version(30, Some("v2")));
-		assert_eq!(versions.inner.len(), 2);
-		// Push same value again - should be skipped
+		assert_eq!(versions.inner.len(), 3);
+		// Push same value again - kept
 		versions.push(make_version(40, Some("v2")));
-		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.inner.len(), 4);
 	}
 
 	#[test]
@@ -709,9 +711,11 @@ mod tests {
 		let mut versions = Versions::new();
 		versions.push(make_version(10, Some("v1")));
 		versions.push(make_version(20, Some("v2")));
-		// Fast path: append with same value as last - should be ignored
+		// Fast path: append with same value as last - kept as its own
+		// version (cross-version value deduplication is unsound under
+		// out-of-order insertion)
 		versions.push(make_version(30, Some("v2")));
-		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.inner.len(), 3);
 		assert_eq!(versions.fetch_version(30), Some(Bytes::from("v2".to_string())));
 	}
 
@@ -856,11 +860,11 @@ mod tests {
 		versions.push(make_version(10, Some("v1")));
 		// Push delete at version 20
 		versions.push(make_version(20, None));
-		// Push another delete at version 30 (different from last value which is None)
+		// Push another delete at version 30 - kept as its own version
 		versions.push(make_version(30, None));
 
-		// Should only have 2 entries - version 20 and 30 deletes should be separate
-		assert_eq!(versions.inner.len(), 2);
+		// All three entries are retained
+		assert_eq!(versions.inner.len(), 3);
 		assert!(!versions.exists_version(20));
 		assert!(!versions.exists_version(30));
 	}

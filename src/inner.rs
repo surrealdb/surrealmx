@@ -34,6 +34,14 @@ use std::thread::JoinHandle;
 /// can never reach this value.
 pub(crate) const SLOT_PINNING: u64 = u64::MAX;
 
+/// Sentinel stored in a commit-queue entry's `merge_version` when the
+/// owning transaction unwound without completing its commit. An aborted
+/// entry counts as complete for the commit-watermark advance (its writes
+/// will never be published) and is skipped by the conflict loop. Real
+/// merge versions are guarded at load time and can never reach this
+/// value.
+pub(crate) const COMMIT_ABORTED: u64 = u64::MAX;
+
 /// A pinned transaction registration.
 ///
 /// A slot is inserted into [`Inner::readers`] with both fields holding
@@ -87,15 +95,46 @@ pub struct Inner {
 	/// watermark published its merge version before the watermark
 	/// advanced past it, so a reader's version snapshot (loaded after
 	/// its commit snapshot) always covers its entire excluded prefix.
+	/// Bounded by, and advanced only after, `transaction_commit_id`.
 	pub(crate) commit_watermark: AtomicU64,
-	/// The transaction commit queue attempt sequence number
+	/// The commit-queue slot allocation counter. Slots are claimed from
+	/// here (dense and never re-used) rather than by probing queue
+	/// membership, because commit entries are removed on conflict aborts
+	/// and by cleanup, and a re-claimed vacated slot could sit below the
+	/// completed watermark with an unpublished merge version.
 	pub(crate) transaction_queue_id: AtomicU64,
-	/// The transaction commit queue success sequence number
+	/// The contiguous inserted prefix of the commit queue: every slot at
+	/// or below this value has definitely been inserted into
+	/// `transaction_commit_queue`. Advanced opportunistically by
+	/// [`Inner::try_advance_commit_prefix`] — no committer waits for it
+	/// to reach their own slot, they merely try to help it along after
+	/// their own insert. This is safe only because a commit-queue entry
+	/// is never physically removed before this bound has confirmably
+	/// passed it: a missing entry at the very next unadvanced slot can
+	/// therefore only mean "not yet inserted", never "removed early" —
+	/// see the conflict-abort branches in `TransactionInner::commit`,
+	/// which mark an aborted entry rather than removing it, leaving
+	/// physical removal to `cleanup_commit_queue` once the entry is
+	/// safely below this bound.
 	pub(crate) transaction_commit_id: AtomicU64,
 	/// The transaction commit queue list of modifications
 	pub(crate) transaction_commit_queue: SkipMap<u64, Arc<Commit>>,
 	/// Transaction updates which are committed but not yet applied
 	pub(crate) transaction_merge_queue: SkipMap<u64, Arc<Merge>>,
+	/// The contiguous retired prefix of the merge queue: every merge
+	/// version at or below this watermark has been fully applied to the
+	/// datastore and its queue entry removed. Merge entries are retired
+	/// strictly in version order — never individually on completion —
+	/// because reads resolve the queue overlay with priority over the
+	/// datastore chain: if a newer version's entry were removed while an
+	/// older version was still applying, a reader would find the older
+	/// surviving entry and return a stale value for a snapshot that
+	/// should see the newer one. In-order retirement guarantees every
+	/// version above the watermark is still present in the queue, so the
+	/// newest overlay hit at or below a snapshot is the newest write.
+	/// Bounded by, and advanced only after, the published merge clock
+	/// (`oracle.timestamp`).
+	pub(crate) merge_retire_id: AtomicU64,
 	/// Optional persistence handler
 	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) persistence: RwLock<Option<Arc<Persistence>>>,
@@ -124,6 +163,7 @@ impl Inner {
 			transaction_commit_id: AtomicU64::new(0),
 			transaction_commit_queue: SkipMap::new(),
 			transaction_merge_queue: SkipMap::new(),
+			merge_retire_id: AtomicU64::new(0),
 			#[cfg(not(target_arch = "wasm32"))]
 			persistence: RwLock::new(None),
 			background_threads_enabled: AtomicBool::new(true),
@@ -168,6 +208,11 @@ impl Inner {
 	/// its own slot until drop, so its conflict-check iteration is
 	/// protected identically.
 	pub(crate) fn cleanup_commit_queue(&self) {
+		// Give the opportunistic watermarks a chance to catch up before
+		// computing the trim bound: this call is infrequent (background
+		// worker or manual), so the extra freshness is cheap here even
+		// though it is deliberately skipped on the hot commit path.
+		self.refresh_commit_watermark();
 		// Load the idle-database bound before the fence-and-scan
 		let fallback = self.transaction_commit_id.load(Ordering::SeqCst);
 		// Bound by the earliest registered transaction, if any
@@ -212,6 +257,12 @@ impl Inner {
 	/// A bounded number of retries absorbs the nanosecond-scale window
 	/// in which a registering transaction is still pinning.
 	pub(crate) fn compute_cleanup_ts(&self) -> Option<u64> {
+		// Retire whatever merge-queue entries are already fully applied
+		// before computing the bound; see the equivalent call in
+		// `cleanup_commit_queue`. The publish step itself is no longer
+		// opportunistic (see `TransactionInner::atomic_merge`), so this
+		// exists to free retired entries, not to advance the clock.
+		self.refresh_merge_watermark();
 		// Retry a bounded number of times while registrations are pinning
 		for _ in 0..3 {
 			// Load the clock bound before the fence-and-scan
@@ -227,23 +278,134 @@ impl Inner {
 		None
 	}
 
+	/// Opportunistically advance the contiguous inserted prefix of the
+	/// commit queue as far as currently possible.
+	///
+	/// Non-blocking: unlike a claim-order publish barrier that makes a
+	/// committer wait for its predecessor, this never waits for a
+	/// specific slot to be inserted — it walks forward while the next
+	/// slot is present, and stops the instant it finds a gap (a slot
+	/// that has been claimed via `transaction_queue_id` but not yet
+	/// inserted), leaving that gap for a later call — from the slow
+	/// claimant's own insert, from another committer's courtesy call, or
+	/// from cleanup's/GC's opportunistic refresh — to close. The caller
+	/// never needs its own slot reflected in this bound before
+	/// proceeding: see the doc comment on `transaction_commit_id` for
+	/// why "absent" unambiguously means "not yet inserted" here, and why
+	/// every downstream consumer of a lagging value stays safe (
+	/// `cleanup_commit_queue`'s idle fallback only trims less;
+	/// `advance_commit_watermark`'s loop bound only holds
+	/// `commit_watermark` back, never advances it past an unconfirmed
+	/// slot).
+	pub(crate) fn try_advance_commit_prefix(&self) {
+		let mut spins = 0;
+		loop {
+			// Load the current bound and the claimed-slot ceiling
+			let cur = self.transaction_commit_id.load(Ordering::SeqCst);
+			let next = cur + 1;
+			// Nothing has claimed this slot yet
+			if next > self.transaction_queue_id.load(Ordering::SeqCst) {
+				break;
+			}
+			// Claimed but not yet inserted: stop, don't wait for it
+			if self.transaction_commit_queue.get(&next).is_none() {
+				break;
+			}
+			// Advance by one step; on CAS failure another caller advanced
+			// past us, so reload and continue from the fresh bound. Back
+			// off on contention: a caller of this function (e.g. a
+			// cleanup sweep with no delay between iterations) can end up
+			// calling it far more often than intended, and an
+			// unconditional `continue` here would otherwise hammer this
+			// cache line against every other thread doing the same.
+			if self
+				.transaction_commit_id
+				.compare_exchange_weak(cur, next, Ordering::SeqCst, Ordering::SeqCst)
+				.is_err()
+			{
+				crate::tx::backoff(spins);
+				spins += 1;
+				continue;
+			}
+		}
+	}
+
+	/// Opportunistically advance the published merge clock as far as
+	/// currently possible. See [`Inner::try_advance_commit_prefix`] for
+	/// the non-blocking shape; the same safety argument applies with
+	/// `oracle.alloc` in place of `transaction_queue_id` and
+	/// `transaction_merge_queue` in place of the commit queue — a merge
+	/// entry is likewise never physically removed (by ordinary
+	/// retirement, which is bounded by this very clock, or by the
+	/// persistence-failure path, which marks rather than removes) before
+	/// the clock has confirmably passed it.
+	pub(crate) fn try_advance_merge_clock(&self) {
+		let mut spins = 0;
+		loop {
+			let cur = self.oracle.timestamp.load(Ordering::SeqCst);
+			let next = cur + 1;
+			if next > self.oracle.alloc.load(Ordering::SeqCst) {
+				break;
+			}
+			if self.transaction_merge_queue.get(&next).is_none() {
+				break;
+			}
+			// Back off on contention — see the equivalent comment in
+			// `try_advance_commit_prefix`.
+			if self
+				.oracle
+				.timestamp
+				.compare_exchange_weak(cur, next, Ordering::SeqCst, Ordering::SeqCst)
+				.is_err()
+			{
+				crate::tx::backoff(spins);
+				spins += 1;
+				continue;
+			}
+		}
+	}
+
+	/// Opportunistically advance both the inserted-prefix bound and the
+	/// completed-prefix watermark of the commit queue as far as
+	/// currently possible. Called by writers after their own commit-slot
+	/// insert to help other in-flight committers make progress, and by
+	/// the cleanup path before computing its trim bound, for freshness.
+	pub(crate) fn refresh_commit_watermark(&self) {
+		self.try_advance_commit_prefix();
+		self.advance_commit_watermark();
+	}
+
+	/// Opportunistically advance both the published merge clock and the
+	/// retired prefix of the merge queue as far as currently possible.
+	/// Called by writers after their own merge insert, and by the
+	/// garbage-collection path before computing its cleanup bound.
+	pub(crate) fn refresh_merge_watermark(&self) {
+		self.try_advance_merge_clock();
+		self.advance_merge_retirement();
+	}
+
 	/// Advance the contiguous completed prefix of the commit queue.
 	///
 	/// Called by every committer once its commit-queue entry completes:
-	/// either its merge version has been published, or it aborted and
-	/// removed its entry (a missing entry at or below the current commit
-	/// id therefore counts as complete — aborted-and-removed, or already
-	/// trimmed by cleanup). The watermark is the value readers snapshot
-	/// as their conflict-window base, so it must only ever cover commits
-	/// whose merge versions are already published. Amortised O(1): every
-	/// slot is stepped over exactly once across all callers, and the CAS
-	/// simply resolves which caller performs each step.
+	/// its merge version has been published, it aborted on a conflict and
+	/// removed its entry, or it unwound and its guard marked the entry
+	/// [`COMMIT_ABORTED`]. Commit slots are claimed from a dense allocator
+	/// and `transaction_commit_id` is published strictly in claim order
+	/// once the entry is inserted, so every slot at or below it was
+	/// inserted exactly once and can never be re-claimed — a missing
+	/// entry therefore only ever means aborted-and-removed or already
+	/// trimmed by cleanup, both of which count as complete. The watermark
+	/// is the value readers snapshot as their conflict-window base, so it
+	/// must only ever cover commits whose merge versions are published or
+	/// which will never publish one. Amortised O(1): every slot is
+	/// stepped over exactly once across all callers, and the CAS simply
+	/// resolves which caller performs each step.
 	pub(crate) fn advance_commit_watermark(&self) {
 		loop {
-			// Load the current watermark and the claimed commit ids
+			// Load the current watermark and the inserted prefix bound
 			let wm = self.commit_watermark.load(Ordering::SeqCst);
 			let next = wm + 1;
-			// Stop at the end of the claimed commit id range
+			// Stop at the end of the inserted commit slot prefix
 			if next > self.transaction_commit_id.load(Ordering::SeqCst) {
 				break;
 			}
@@ -263,6 +425,40 @@ impl Inner {
 				Ordering::SeqCst,
 				Ordering::SeqCst,
 			);
+		}
+	}
+
+	/// Advance the contiguous retired prefix of the merge queue, removing
+	/// entries as the watermark passes them.
+	///
+	/// Called by every committer once its merge entry is fully applied to
+	/// the datastore. Entries are removed strictly in version order (see
+	/// the `merge_retire_id` field documentation): the bound is the
+	/// published clock, below which every version's entry was inserted,
+	/// and a missing entry means it was already retired by a racer or
+	/// removed early on the persistence-failure path — in either case its
+	/// data is in the datastore chains, so the watermark may pass it.
+	pub(crate) fn advance_merge_retirement(&self) {
+		loop {
+			// Load the current watermark and the published prefix bound
+			let wm = self.merge_retire_id.load(Ordering::SeqCst);
+			let next = wm + 1;
+			// Stop at the end of the published merge version prefix
+			if next > self.oracle.timestamp.load(Ordering::SeqCst) {
+				break;
+			}
+			// Check whether the next merge in sequence has been applied
+			if let Some(entry) = self.transaction_merge_queue.get(&next) {
+				if !entry.value().applied.load(Ordering::SeqCst) {
+					break;
+				}
+				// Remove the applied entry as the watermark passes it
+				entry.remove();
+			}
+			// Advance by one step; on CAS failure another caller advanced
+			// past us, so reload and continue from the fresh watermark
+			let _ =
+				self.merge_retire_id.compare_exchange(wm, next, Ordering::SeqCst, Ordering::SeqCst);
 		}
 	}
 

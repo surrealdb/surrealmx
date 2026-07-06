@@ -1189,10 +1189,16 @@ mod tests {
 			crate::DatabaseOptions::default().with_all_workers_disabled(),
 		);
 		// Simulate a datastore seeded from files written by a release
-		// which minted wall-clock nanosecond versions.
+		// which minted wall-clock nanosecond versions. Real persistence
+		// load seeds all three counters together (see
+		// `Persistence::load`); seeding only the clock and leaving
+		// `merge_retire_id` at its unseeded default would make the
+		// opportunistic retirement walk cross an astronomical gap one
+		// step at a time.
 		let seed = 1_700_000_000_000_000_000u64;
 		db.oracle.alloc.store(seed, std::sync::atomic::Ordering::SeqCst);
 		db.oracle.timestamp.store(seed, std::sync::atomic::Ordering::SeqCst);
+		db.merge_retire_id.store(seed, std::sync::atomic::Ordering::SeqCst);
 		let mut tx = db.transaction(true);
 		tx.set("key", "value").unwrap();
 		tx.commit().unwrap();
