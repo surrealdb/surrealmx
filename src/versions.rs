@@ -203,10 +203,20 @@ impl Versions {
 		}
 	}
 
-	/// Get all versions as a vector of (version, value) tuples.
+	/// The newest committed version and value for this key, or `None` when
+	/// the chain is empty or its newest entry is a delete tombstone. Used
+	/// by the snapshot writers, which persist only the latest visible
+	/// state.
+	#[cfg(not(target_arch = "wasm32"))]
 	#[inline]
-	pub(crate) fn all_versions(&self) -> Vec<(u64, Option<Bytes>)> {
-		self.inner.iter().map(|v| (v.version, v.value.clone())).collect()
+	pub(crate) fn latest(&self) -> Option<(u64, Bytes)> {
+		self.inner.last().and_then(|v| v.value.clone().map(|value| (v.version, value)))
+	}
+
+	/// Test-only view of the raw version chain, oldest first.
+	#[cfg(test)]
+	pub(crate) fn as_slice(&self) -> &[Version] {
+		&self.inner
 	}
 
 	/// Remove versions that no reader at a snapshot `>= version` can observe.

@@ -60,13 +60,6 @@ impl Oracle {
 		Arc::new(oracle)
 	}
 
-	/// Returns the current timestamp for this oracle
-	#[cfg(test)]
-	#[inline]
-	pub fn current_timestamp(&self) -> u64 {
-		self.inner.timestamp.load(Ordering::Acquire)
-	}
-
 	/// Gets the current system time in nanoseconds since the Unix epoch
 	#[inline]
 	pub(crate) fn current_unix_ns() -> u64 {

@@ -2,7 +2,10 @@
 
 use bytes::Bytes;
 use std::time::Duration;
-use surrealmx::{AolMode, Database, DatabaseOptions, FsyncMode, PersistenceOptions, SnapshotMode};
+use surrealmx::{
+	AolMode, CompressionMode, Database, DatabaseOptions, FsyncMode, PersistenceOptions,
+	SnapshotMode,
+};
 use tempfile::TempDir;
 
 #[test]
@@ -733,4 +736,123 @@ fn test_readonly_operations_no_persistence() {
 		assert_eq!(metadata.len(), 0, "AOL file should be empty after read-only operations");
 	}
 	assert!(!snapshot_path.exists(), "Snapshot file should not exist after read-only operations");
+}
+
+#[test]
+fn test_snapshot_persists_only_latest_version() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	// Configure manual snapshots without compression, so the snapshot
+	// file can be decoded directly as a plain bincode stream
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::Never)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_compression(CompressionMode::None);
+
+	// Write three versions of one key, and create-then-delete another
+	{
+		let db =
+			Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap();
+		for val in ["v1", "v2", "v3"] {
+			let mut tx = db.transaction(true);
+			tx.set("alpha", val).unwrap();
+			tx.commit().unwrap();
+		}
+		{
+			let mut tx = db.transaction(true);
+			tx.set("beta", "temporary").unwrap();
+			tx.commit().unwrap();
+		}
+		{
+			let mut tx = db.transaction(true);
+			tx.del("beta").unwrap();
+			tx.commit().unwrap();
+		}
+		// Take a manual snapshot
+		db.persistence().unwrap().snapshot().unwrap();
+	}
+
+	// Decode the snapshot file directly: every entry holds exactly one
+	// version with a value, and the deleted key is absent entirely
+	let file = std::fs::File::open(temp_path.join("snapshot.bin")).unwrap();
+	let mut reader = std::io::BufReader::new(file);
+	let mut entries = Vec::new();
+	loop {
+		type Entry = (Bytes, Vec<(u64, Option<Bytes>)>);
+		let result: Result<Entry, _> =
+			bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard());
+		match result {
+			Ok(entry) => entries.push(entry),
+			Err(bincode::error::DecodeError::Io {
+				inner,
+				..
+			}) if inner.kind() == std::io::ErrorKind::UnexpectedEof => break,
+			Err(e) => panic!("snapshot decode failed: {e}"),
+		}
+	}
+	assert!(!entries.is_empty(), "snapshot should contain entries");
+	for (key, versions) in &entries {
+		assert_eq!(versions.len(), 1, "entry for {key:?} should hold exactly one version");
+		assert!(versions[0].1.is_some(), "entry for {key:?} should hold a value");
+		assert_ne!(key.as_ref(), b"beta", "deleted key should be absent from the snapshot");
+	}
+	let alpha = entries.iter().find(|(k, _)| k.as_ref() == b"alpha").expect("alpha missing");
+	assert_eq!(alpha.1[0].1.as_deref(), Some(b"v3" as &[u8]));
+
+	// Reopen from the snapshot and verify the observable state
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::Never)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_compression(CompressionMode::None);
+	let db = Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap();
+	let mut tx = db.transaction(false);
+	assert_eq!(tx.get("alpha").unwrap(), Some(Bytes::from("v3")));
+	assert_eq!(tx.get("beta").unwrap(), None);
+	tx.cancel().unwrap();
+}
+
+#[test]
+fn test_loads_multiversion_snapshot_files() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	// Hand-write a snapshot file in the format produced by releases which
+	// persisted the full version chain per key: one key with a
+	// multi-version chain, and one key whose newest entry is a delete
+	// tombstone. Loading must surface only the newest value of the first
+	// key, and treat the second as absent.
+	{
+		let file = std::fs::File::create(temp_path.join("snapshot.bin")).unwrap();
+		let mut writer = std::io::BufWriter::new(file);
+		let multi: (Bytes, Vec<(u64, Option<Bytes>)>) = (
+			Bytes::from("multi"),
+			vec![
+				(1, Some(Bytes::from("v1"))),
+				(2, Some(Bytes::from("v2"))),
+				(3, Some(Bytes::from("v3"))),
+			],
+		);
+		let gone: (Bytes, Vec<(u64, Option<Bytes>)>) =
+			(Bytes::from("gone"), vec![(1, Some(Bytes::from("x"))), (2, None)]);
+		bincode::serde::encode_into_std_write(&multi, &mut writer, bincode::config::standard())
+			.unwrap();
+		bincode::serde::encode_into_std_write(&gone, &mut writer, bincode::config::standard())
+			.unwrap();
+		use std::io::Write;
+		writer.flush().unwrap();
+	}
+
+	// Open a database over the hand-written snapshot
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::Never)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_compression(CompressionMode::None);
+	let db = Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap();
+	let mut tx = db.transaction(false);
+	assert_eq!(tx.get("multi").unwrap(), Some(Bytes::from("v3")));
+	assert_eq!(tx.get("gone").unwrap(), None);
+	tx.cancel().unwrap();
 }

@@ -298,9 +298,13 @@ fn cursor_seek_at_prefix_boundary() {
 	tx.cancel().unwrap();
 }
 
+/// Repeated writes to prefix-sharing keys: the latest round is visible on
+/// every key. (Raw version-chain accumulation is asserted by the
+/// `test_version_chain_accumulates_repeated_writes` unit test, which
+/// inspects the chains directly.)
 #[test]
-fn versioning_under_repeated_writes_shared_prefix() {
-	let db = Database::new().with_gc_history(std::time::Duration::from_secs(60));
+fn repeated_writes_shared_prefix_latest_visible() {
+	let db = Database::new();
 	// Five writes per key, on 200 prefix-sharing keys
 	for round in 0..5 {
 		let mut tx = db.transaction(true);
@@ -318,9 +322,6 @@ fn versioning_under_repeated_writes_shared_prefix() {
 	for (i, (_, v)) in res.iter().enumerate() {
 		assert_eq!(v.as_ref(), format!("round4-i{i}").as_bytes());
 	}
-	// scan_all_versions sees the full chain (5 versions × 200 keys = 1000)
-	let all = tx.scan_all_versions(lo..hi.as_slice(), None, None).unwrap();
-	assert_eq!(all.len(), 1_000);
 	tx.cancel().unwrap();
 }
 

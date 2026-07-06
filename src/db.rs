@@ -28,6 +28,7 @@ use crate::tx::Transaction;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 // --------------------------------------------------
@@ -160,38 +161,6 @@ impl Database {
 		}
 		// Return the database
 		Ok(db)
-	}
-
-	/// Configure the database to use immediate garbage collection.
-	///
-	/// In this mode, old MVCC transaction entries are cleaned up
-	/// during transaction commits as soon as they are no longer
-	/// needed by any active read transactions. This ensures minimal
-	/// memory usage while maintaining correctness for concurrent
-	/// transactions. Additionally, if [`DatabaseOptions::enable_gc`]
-	/// is set, a background thread will periodically clean up any
-	/// stale versions.
-	pub fn with_gc(self) -> Self {
-		// Store the garbage collection epoch
-		*self.garbage_collection_epoch.write() = None;
-		// Return the database
-		self
-	}
-
-	/// Configure the database to preserve versions for a specified duration.
-	///
-	/// In this mode, MVCC transaction entries are retained for at least
-	/// the specified duration, allowing point-in-time reads within that
-	/// window. Old versions are cleaned up during transaction commits
-	/// once they exceed the history duration and are no longer needed
-	/// by active transactions. Additionally, if [`DatabaseOptions::enable_gc`]
-	/// is set, a background thread will periodically clean up stale
-	/// versions across the entire datastore.
-	pub fn with_gc_history(self, history: Duration) -> Self {
-		// Store the garbage collection epoch
-		*self.garbage_collection_epoch.write() = Some(history);
-		// Return the database
-		self
 	}
 
 	/// Start a new transaction on this database

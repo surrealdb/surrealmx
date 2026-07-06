@@ -30,14 +30,11 @@ use surrealmx::{Database, DatabaseOptions};
 
 #[test]
 fn long_lived_read_transaction() {
-	let db = Arc::new(
-		Database::new_with_options(
-			DatabaseOptions::default()
-				.with_gc_interval(Duration::from_millis(50))
-				.with_cleanup_interval(Duration::from_millis(50)),
-		)
-		.with_gc(),
-	);
+	let db = Arc::new(Database::new_with_options(
+		DatabaseOptions::default()
+			.with_gc_interval(Duration::from_millis(50))
+			.with_cleanup_interval(Duration::from_millis(50)),
+	));
 
 	// Create initial data
 	{
@@ -173,8 +170,7 @@ fn transaction_after_gc() {
 		DatabaseOptions::default()
 			.with_gc_interval(Duration::from_millis(50))
 			.with_cleanup_interval(Duration::from_millis(50)),
-	)
-	.with_gc();
+	);
 
 	// Create data
 	{
