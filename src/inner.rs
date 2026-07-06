@@ -131,6 +131,33 @@ impl Inner {
 		earliest_active(&self.counter_by_commit, fallback)
 	}
 
+	/// Trim the transaction commit queue below the earliest active
+	/// transaction's commit snapshot, or below the current commit id when
+	/// no transaction is registered at all.
+	///
+	/// Commit queue entries are only ever read by conflict detection,
+	/// which scans `(tx.commit, version)` — strictly above the committing
+	/// transaction's registered snapshot — so entries at or below every
+	/// registered snapshot are unreachable.
+	///
+	/// The idle fallback is safe against concurrent registration because
+	/// the fallback is loaded from `transaction_commit_id` *before* the
+	/// counter map is scanned: a registering transaction that the scan
+	/// misses validates `transaction_commit_id` against its snapshot
+	/// *after* publishing its counter (see `register_counter`), so by
+	/// monotonicity of the commit id its snapshot is `>=` our fallback,
+	/// and its conflict window `(snapshot, ..)` is untouched by the trim.
+	pub(crate) fn run_cleanup_inner(&self) {
+		// Load the idle fallback BEFORE scanning the counter map (see above)
+		let fallback = self.transaction_commit_id.load(Ordering::SeqCst);
+		// Find the earliest registered commit snapshot, if any
+		let oldest = self.earliest_active_commit(fallback);
+		// Trim all commit queue entries below the watermark
+		self.transaction_commit_queue.range(..oldest).for_each(|e| {
+			e.remove();
+		});
+	}
+
 	/// Compute the next `cleanup_ts`, publishing it into `gc_floor` so
 	/// concurrent `register_counter` retries any reader whose snapshot
 	/// is below it, then re-scan to bound by any newly-arrived reader.

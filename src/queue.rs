@@ -26,14 +26,15 @@ use tracing::debug;
 pub struct Commit {
 	/// The unique id of this commit attempt
 	pub(crate) id: u64,
-	/// The local set of updates and deletes
-	pub(crate) writeset: Arc<BTreeMap<Bytes, Option<Bytes>>>,
+	/// The sorted keys of the local updates and deletes. Conflict
+	/// detection only ever inspects keys, so the values are
+	/// intentionally not stored here: a commit queue entry outlives
+	/// the corresponding merge queue entry (it is only trimmed later
+	/// by the cleanup worker), and holding the values would pin them
+	/// in memory for that entire window.
+	pub(crate) keys: Vec<Bytes>,
 	/// Bloom filter over writeset keys for fast conflict pre-checks
 	pub(crate) writeset_bloom: BloomFilter,
-	/// The smallest key in the writeset (for range overlap checks)
-	pub(crate) min_key: Bytes,
-	/// The largest key in the writeset (for range overlap checks)
-	pub(crate) max_key: Bytes,
 }
 
 /// A transaction entry in the transaction merge queue
@@ -45,6 +46,24 @@ pub struct Merge {
 }
 
 impl Commit {
+	/// The smallest key in the writeset (for range overlap checks)
+	#[inline]
+	fn min_key(&self) -> Option<&Bytes> {
+		self.keys.first()
+	}
+
+	/// The largest key in the writeset (for range overlap checks)
+	#[inline]
+	fn max_key(&self) -> Option<&Bytes> {
+		self.keys.last()
+	}
+
+	/// Returns true if the writeset contains the specified key
+	#[inline]
+	fn contains_key(&self, key: &Bytes) -> bool {
+		self.keys.binary_search(key).is_ok()
+	}
+
 	/// Returns true if self has no elements in common with other.
 	/// Uses a bloom filter for a fast pre-check before the exact intersection.
 	pub fn is_disjoint_readset_bloom(&self, other: &HashSet<Bytes>, bloom: &BloomFilter) -> bool {
@@ -54,7 +73,7 @@ impl Commit {
 		}
 		// Check writeset keys against the bloom filter first
 		let mut any_possible = false;
-		for key in self.writeset.keys() {
+		for key in self.keys.iter() {
 			if bloom.may_contain(key) {
 				any_possible = true;
 				break;
@@ -75,10 +94,10 @@ impl Commit {
 		// Check if the readset is not empty
 		if !other.is_empty() {
 			// Choose iteration direction based on size to minimize iterations
-			if other.len() < self.writeset.len() {
+			if other.len() < self.keys.len() {
 				// Check if any key in readset exists in the writeset
 				for key in other.iter() {
-					if self.writeset.contains_key(key) {
+					if self.contains_key(key) {
 						// Log the error for debug purposes
 						#[cfg(debug_assertions)]
 						debug!(target: LOG_TARGET_CONFLICTS, "KeyReadConflict involving {:?}", key);
@@ -87,7 +106,7 @@ impl Commit {
 				}
 			} else {
 				// Check if any key in writeset exists in the readset
-				for key in self.writeset.keys() {
+				for key in self.keys.iter() {
 					if other.contains(key) {
 						// Log the error for debug purposes
 						#[cfg(debug_assertions)]
@@ -106,12 +125,18 @@ impl Commit {
 	/// exact sorted merge.
 	pub fn is_disjoint_writeset_bloom(&self, other: &Arc<Commit>) -> bool {
 		// Fast path: check if the key ranges overlap at all
-		if self.max_key < other.min_key || other.max_key < self.min_key {
-			return true;
+		match (self.min_key(), self.max_key(), other.min_key(), other.max_key()) {
+			(Some(self_min), Some(self_max), Some(other_min), Some(other_max)) => {
+				if self_max < other_min || other_max < self_min {
+					return true;
+				}
+			}
+			// An empty writeset cannot conflict
+			_ => return true,
 		}
 		// Check our writeset keys against the other's bloom filter
 		let mut any_possible = false;
-		for key in self.writeset.keys() {
+		for key in self.keys.iter() {
 			if other.writeset_bloom.may_contain(key) {
 				any_possible = true;
 				break;
@@ -130,14 +155,18 @@ impl Commit {
 	/// check before iterating writeset keys for scan conflict detection.
 	pub fn may_overlap_range(&self, range_start: &Bytes, range_end: &Bytes) -> bool {
 		// Check if the writeset key range overlaps the scan range
-		self.min_key < *range_end && self.max_key >= *range_start
+		match (self.min_key(), self.max_key()) {
+			(Some(min_key), Some(max_key)) => min_key < range_end && max_key >= range_start,
+			// An empty writeset cannot overlap any range
+			_ => false,
+		}
 	}
 
 	/// Returns true if self has no elements in common with other
 	pub fn is_disjoint_writeset(&self, other: &Arc<Commit>) -> bool {
 		// Create a key iterator for each writeset
-		let mut a = self.writeset.keys();
-		let mut b = other.writeset.keys();
+		let mut a = self.keys.iter();
+		let mut b = other.keys.iter();
 		// Move to the next value in each iterator
 		let mut next_a = a.next();
 		let mut next_b = b.next();
