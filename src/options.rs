@@ -5,10 +5,11 @@ use std::time::Duration;
 pub(crate) const DEFAULT_RESET_THRESHOLD: usize = 100;
 
 /// Default interval at which the background garbage collection sweep is
-/// performed. Steady-state reclamation happens inline at commit time, so
-/// the background sweep is a low-frequency safety net for garbage which
-/// no future commit will visit: versions pinned by a since-departed
-/// reader on a key that is never written again.
+/// performed. Steady-state reclamation happens inline at commit time,
+/// and every chain a commit cannot trim to a single live value is
+/// tracked as a garbage candidate — so each background tick sweeps only
+/// the tracked keys, and its cost scales with the amount of
+/// reader-pinned garbage rather than the dataset size.
 pub(crate) const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Default interval at which transaction queue cleanup is performed.
@@ -19,12 +20,16 @@ pub(crate) const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
 pub struct DatabaseOptions {
 	/// Maximum number of transactions kept in the pool (default: 512).
 	pub pool_size: usize,
-	/// Whether the background garbage collection safety-net sweep is
-	/// started automatically (default: true). Steady-state reclamation
-	/// happens inline at commit time regardless of this setting.
+	/// Whether the background garbage collection sweep is started
+	/// automatically (default: true). Steady-state reclamation happens
+	/// inline at commit time regardless of this setting; the background
+	/// sweep reclaims the tracked leftovers — chains a commit could not
+	/// fully trim because a reader was pinning older versions.
 	pub enable_gc: bool,
-	/// Interval at which the garbage collection safety-net sweep wakes
-	/// up and performs a full datastore scan (default: 10 seconds).
+	/// Interval at which the garbage collection sweep wakes up and
+	/// visits the tracked garbage-candidate keys (default: 10 seconds).
+	/// A tick costs proportional to the number of tracked keys, not the
+	/// dataset size, so short intervals are affordable.
 	pub gc_interval: Duration,
 	/// Whether the cleanup worker is started automatically (default: true).
 	pub enable_cleanup: bool,
@@ -98,8 +103,8 @@ impl DatabaseOptions {
 
 	/// Configure for high-throughput scenarios with a larger transaction
 	/// pool and less-frequent background sweeps. Trades memory for
-	/// throughput: more dropped transactions are kept for reuse, and the
-	/// safety-net sweeper interrupts the foreground less often —
+	/// throughput: more dropped transactions are kept for reuse, and
+	/// reader-pinned garbage waits longer for its tracked sweep —
 	/// steady-state reclamation happens inline at commit time either way.
 	pub fn with_high_performance(mut self) -> Self {
 		self.pool_size *= 2;
@@ -120,11 +125,12 @@ impl DatabaseOptions {
 		self
 	}
 
-	/// Configure for memory-constrained scenarios: frequent safety-net
-	/// sweeps and a smaller transaction pool. Trades CPU for tighter
-	/// memory bounds — reader-pinned garbage is reclaimed sooner after
-	/// the reader departs, and fewer dropped transactions are kept
-	/// around for reuse.
+	/// Configure for memory-constrained scenarios: frequent tracked
+	/// sweeps and a smaller transaction pool. Reader-pinned garbage is
+	/// reclaimed sooner after the reader departs, and fewer dropped
+	/// transactions are kept around for reuse. Since a sweep visits only
+	/// the tracked candidate keys, the extra ticks cost little CPU even
+	/// on large datasets.
 	pub fn with_reduced_memory(mut self) -> Self {
 		self.pool_size /= 2;
 		self.gc_interval = Duration::from_secs(5);

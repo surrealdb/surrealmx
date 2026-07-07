@@ -232,6 +232,18 @@ impl Versions {
 		&self.inner
 	}
 
+	/// Whether a future garbage-collection pass could reclaim anything
+	/// from this chain. A chain is terminal — and reclamation-free — only
+	/// when it holds exactly one live value: superseded versions can be
+	/// dropped once no reader needs them, and a newest-entry tombstone
+	/// means the whole chain can collapse and the key unlink. Used by the
+	/// commit path to decide whether a key needs tracking for the
+	/// background sweep.
+	#[inline]
+	pub(crate) fn needs_gc(&self) -> bool {
+		self.inner.len() > 1 || self.inner.last().is_some_and(|v| v.value.is_none())
+	}
+
 	/// Remove versions that no reader at a snapshot `>= version` can observe.
 	///
 	/// `version` is the GC floor: no reader exists below it, but readers may

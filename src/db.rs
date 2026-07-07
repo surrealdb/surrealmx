@@ -180,17 +180,48 @@ impl Database {
 	/// Manually perform a full garbage collection sweep.
 	///
 	/// Steady-state reclamation happens inline at commit time: every
-	/// commit trims the chains it touches down to the current watermark.
-	/// This sweep is the safety net for garbage which no future commit
-	/// will visit — versions pinned by a since-departed reader on a key
-	/// that is never written again. It is useful when automatic
-	/// background GC is disabled via [`DatabaseOptions::enable_gc`], for
-	/// example on wasm targets, which have no background threads.
+	/// commit trims the chains it touches down to the current watermark,
+	/// and tracks any chain it could not fully trim for the targeted
+	/// sweep (see [`Database::run_gc_tracked`]). This full scan visits
+	/// every key regardless of tracking, so it also supersedes the
+	/// candidate set — the set is cleared before scanning, and commits
+	/// racing with the scan re-track their keys as usual. It is useful
+	/// when automatic background GC is disabled via
+	/// [`DatabaseOptions::enable_gc`], for example on wasm targets,
+	/// which have no background threads.
 	pub fn run_gc(&self) {
 		// Skip the pass entirely when registrations are in flight
 		if let Some(cleanup_ts) = self.compute_cleanup_ts() {
+			// The full scan visits every candidate anyway
+			self.gc_candidates.pin().clear();
 			// Perform a full datastore scan for stale versions
 			self.run_gc_full(cleanup_ts);
+		}
+	}
+
+	/// Manually sweep only the keys tracked as holding reclaimable
+	/// version garbage.
+	///
+	/// Commits track every chain they could not trim to a single live
+	/// value (older versions pinned by a reader, or a newest-entry
+	/// delete tombstone awaiting collapse), so this sweep's cost scales
+	/// with the amount of pinned garbage rather than the dataset size.
+	/// This is the pass the background garbage collector runs on every
+	/// tick; call it manually when background GC is disabled via
+	/// [`DatabaseOptions::enable_gc`], reserving the full-scan
+	/// [`Database::run_gc`] for occasional use.
+	pub fn run_gc_tracked(&self) {
+		// The steady state is an empty candidate set: skip the watermark
+		// computation (a fence and full slot scan) entirely when there
+		// is nothing to sweep. A key tracked concurrently with this
+		// check is picked up by the next pass.
+		if self.gc_candidates.pin().is_empty() {
+			return;
+		}
+		// Skip the pass entirely when registrations are in flight
+		if let Some(cleanup_ts) = self.compute_cleanup_ts() {
+			// Sweep only the tracked candidate keys
+			self.inner.run_gc_tracked(cleanup_ts);
 		}
 	}
 
@@ -272,11 +303,12 @@ impl Database {
 		if db.garbage_collection_handle.read().is_none() {
 			// Get the specified interval
 			let interval = self.gc_interval;
-			// Spawn a new thread to handle the periodic safety-net sweep.
-			// Steady-state reclamation happens inline at commit time, so
-			// this low-frequency full scan only collects garbage which no
-			// future commit will visit: versions pinned by a departed
-			// reader on a key that is never written again.
+			// Spawn a new thread to handle the periodic tracked sweep.
+			// Steady-state reclamation happens inline at commit time, and
+			// every chain a commit could not fully trim is tracked in the
+			// candidate set — so this sweep visits only tracked keys, and
+			// its cost scales with the amount of pinned garbage rather
+			// than the dataset size.
 			let handle = std::thread::spawn(move || {
 				// Check whether the garbage collection process is enabled
 				while db.background_threads_enabled.load(Ordering::Relaxed) {
@@ -285,6 +317,12 @@ impl Database {
 					// Check shutdown flag again after waking
 					if !db.background_threads_enabled.load(Ordering::Relaxed) {
 						break;
+					}
+					// The steady state is an empty candidate set: skip
+					// the watermark computation (a fence and full slot
+					// scan) entirely when there is nothing to sweep.
+					if db.gc_candidates.pin().is_empty() {
+						continue;
 					}
 					// Compute the next cleanup_ts by scanning the slot
 					// map: any transaction registering concurrently is
@@ -295,8 +333,8 @@ impl Database {
 					let Some(cleanup_ts) = db.compute_cleanup_ts() else {
 						continue;
 					};
-					// Perform the full datastore scan.
-					db.run_gc_full(cleanup_ts);
+					// Sweep only the tracked candidate keys.
+					db.run_gc_tracked(cleanup_ts);
 				}
 			});
 			// Store and track the thread handle
@@ -1338,8 +1376,8 @@ mod tests {
 	#[test]
 	fn safety_net_reclaims_after_reader_departs() {
 		// Garbage pinned by a reader on a key that is never written again
-		// is invisible to inline commit-time GC: this is exactly the
-		// scenario that justifies keeping the background full-scan sweep.
+		// is invisible to inline commit-time GC: the manual full scan
+		// must reclaim it just like the tracked sweep does.
 		let db = Database::new_with_options(
 			crate::DatabaseOptions::default().with_all_workers_disabled(),
 		);
@@ -1369,6 +1407,183 @@ mod tests {
 		let chain = guard.as_slice();
 		assert_eq!(chain.len(), 1, "the safety-net sweep should reclaim departed-reader garbage");
 		assert_eq!(chain[0].value.as_deref(), Some(b"v50" as &[u8]));
+	}
+
+	#[test]
+	fn tracked_sweep_reclaims_departed_reader_garbage() {
+		// The commit path tracks every chain it cannot trim to a single
+		// live value, so the targeted sweep must reclaim departed-reader
+		// garbage without a full datastore scan.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v0").unwrap();
+			tx.commit().unwrap();
+		}
+		// Pin the initial version while overwriting the key
+		let reader = db.transaction(false);
+		for i in 1..=50 {
+			let mut tx = db.transaction(true);
+			tx.set("key", format!("v{i}")).unwrap();
+			tx.commit().unwrap();
+		}
+		// The pinned overwrites must have tracked the key
+		assert!(
+			db.gc_candidates.pin().contains(b"key".as_slice()),
+			"a commit that leaves garbage should track its key"
+		);
+		// While the reader is pinned, the sweep trims what it can and
+		// keeps the key tracked for the next pass
+		db.run_gc_tracked();
+		{
+			let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+			assert!(entry.value().read().as_slice().len() > 1);
+			assert!(
+				db.gc_candidates.pin().contains(b"key".as_slice()),
+				"a still-pinned chain should stay tracked after a sweep"
+			);
+		}
+		// Once the reader departs, the tracked sweep finishes the job
+		drop(reader);
+		db.run_gc_tracked();
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+		let guard = entry.value().read();
+		let chain = guard.as_slice();
+		assert_eq!(chain.len(), 1, "the tracked sweep should reclaim departed-reader garbage");
+		assert_eq!(chain[0].value.as_deref(), Some(b"v50" as &[u8]));
+		drop(guard);
+		assert!(
+			!db.gc_candidates.pin().contains(b"key".as_slice()),
+			"a terminal chain should be untracked after the sweep"
+		);
+	}
+
+	#[test]
+	fn tracked_sweep_unlinks_pinned_tombstone() {
+		// A delete committed while a reader pins the prior value cannot
+		// collapse at commit time; the tracked sweep must unlink it after
+		// the reader departs.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "value").unwrap();
+			tx.commit().unwrap();
+		}
+		let reader = db.transaction(false);
+		{
+			let mut tx = db.transaction(true);
+			tx.del("key").unwrap();
+			tx.commit().unwrap();
+		}
+		// The pinned tombstone keeps the node linked and tracked
+		assert!(db.datastore.get(b"key".as_slice()).is_some());
+		assert!(db.gc_candidates.pin().contains(b"key".as_slice()));
+		// After the reader departs the sweep collapses and unlinks it
+		drop(reader);
+		db.run_gc_tracked();
+		assert!(
+			db.datastore.get(b"key".as_slice()).is_none(),
+			"the tracked sweep should unlink a departed-reader tombstone"
+		);
+		assert!(!db.gc_candidates.pin().contains(b"key".as_slice()));
+	}
+
+	#[test]
+	fn full_scan_supersedes_candidate_set() {
+		// The manual full scan visits every key, so it clears the
+		// candidate set rather than leaving stale entries behind.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v0").unwrap();
+			tx.commit().unwrap();
+		}
+		let reader = db.transaction(false);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v1").unwrap();
+			tx.commit().unwrap();
+		}
+		assert!(db.gc_candidates.pin().contains(b"key".as_slice()));
+		drop(reader);
+		db.run_gc();
+		assert_eq!(db.gc_candidates.pin().len(), 0, "the full scan should clear the candidate set");
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+		assert_eq!(entry.value().read().as_slice().len(), 1);
+	}
+
+	#[cfg(not(target_arch = "wasm32"))]
+	#[test]
+	fn load_collapses_aol_replay_chains() {
+		// Append-only-log replay pushes one chain entry per record, so a
+		// key updated N times holds N versions after replay — garbage no
+		// commit or tracked sweep would ever visit on a key that is never
+		// written again. The one-shot sweep at load time must collapse
+		// every chain to its latest version.
+		let temp_dir = tempfile::TempDir::new().unwrap();
+		let persistence = crate::PersistenceOptions::new(temp_dir.path())
+			.with_aol_mode(crate::AolMode::SynchronousOnCommit)
+			.with_snapshot_mode(crate::SnapshotMode::Never)
+			.with_fsync_mode(crate::FsyncMode::EveryAppend);
+		{
+			let db = Database::new_with_persistence(
+				crate::DatabaseOptions::default(),
+				persistence.clone(),
+			)
+			.unwrap();
+			for i in 0..5 {
+				let mut tx = db.transaction(true);
+				tx.set("key", format!("v{i}")).unwrap();
+				tx.commit().unwrap();
+			}
+		}
+		// Reopen: replay rebuilds the chain, then the load sweep trims it
+		let db =
+			Database::new_with_persistence(crate::DatabaseOptions::default(), persistence).unwrap();
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing after reload");
+		let guard = entry.value().read();
+		let chain = guard.as_slice();
+		assert_eq!(chain.len(), 1, "the load-time sweep should collapse replayed chains");
+		assert_eq!(chain[0].value.as_deref(), Some(b"v4" as &[u8]));
+	}
+
+	#[test]
+	fn full_scan_retracks_pinned_chains() {
+		// A manual full scan clears the candidate set, so any chain it
+		// cannot trim to a terminal state must be re-tracked — otherwise
+		// its garbage would be stranded once the pinning reader departs,
+		// since the background sweep never scans the full datastore.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v0").unwrap();
+			tx.commit().unwrap();
+		}
+		let reader = db.transaction(false);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v1").unwrap();
+			tx.commit().unwrap();
+		}
+		// The full scan runs while the reader still pins the old version
+		db.run_gc();
+		assert!(
+			db.gc_candidates.pin().contains(b"key".as_slice()),
+			"the full scan should re-track a chain it could not trim"
+		);
+		// After the reader departs the tracked sweep reclaims the garbage
+		drop(reader);
+		db.run_gc_tracked();
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+		assert_eq!(entry.value().read().as_slice().len(), 1);
 	}
 
 	#[test]
@@ -1405,7 +1620,7 @@ mod tests {
 				}
 			})
 		};
-		// Sweeper thread hammers cleanup and gc continuously
+		// Sweeper thread hammers cleanup and both gc paths continuously
 		let sweeper = {
 			let db = Arc::clone(&db);
 			let stop = Arc::clone(&stop);
@@ -1413,6 +1628,7 @@ mod tests {
 				while !stop.load(Ordering::Relaxed) {
 					db.run_cleanup();
 					db.run_gc();
+					db.run_gc_tracked();
 				}
 			})
 		};
