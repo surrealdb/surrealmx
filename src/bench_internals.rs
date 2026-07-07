@@ -193,3 +193,49 @@ impl MergeQueueScenario {
 		.count()
 	}
 }
+
+/// A prepared watermark-scan scenario for benchmarking the per-commit
+/// inline-GC slot scan. Registers `num_readers` pinned slots directly in
+/// the readers map — the exact state a database holds with that many
+/// live transactions — and exposes the watermark computation a committer
+/// performs once per commit.
+pub struct WatermarkScanScenario {
+	db: crate::Database,
+	own_slot: u64,
+}
+
+impl WatermarkScanScenario {
+	/// Build a scenario with `num_readers` live registered slots plus the
+	/// committer's own slot.
+	pub fn new(num_readers: usize) -> Self {
+		use crate::inner::Slot;
+		use std::sync::atomic::Ordering;
+		let db = crate::Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Register the reader slots with plausible snapshot values
+		for i in 0..num_readers {
+			let id = db.reader_slot_id.fetch_add(1, Ordering::SeqCst) + 1;
+			let slot = Arc::new(Slot::pinning());
+			slot.version.store(1 + (i as u64 % 16), Ordering::SeqCst);
+			slot.commit.store(1 + (i as u64 % 16), Ordering::SeqCst);
+			db.readers.insert(id, slot);
+		}
+		// Register the committer's own slot, excluded by the scan
+		let own_slot = db.reader_slot_id.fetch_add(1, Ordering::SeqCst) + 1;
+		let slot = Arc::new(Slot::pinning());
+		slot.version.store(32, Ordering::SeqCst);
+		slot.commit.store(32, Ordering::SeqCst);
+		db.readers.insert(own_slot, slot);
+		Self {
+			db,
+			own_slot,
+		}
+	}
+
+	/// Perform one inline-GC watermark computation, exactly as a commit
+	/// does after publishing its merge version.
+	pub fn scan(&self) -> Option<u64> {
+		self.db.inline_gc_watermark(self.own_slot)
+	}
+}

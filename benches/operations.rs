@@ -18,7 +18,7 @@ use rand::{rngs::StdRng, RngExt, SeedableRng};
 use std::hint::black_box;
 use std::sync::Arc;
 use surrealmx::bench_internals::{
-	MergeQueueScenario, ReadsetConflictScenario, WritesetConflictScenario,
+	MergeQueueScenario, ReadsetConflictScenario, WatermarkScanScenario, WritesetConflictScenario,
 };
 use surrealmx::{Database, DatabaseOptions};
 
@@ -1076,6 +1076,21 @@ fn bench_commit_inline_gc(c: &mut Criterion) {
 	group.finish();
 }
 
+// Per-commit inline-GC watermark scan: every commit walks the registered
+// reader slots to find the minimum pinned snapshot. Measures how that
+// walk scales with the number of live transactions, isolated from chain
+// growth and every other commit cost.
+fn bench_watermark_scan(c: &mut Criterion) {
+	let mut group = c.benchmark_group("watermark_scan");
+	for num_readers in [0usize, 10, 100, 1_000, 10_000].iter() {
+		let scenario = WatermarkScanScenario::new(*num_readers);
+		group.bench_function(BenchmarkId::new("live_readers", num_readers), |b| {
+			b.iter(|| scenario.scan())
+		});
+	}
+	group.finish();
+}
+
 // ---------------------------------------------------------------------------
 // Bloom filter impact: direct with-bloom vs without-bloom comparison
 // ---------------------------------------------------------------------------
@@ -1424,6 +1439,7 @@ criterion_group!(
 	bench_keys_for_each,
 	bench_gc_full_scan,
 	bench_commit_inline_gc,
+	bench_watermark_scan,
 	bench_readset_bloom_impact,
 	bench_readset_bloom_conflict_path,
 	bench_writeset_bloom_impact,
