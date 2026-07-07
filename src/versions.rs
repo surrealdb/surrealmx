@@ -11,8 +11,21 @@ pub(crate) enum IndexOrUpdate<'a> {
 	Update(&'a mut Version),
 }
 
+/// A key's MVCC version chain, ordered oldest to newest.
+///
+/// The inline capacity is one entry: eager commit-time garbage
+/// collection keeps every chain at a single live value except while a
+/// reader watermark briefly pins superseded versions, and in a large
+/// dataset the overwhelming majority of keys are cold — written once
+/// and holding exactly one version forever. Sizing the inline buffer
+/// for the steady state keeps every cold key at ~a third of the memory
+/// a four-slot buffer costs, which dominates total datastore footprint
+/// by key count. Keys that do grow a chain under a pinned reader spill
+/// to a small heap buffer once (SmallVec retains it thereafter), and
+/// even a spilled two-entry chain occupies no more total memory than
+/// the old four-slot inline layout.
 pub struct Versions {
-	inner: SmallVec<[Version; 4]>,
+	inner: SmallVec<[Version; 1]>,
 }
 
 impl From<Version> for Versions {
@@ -893,5 +906,18 @@ mod tests {
 		}
 		assert_eq!(versions.inner.len(), 1);
 		assert_eq!(versions.fetch_version(10), Some(Bytes::from("v99".to_string())));
+	}
+	#[test]
+	fn versions_inline_footprint_is_small() {
+		// The datastore holds one `Versions` per key, so its inline size
+		// directly scales total memory by key count. One inline entry plus
+		// SmallVec bookkeeping must stay within 56 bytes — sizing the
+		// buffer for the steady state (eager commit-time GC keeps chains
+		// at a single live value) rather than for transient growth.
+		assert!(
+			std::mem::size_of::<Versions>() <= 56,
+			"Versions grew to {} bytes; the per-key inline footprint is load-bearing for large datasets",
+			std::mem::size_of::<Versions>()
+		);
 	}
 }
