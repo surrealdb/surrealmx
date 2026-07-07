@@ -1,117 +1,66 @@
-use arc_swap::ArcSwap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+// Copyright © SurrealDB Ltd
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! This module stores the monotonic logical clock for merge versions.
+
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::Mutex;
-#[cfg(not(target_arch = "wasm32"))]
-use std::thread::JoinHandle;
-use web_time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// A timestamp oracle for monotonically increasing time
+/// A monotonic logical clock minting merge versions.
+///
+/// Merge versions are claimed from `alloc`, a dense allocation counter,
+/// and published to `timestamp` opportunistically once the claimed
+/// version's merge-queue entry has been inserted. The two counters must
+/// be separate: claiming by merge-queue slot insertion alone is unsound,
+/// because a committer removes its merge entry once applied, and a slow
+/// concurrent committer that loaded the clock before the publish could
+/// then re-claim the vacated slot — minting the same version twice and
+/// silently overwriting a committed value in the version chain.
+///
+/// `timestamp` holds the latest *published* merge version (`0` when no
+/// merge has happened yet). Readers snapshot it directly. A committer
+/// publishes by waiting for `timestamp` to reach its own claimed
+/// version's predecessor, then advancing it to its own version in one
+/// step (`Inner::atomic_merge`): every publish is in strict claim order,
+/// so a thread always sees its own immediately-prior commit reflected in
+/// `timestamp` before it can start another. `Inner::try_advance_merge_clock`
+/// additionally walks `timestamp` forward opportunistically through
+/// consecutive claimed-and-inserted versions on the cleanup/GC paths,
+/// where no thread is waiting on the result. Either way, a snapshot at
+/// `v` sees every merge `<= v` (in the merge queue or already applied):
+/// `timestamp` only ever crosses a slot once its entry is confirmed
+/// present, and merge entries are never physically removed before the
+/// clock has already passed them (see `Inner::merge_retire_id` and the
+/// persistence-failure path in `TransactionInner::commit`), so "absent"
+/// at the next slot can only mean "not yet inserted", never "removed
+/// early". On persistent databases both counters are seeded at load
+/// time with the maximum version found across the snapshot file and the
+/// append-only log, so newly minted versions always continue strictly
+/// above every persisted version.
 pub(crate) struct Oracle {
-	// The inner strcuture of an Oracle
-	pub(crate) inner: Arc<Inner>,
-}
-
-impl Drop for Oracle {
-	fn drop(&mut self) {
-		self.shutdown();
-	}
-}
-
-/// The inner structure of the timestamp oracle
-pub(crate) struct Inner {
-	/// The latest monotonic counter for this oracle
+	/// The merge version allocation counter
+	pub(crate) alloc: AtomicU64,
+	/// The latest published merge version
 	pub(crate) timestamp: AtomicU64,
-	/// The reference time when this Oracle was synced
-	pub(crate) reference: ArcSwap<(u64, Instant)>,
-	/// Specifies whether timestamp syncing is enabled in the background
-	pub(crate) resync_enabled: AtomicBool,
-	/// Stores a handle to the current timestamp syncing background thread
-	#[cfg(not(target_arch = "wasm32"))]
-	pub(crate) resync_handle: Mutex<Option<JoinHandle<()>>>,
-	/// Interval at which the oracle resyncs with the system clock
-	#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-	pub(crate) resync_interval: Duration,
 }
 
 impl Oracle {
-	/// Creates a new timestamp oracle with the specified resync interval
-	pub fn new(resync_interval: Duration) -> Arc<Self> {
-		// Get the current unix time in nanoseconds
-		let reference_unix = Self::current_unix_ns();
-		// Get a new monotonically increasing clock
-		let reference_time = Instant::now();
-		// Return the current timestamp oracle
-		let oracle = Self {
-			inner: Arc::new(Inner {
-				timestamp: AtomicU64::new(reference_unix),
-				reference: ArcSwap::new(Arc::new((reference_unix, reference_time))),
-				resync_enabled: AtomicBool::new(true),
-				#[cfg(not(target_arch = "wasm32"))]
-				resync_handle: Mutex::new(None),
-				resync_interval,
-			}),
-		};
-		// Start up the resyncing thread
-		#[cfg(not(target_arch = "wasm32"))]
-		oracle.worker_resync();
-		// Return the oracle
-		Arc::new(oracle)
-	}
-
-	/// Gets the current system time in nanoseconds since the Unix epoch
-	#[inline]
-	pub(crate) fn current_unix_ns() -> u64 {
-		// Get the current system time
-		let timestamp = SystemTime::now().duration_since(UNIX_EPOCH);
-		// Count the nanoseconds since the Unix epoch
-		timestamp.unwrap_or_default().as_nanos() as u64
-	}
-
-	/// Gets the current estimated time in nanoseconds since the Unix epoch
-	#[inline]
-	pub(crate) fn current_time_ns(&self) -> u64 {
-		// Get the current reference time
-		let reference = self.inner.reference.load();
-		// Calculate the nanoseconds since the Unix epoch
-		reference.0 + reference.1.elapsed().as_nanos() as u64
-	}
-
-	/// Shutdown the oracle resync, waiting for background threads to exit
-	fn shutdown(&self) {
-		// Disable timestamp resyncing
-		self.inner.resync_enabled.store(false, Ordering::Release);
-		// Wait for the timestamp resyncing thread to exit
-		#[cfg(not(target_arch = "wasm32"))]
-		if let Some(handle) = self.inner.resync_handle.lock().unwrap().take() {
-			handle.thread().unpark();
-			handle.join().unwrap();
-		}
-	}
-
-	/// Start the resyncing thread after creating the oracle
-	#[cfg(not(target_arch = "wasm32"))]
-	fn worker_resync(&self) {
-		// Clone the underlying oracle inner
-		let oracle = self.inner.clone();
-		// Store the resync interval for the thread
-		let interval = oracle.resync_interval;
-		// Spawn a new thread to handle timestamp resyncing
-		let handle = std::thread::spawn(move || {
-			// Check whether the timestamp resync process is enabled
-			while oracle.resync_enabled.load(Ordering::Acquire) {
-				// Wait for a specified time interval
-				std::thread::park_timeout(interval);
-				// Get the current unix time in nanoseconds
-				let reference_unix = Self::current_unix_ns();
-				// Get a new monotonically increasing clock
-				let reference_time = Instant::now();
-				// Store the timestamp and monotonic instant
-				oracle.reference.store(Arc::new((reference_unix, reference_time)));
-			}
-		});
-		// Store and track the thread handle
-		*self.inner.resync_handle.lock().unwrap() = Some(handle);
+	/// Creates a new logical clock starting at version zero
+	pub fn new() -> Arc<Self> {
+		Arc::new(Self {
+			alloc: AtomicU64::new(0),
+			timestamp: AtomicU64::new(0),
+		})
 	}
 }

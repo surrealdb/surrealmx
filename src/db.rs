@@ -17,9 +17,7 @@
 use crate::inner::Inner;
 use crate::options::DatabaseOptions;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::options::{
-	DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_FULL_SCAN_FREQUENCY, DEFAULT_GC_INTERVAL,
-};
+use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::persistence::Persistence;
 use crate::pool::Pool;
@@ -47,9 +45,6 @@ pub struct Database {
 	/// Interval used by the garbage collector thread
 	#[cfg(not(target_arch = "wasm32"))]
 	gc_interval: Duration,
-	/// Number of gc wake-ups between full datastore scans
-	#[cfg(not(target_arch = "wasm32"))]
-	gc_full_scan_frequency: u64,
 	/// Interval used by the cleanup thread
 	#[cfg(not(target_arch = "wasm32"))]
 	cleanup_interval: Duration,
@@ -66,8 +61,6 @@ impl Default for Database {
 			persistence: None,
 			#[cfg(not(target_arch = "wasm32"))]
 			gc_interval: DEFAULT_GC_INTERVAL,
-			#[cfg(not(target_arch = "wasm32"))]
-			gc_full_scan_frequency: DEFAULT_GC_FULL_SCAN_FREQUENCY,
 			#[cfg(not(target_arch = "wasm32"))]
 			cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
 		}
@@ -109,8 +102,6 @@ impl Database {
 			#[cfg(not(target_arch = "wasm32"))]
 			gc_interval: opts.gc_interval,
 			#[cfg(not(target_arch = "wasm32"))]
-			gc_full_scan_frequency: opts.gc_full_scan_frequency,
-			#[cfg(not(target_arch = "wasm32"))]
 			cleanup_interval: opts.cleanup_interval,
 		};
 		// Start background tasks when enabled
@@ -149,7 +140,6 @@ impl Database {
 			pool,
 			persistence: Some(persist),
 			gc_interval: opts.gc_interval,
-			gc_full_scan_frequency: opts.gc_full_scan_frequency,
 			cleanup_interval: opts.cleanup_interval,
 		};
 		// Start background tasks when enabled
@@ -184,35 +174,24 @@ impl Database {
 	/// This should be called when automatic cleanup is disabled via
 	/// [`DatabaseOptions::enable_cleanup`].
 	pub fn run_cleanup(&self) {
-		self.inner.run_cleanup_inner();
+		self.inner.cleanup_commit_queue();
 	}
 
-	/// Manually perform garbage collection of stale record versions.
+	/// Manually perform a full garbage collection sweep.
 	///
-	/// This function first processes keys that are known to have stale
-	/// versions (tracked during transaction commits), then performs a full
-	/// datastore scan to clean up any remaining old versions. Note that
-	/// inline garbage collection happens automatically during transaction
-	/// commits, but only for keys being modified. This function is useful
-	/// for cleaning up stale versions on keys that haven't been recently
-	/// modified, or when automatic background GC is disabled via
-	/// [`DatabaseOptions::enable_gc`].
+	/// Steady-state reclamation happens inline at commit time: every
+	/// commit trims the chains it touches down to the current watermark.
+	/// This sweep is the safety net for garbage which no future commit
+	/// will visit — versions pinned by a since-departed reader on a key
+	/// that is never written again. It is useful when automatic
+	/// background GC is disabled via [`DatabaseOptions::enable_gc`], for
+	/// example on wasm targets, which have no background threads.
 	pub fn run_gc(&self) {
-		let cleanup_ts = self.compute_cleanup_ts();
-		// First, process keys known to have stale versions
-		self.run_gc_dirty_inner(cleanup_ts);
-		// Then perform a full datastore scan for any remaining stale versions
-		self.run_gc_full(cleanup_ts);
-	}
-
-	/// Process only dirty keys that are known to have stale versions.
-	///
-	/// This is a lightweight alternative to a full datastore scan, useful
-	/// for frequent incremental cleanup between full GC passes.
-	pub fn run_gc_dirty(&self) {
-		let cleanup_ts = self.compute_cleanup_ts();
-		// Process dirty keys
-		self.run_gc_dirty_inner(cleanup_ts);
+		// Skip the pass entirely when registrations are in flight
+		if let Some(cleanup_ts) = self.compute_cleanup_ts() {
+			// Perform a full datastore scan for stale versions
+			self.run_gc_full(cleanup_ts);
+		}
 	}
 
 	/// Shutdown the datastore, waiting for background threads to exit
@@ -276,7 +255,7 @@ impl Database {
 						break;
 					}
 					// Clean up the transaction commit queue
-					db.run_cleanup_inner();
+					db.cleanup_commit_queue();
 				}
 			});
 			// Store and track the thread handle
@@ -293,11 +272,12 @@ impl Database {
 		if db.garbage_collection_handle.read().is_none() {
 			// Get the specified interval
 			let interval = self.gc_interval;
-			// Full scan runs every Nth wake cycle; dirty-key pass runs every cycle
-			let full_scan_frequency = self.gc_full_scan_frequency.max(1);
-			// Spawn a new thread to handle periodic garbage collection
+			// Spawn a new thread to handle the periodic safety-net sweep.
+			// Steady-state reclamation happens inline at commit time, so
+			// this low-frequency full scan only collects garbage which no
+			// future commit will visit: versions pinned by a departed
+			// reader on a key that is never written again.
 			let handle = std::thread::spawn(move || {
-				let mut cycle: u64 = 0;
 				// Check whether the garbage collection process is enabled
 				while db.background_threads_enabled.load(Ordering::Relaxed) {
 					// Wait for a specified time interval
@@ -306,22 +286,17 @@ impl Database {
 					if !db.background_threads_enabled.load(Ordering::Relaxed) {
 						break;
 					}
-					// Compute the next cleanup_ts. This publishes the
-					// proposed value to `gc_floor` and re-scans the
-					// counter map so any reader landing in the
-					// publish-and-scan window is either visible to us
-					// (and bounds the final cleanup_ts) or retries from
-					// a fresh oracle read above the floor. The proposed
-					// value is capped at the current oracle so an idle
-					// database does not lock readers out forever.
-					let cleanup_ts = db.compute_cleanup_ts();
-					// Drain the dirty-key queue every cycle (incremental GC).
-					db.run_gc_dirty_inner(cleanup_ts);
-					// Periodically do a full datastore scan.
-					cycle += 1;
-					if cycle.is_multiple_of(full_scan_frequency) {
-						db.run_gc_full(cleanup_ts);
-					}
+					// Compute the next cleanup_ts by scanning the slot
+					// map: any transaction registering concurrently is
+					// either visible to the scan (and bounds the final
+					// cleanup_ts) or pins after it (and takes a snapshot
+					// at or above the clock bound). A pass is skipped
+					// entirely while a registration is pinning.
+					let Some(cleanup_ts) = db.compute_cleanup_ts() else {
+						continue;
+					};
+					// Perform the full datastore scan.
+					db.run_gc_full(cleanup_ts);
 				}
 			});
 			// Store and track the thread handle
@@ -1133,5 +1108,350 @@ mod tests {
 		assert_eq!(keys[1].as_ref(), b"c");
 		let res = tx.cancel();
 		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn cleanup_trims_commit_queue_when_idle() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..10 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		assert_eq!(db.transaction_commit_queue.len(), 10);
+		db.run_cleanup();
+		// With no registered readers the trim bound falls back to the
+		// current commit id: everything below it is unreachable by any
+		// future transaction's conflict window, which starts strictly
+		// above the commit id the transaction registers at. The exclusive
+		// bound leaves exactly the entry at the current commit id.
+		assert_eq!(db.transaction_commit_queue.len(), 1);
+	}
+
+	#[test]
+	fn cleanup_respects_active_reader() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Commit five transactions before the reader starts
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("pre{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// Register a reader pinned at the current commit id
+		let reader = db.transaction(false);
+		// Commit five more transactions after the reader registered
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("post{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		assert_eq!(db.transaction_commit_queue.len(), 10);
+		db.run_cleanup();
+		// Entries above the reader's snapshot commit id must survive:
+		// they sit inside its potential conflict window. Entries at ids
+		// 1-4 are trimmed; the entry at the reader's snapshot (5) and
+		// everything above remain.
+		assert_eq!(db.transaction_commit_queue.len(), 6);
+		drop(reader);
+		db.run_cleanup();
+		// With the reader gone the idle fallback applies again
+		assert_eq!(db.transaction_commit_queue.len(), 1);
+	}
+
+	#[test]
+	fn logical_clock_is_dense() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..10 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// Merge versions are dense sequential integers: ten commits
+		// publish exactly versions 1 through 10.
+		assert_eq!(db.oracle.timestamp.load(std::sync::atomic::Ordering::SeqCst), 10);
+		let entry = db.datastore.get(b"key0".as_slice()).expect("key0 missing");
+		let guard = entry.value().read();
+		assert_eq!(guard.as_slice()[0].version, 1);
+		let entry = db.datastore.get(b"key9".as_slice()).expect("key9 missing");
+		let guard = entry.value().read();
+		assert_eq!(guard.as_slice()[0].version, 10);
+	}
+
+	#[test]
+	fn logical_clock_continues_above_seed() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Simulate a datastore seeded from files written by a release
+		// which minted wall-clock nanosecond versions. Real persistence
+		// load seeds all three counters together (see
+		// `Persistence::load`); seeding only the clock and leaving
+		// `merge_retire_id` at its unseeded default would make the
+		// opportunistic retirement walk cross an astronomical gap one
+		// step at a time.
+		let seed = 1_700_000_000_000_000_000u64;
+		db.oracle.alloc.store(seed, std::sync::atomic::Ordering::SeqCst);
+		db.oracle.timestamp.store(seed, std::sync::atomic::Ordering::SeqCst);
+		db.merge_retire_id.store(seed, std::sync::atomic::Ordering::SeqCst);
+		let mut tx = db.transaction(true);
+		tx.set("key", "value").unwrap();
+		tx.commit().unwrap();
+		// The next minted version continues strictly above the seed
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+		let guard = entry.value().read();
+		assert_eq!(guard.as_slice()[0].version, seed + 1);
+		// And the write is visible to a fresh reader
+		let mut tx = db.transaction(false);
+		assert_eq!(tx.get("key").unwrap().as_deref(), Some(b"value" as &[u8]));
+		tx.cancel().unwrap();
+	}
+
+	#[test]
+	fn slot_lifecycle() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		assert_eq!(db.readers.len(), 0);
+		let tx = db.transaction(false);
+		assert_eq!(db.readers.len(), 1);
+		let first_id = *db.readers.front().unwrap().key();
+		drop(tx);
+		assert_eq!(db.readers.len(), 0);
+		// Pool reuse re-pins the retained slot under a fresh id
+		let tx = db.transaction(false);
+		assert_eq!(db.readers.len(), 1);
+		let second_id = *db.readers.front().unwrap().key();
+		assert!(second_id > first_id);
+		drop(tx);
+		assert_eq!(db.readers.len(), 0);
+	}
+
+	#[test]
+	fn watermark_conservative_while_pinning() {
+		use crate::inner::Slot;
+		use std::sync::Arc;
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Commit some entries which would otherwise be trimmed
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// Insert a slot stuck in the pinning state, simulating a
+		// transaction mid-registration
+		db.readers.insert(u64::MAX, Arc::new(Slot::pinning()));
+		// Every sweep must treat the watermark as unknown and skip
+		assert_eq!(db.compute_cleanup_ts(), None);
+		let before = db.transaction_commit_queue.len();
+		db.run_cleanup();
+		assert_eq!(db.transaction_commit_queue.len(), before);
+		// Remove the pinning slot; sweeps proceed again
+		db.readers.remove(&u64::MAX);
+		assert!(db.compute_cleanup_ts().is_some());
+		db.run_cleanup();
+		assert_eq!(db.transaction_commit_queue.len(), 1);
+	}
+
+	#[test]
+	fn commit_watermark_tracks_commits() {
+		use std::sync::atomic::Ordering;
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// Every commit completed, so the watermark covers all claimed ids
+		assert_eq!(db.commit_watermark.load(Ordering::SeqCst), 5);
+		assert_eq!(db.transaction_commit_id.load(Ordering::SeqCst), 5);
+		// An aborted commit removes its entry, which also counts as
+		// complete: the watermark must still cover the aborted id.
+		let mut tx1 = db.transaction(true);
+		let mut tx2 = db.transaction(true);
+		tx1.set("clash", "one").unwrap();
+		tx2.set("clash", "two").unwrap();
+		tx1.commit().unwrap();
+		assert!(tx2.commit().is_err());
+		assert_eq!(
+			db.commit_watermark.load(Ordering::SeqCst),
+			db.transaction_commit_id.load(Ordering::SeqCst)
+		);
+	}
+
+	#[test]
+	fn inline_gc_trims_hot_key_at_commit() {
+		// The deterministic memory bound: with no readers pinning older
+		// versions, every commit trims the chain it touches down to the
+		// latest version — no background worker, no sleeps, and the same
+		// behaviour on wasm targets which have no threads at all.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..100 {
+			let mut tx = db.transaction(true);
+			tx.set("hotkey", format!("v{i}")).unwrap();
+			tx.commit().unwrap();
+		}
+		let entry = db.datastore.get(b"hotkey".as_slice()).expect("hotkey missing");
+		let guard = entry.value().read();
+		let chain = guard.as_slice();
+		assert_eq!(chain.len(), 1, "inline GC should trim superseded versions at commit");
+		assert_eq!(chain[0].value.as_deref(), Some(b"v99" as &[u8]));
+	}
+
+	#[test]
+	fn inline_gc_unlinks_deleted_key_at_commit() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Scoped: a shadowed-but-live transaction would keep its slot
+		// registered and pin the delete's watermark below the tombstone
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "value").unwrap();
+			tx.commit().unwrap();
+		}
+		assert!(db.datastore.get(b"key".as_slice()).is_some());
+		// With no readers below the delete, the tombstone collapses the
+		// chain at commit time and the node is unlinked immediately.
+		{
+			let mut tx = db.transaction(true);
+			tx.del("key").unwrap();
+			tx.commit().unwrap();
+		}
+		assert!(
+			db.datastore.get(b"key".as_slice()).is_none(),
+			"a delete with no readers should unlink the node at commit"
+		);
+	}
+
+	#[test]
+	fn safety_net_reclaims_after_reader_departs() {
+		// Garbage pinned by a reader on a key that is never written again
+		// is invisible to inline commit-time GC: this is exactly the
+		// scenario that justifies keeping the background full-scan sweep.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v0").unwrap();
+			tx.commit().unwrap();
+		}
+		// Pin the initial version while overwriting the key
+		let reader = db.transaction(false);
+		for i in 1..=50 {
+			let mut tx = db.transaction(true);
+			tx.set("key", format!("v{i}")).unwrap();
+			tx.commit().unwrap();
+		}
+		{
+			let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+			let guard = entry.value().read();
+			assert!(guard.as_slice().len() > 1, "the pinned reader should retain history");
+		}
+		// Drop the reader; no further commits touch the key, so only the
+		// manual (or background) full sweep can reclaim the garbage
+		drop(reader);
+		db.run_gc();
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+		let guard = entry.value().read();
+		let chain = guard.as_slice();
+		assert_eq!(chain.len(), 1, "the safety-net sweep should reclaim departed-reader garbage");
+		assert_eq!(chain[0].value.as_deref(), Some(b"v50" as &[u8]));
+	}
+
+	#[test]
+	fn pin_then_read_stress() {
+		use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+		use std::sync::Arc;
+		use std::thread;
+		use std::time::{Duration, Instant};
+		// Workers are disabled; a dedicated thread hammers the manual
+		// sweep entry points instead, maximising sweep frequency against
+		// the pin-then-read registration protocol.
+		let db = Arc::new(Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		));
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v0").unwrap();
+			tx.commit().unwrap();
+		}
+		let stop = Arc::new(AtomicBool::new(false));
+		let none_reads = Arc::new(AtomicUsize::new(0));
+		let total_reads = Arc::new(AtomicUsize::new(0));
+		// Single writer thread keeps overwriting the same key
+		let writer = {
+			let db = Arc::clone(&db);
+			let stop = Arc::clone(&stop);
+			thread::spawn(move || {
+				let mut counter: u64 = 0;
+				while !stop.load(Ordering::Relaxed) {
+					let mut tx = db.transaction(true);
+					tx.set("key", format!("v{counter}")).unwrap();
+					tx.commit().unwrap();
+					counter = counter.wrapping_add(1);
+				}
+			})
+		};
+		// Sweeper thread hammers cleanup and gc continuously
+		let sweeper = {
+			let db = Arc::clone(&db);
+			let stop = Arc::clone(&stop);
+			thread::spawn(move || {
+				while !stop.load(Ordering::Relaxed) {
+					db.run_cleanup();
+					db.run_gc();
+				}
+			})
+		};
+		// Reader threads open many short-lived snapshots
+		let mut readers = Vec::new();
+		for _ in 0..6 {
+			let db = Arc::clone(&db);
+			let stop = Arc::clone(&stop);
+			let none_reads = Arc::clone(&none_reads);
+			let total_reads = Arc::clone(&total_reads);
+			readers.push(thread::spawn(move || {
+				while !stop.load(Ordering::Relaxed) {
+					let mut tx = db.transaction(false);
+					let value = tx.get("key").unwrap();
+					total_reads.fetch_add(1, Ordering::Relaxed);
+					if value.is_none() {
+						none_reads.fetch_add(1, Ordering::Relaxed);
+					}
+					tx.cancel().unwrap();
+				}
+			}));
+		}
+		let started = Instant::now();
+		while started.elapsed() < Duration::from_millis(500) {
+			thread::sleep(Duration::from_millis(10));
+		}
+		stop.store(true, Ordering::Relaxed);
+		writer.join().unwrap();
+		sweeper.join().unwrap();
+		for r in readers {
+			r.join().unwrap();
+		}
+		let nones = none_reads.load(Ordering::Relaxed);
+		let total = total_reads.load(Ordering::Relaxed);
+		assert_eq!(
+			nones, 0,
+			"reader observed `None` for a key that always has a committed \
+			 value ({nones} of {total} reads): the pin-then-read protocol \
+			 failed to protect a registering reader from a sweep"
+		);
 	}
 }

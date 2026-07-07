@@ -814,6 +814,57 @@ fn test_snapshot_persists_only_latest_version() {
 }
 
 #[test]
+fn test_restart_seeds_version_counter() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	// Configure synchronous AOL persistence
+	let persistence_opts = || {
+		PersistenceOptions::new(temp_path)
+			.with_aol_mode(AolMode::SynchronousOnCommit)
+			.with_snapshot_mode(SnapshotMode::Never)
+			.with_fsync_mode(FsyncMode::EveryAppend)
+	};
+
+	// Run 1: commit three versions of one key (versions 1..=3)
+	{
+		let db =
+			Database::new_with_persistence(DatabaseOptions::default(), persistence_opts()).unwrap();
+		for val in ["a", "b", "c"] {
+			let mut tx = db.transaction(true);
+			tx.set("key", val).unwrap();
+			tx.commit().unwrap();
+		}
+	}
+
+	// Run 2: the logical clock must be seeded above the persisted
+	// versions, so the new write lands strictly above the reloaded
+	// chain. Without seeding it would mint version 1 and be inserted
+	// BELOW the persisted versions, making the old value win.
+	{
+		let db =
+			Database::new_with_persistence(DatabaseOptions::default(), persistence_opts()).unwrap();
+		let mut tx = db.transaction(true);
+		tx.set("key", "d").unwrap();
+		tx.commit().unwrap();
+		let mut tx = db.transaction(false);
+		assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("d")));
+		tx.cancel().unwrap();
+	}
+
+	// Run 3: replaying the full log after another restart must still
+	// surface the run-2 write as the latest value
+	{
+		let db =
+			Database::new_with_persistence(DatabaseOptions::default(), persistence_opts()).unwrap();
+		let mut tx = db.transaction(false);
+		assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("d")));
+		tx.cancel().unwrap();
+	}
+}
+
+#[test]
 fn test_loads_multiversion_snapshot_files() {
 	// Create a temporary directory for testing
 	let temp_dir = TempDir::new().unwrap();

@@ -19,30 +19,45 @@ use crate::LOG_TARGET_CONFLICTS;
 use bytes::Bytes;
 use papaya::HashSet;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use tracing::debug;
 
 /// A transaction entry in the transaction commit queue
 pub struct Commit {
-	/// The unique id of this commit attempt
-	pub(crate) id: u64,
-	/// The sorted keys of the local updates and deletes. Conflict
-	/// detection only ever inspects keys, so the values are
-	/// intentionally not stored here: a commit queue entry outlives
-	/// the corresponding merge queue entry (it is only trimmed later
-	/// by the cleanup worker), and holding the values would pin them
-	/// in memory for that entire window.
-	pub(crate) keys: Vec<Bytes>,
+	/// The sorted writeset keys. Values are never read during conflict
+	/// detection, so they are not retained here: the merge queue holds
+	/// the full writeset only until the commit is applied, while this
+	/// entry survives until queue cleanup without pinning value memory.
+	pub(crate) keys: Arc<[Bytes]>,
 	/// Bloom filter over writeset keys for fast conflict pre-checks
 	pub(crate) writeset_bloom: BloomFilter,
+	/// The merge version this commit published, zero while the commit is
+	/// still in flight, or [`crate::inner::COMMIT_ABORTED`] when the
+	/// owning transaction unwound without completing. Set by the owning
+	/// transaction immediately after its merge version becomes loadable
+	/// from the clock. Consumed by the commit-watermark advance (readers
+	/// must never take a conflict-window base covering a commit whose
+	/// merge version they cannot yet see) and by the conflict loop, which
+	/// skips aborted commits and commits whose merge version is visible
+	/// in the checking transaction's snapshot: a visible commit happened
+	/// strictly before the snapshot in version order, so it is not
+	/// concurrent and first-committer-wins does not apply to it.
+	pub(crate) merge_version: AtomicU64,
 }
 
 /// A transaction entry in the transaction merge queue
 pub struct Merge {
-	/// The unique id of this commit attempt
-	pub(crate) id: u64,
 	/// The local set of updates and deletes
 	pub(crate) writeset: Arc<BTreeMap<Bytes, Option<Bytes>>>,
+	/// Whether this merge has been fully applied to the datastore.
+	/// Consumed by the in-order retirement advance: merge entries are
+	/// removed from the queue strictly in version order, over the
+	/// contiguous applied prefix, so a surviving queue entry for a key
+	/// is always at least as new as anything the datastore chain holds
+	/// at or below a reader's snapshot — the property that lets reads
+	/// resolve the queue overlay with priority over the chain.
+	pub(crate) applied: AtomicBool,
 }
 
 impl Commit {
@@ -185,5 +200,79 @@ impl Commit {
 		}
 		// No overlap was found
 		true
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Build a commit entry from an unsorted set of string keys
+	fn commit(input: &[&str]) -> Arc<Commit> {
+		let mut v: Vec<Bytes> = input.iter().map(|k| Bytes::from(k.to_string())).collect();
+		v.sort();
+		v.dedup();
+		let keys: Arc<[Bytes]> = v.into();
+		let mut writeset_bloom = BloomFilter::new();
+		for k in keys.iter() {
+			writeset_bloom.insert(k);
+		}
+		Arc::new(Commit {
+			keys,
+			writeset_bloom,
+			merge_version: AtomicU64::new(0),
+		})
+	}
+
+	/// Build a readset from a set of string keys
+	fn readset(input: &[&str]) -> HashSet<Bytes> {
+		let set = HashSet::new();
+		{
+			let pin = set.pin();
+			for k in input {
+				pin.insert(Bytes::from(k.to_string()));
+			}
+		}
+		set
+	}
+
+	#[test]
+	fn readset_disjoint_small_readset_probes_keys() {
+		// Readset smaller than the writeset: the binary-search direction
+		let c = commit(&["a", "b", "c", "d", "e"]);
+		assert!(c.is_disjoint_readset(&readset(&["x", "y"])));
+		assert!(!c.is_disjoint_readset(&readset(&["x", "c"])));
+	}
+
+	#[test]
+	fn readset_disjoint_large_readset_iterates_keys() {
+		// Readset larger than the writeset: the writeset-iteration direction
+		let c = commit(&["m"]);
+		assert!(c.is_disjoint_readset(&readset(&["a", "b", "c", "d"])));
+		assert!(!c.is_disjoint_readset(&readset(&["a", "b", "m", "d"])));
+	}
+
+	#[test]
+	fn writeset_disjoint_two_pointer_merge() {
+		let a = commit(&["a", "c", "e"]);
+		let b = commit(&["b", "d", "f"]);
+		assert!(a.is_disjoint_writeset(&b));
+		assert!(b.is_disjoint_writeset(&a));
+		let c = commit(&["e", "g"]);
+		assert!(!a.is_disjoint_writeset(&c));
+		assert!(!c.is_disjoint_writeset(&a));
+	}
+
+	#[test]
+	fn writeset_bloom_pre_checks_agree_with_exact() {
+		let a = commit(&["a", "c", "e"]);
+		let b = commit(&["b", "d", "f"]);
+		assert!(a.is_disjoint_writeset_bloom(&b));
+		let c = commit(&["e", "g"]);
+		assert!(!a.is_disjoint_writeset_bloom(&c));
+		// Non-overlapping key ranges short-circuit on the min/max bounds
+		let lo = commit(&["a", "b"]);
+		let hi = commit(&["x", "y"]);
+		assert!(lo.is_disjoint_writeset_bloom(&hi));
 	}
 }

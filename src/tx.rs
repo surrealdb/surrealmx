@@ -18,7 +18,7 @@ use crate::bloom::BloomFilter;
 use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
-use crate::inner::{Inner, COUNTER_TOMBSTONE};
+use crate::inner::{Inner, Slot, COMMIT_ABORTED, SLOT_PINNING};
 use crate::iter::{MergeIterator, MergeQueueIter};
 use crate::kv::IntoBytes;
 use crate::pool::Pool;
@@ -34,7 +34,7 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::Range;
-use std::sync::atomic::{fence, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::debug;
 
@@ -67,16 +67,12 @@ const _: fn() = || {
 impl Drop for Transaction {
 	fn drop(&mut self) {
 		if let Some(inner) = self.inner.take() {
-			// Release this transaction's reference on each counter. If we
-			// took the last reference, claim removal via a 1->TOMBSTONE
-			// CAS so a fresh `register_counter` cannot increment from
-			// underneath us and end up holding a detached entry.
-			if release_counter(&inner.counter_commit) {
-				inner.database.counter_by_commit.remove(&inner.commit);
-			}
-			if release_counter(&inner.counter_version) {
-				inner.database.counter_by_oracle.remove(&inner.version);
-			}
+			// Unpin: remove this transaction's slot from the readers map.
+			// A sweeper holding the entry mid-scan reads our final
+			// snapshot values, which is only ever conservative. The slot
+			// allocation itself is retained on the pooled transaction and
+			// re-pinned on reuse.
+			inner.database.readers.remove(&inner.slot_id);
 			// Put the transaction in to the pool
 			self.pool.put(inner);
 		}
@@ -452,125 +448,65 @@ pub(crate) struct TransactionInner {
 	pub(crate) writeset: BTreeMap<Bytes, Option<Bytes>>,
 	/// The parent database for this transaction
 	pub(crate) database: Arc<Inner>,
-	/// The reference to the transaction commit counter
-	pub(crate) counter_commit: Arc<AtomicU64>,
-	/// The reference to the transaction version counter
-	pub(crate) counter_version: Arc<AtomicU64>,
+	/// The reference to this transaction's pinned reader slot
+	pub(crate) slot: Arc<Slot>,
+	/// The key of this transaction's slot in the readers map
+	pub(crate) slot_id: u64,
 	/// Threshold after which transaction state is reset
 	reset_threshold: usize,
 	/// Stack of savepoint states for nested partial rollbacks
 	savepoint_stack: Vec<SavepointState>,
 }
 
-/// Register a new transaction against one of the `Inner` counter SkipMaps.
+/// Register a transaction in the readers map and choose its snapshot.
 ///
-/// Two races make this non-trivial and motivate the validate-and-retry
-/// shape:
+/// Pin-then-read: the slot is published (in the pinning state) BEFORE
+/// the snapshot values are loaded, so every watermark scan computed
+/// after our insert either sees the pinning sentinel (and skips
+/// reclamation for that pass) or sees our final snapshot values (and is
+/// bounded by them). A scan computed before our insert loaded its
+/// bounds before our snapshot loads in the SeqCst total order, so our
+/// snapshot is at or above every bound it used — and reclamation always
+/// retains the entry visible at its watermark. This closes the historic
+/// load-then-register race structurally, with no validate/rollback
+/// retry loop and no reclamation floor.
 ///
-/// 1. **load-then-register**: between the reader's load of `atomic` and
-///    its insert into `map`, a writer can advance the watermark and run
-///    inline GC against a `front()` that does not yet see the reader.
-///    The reader's subsequent reads at its snapshot then return `None`.
-/// 2. **drop/register**: a concurrent `Transaction::Drop` that takes the
-///    last reference on the same key removes the entry from the SkipMap.
-///    Without coordination the new registration would land on a detached
-///    counter that no later `front()`/`iter()` can observe.
-///
-/// Closed by:
-///  * `atomic.load(SeqCst)` participates in the same total order as the
-///    writer's SeqCst `fetch_max`/`fetch_add`; a re-load after a SeqCst
-///    fence catches any writer that ran in between.
-///  * Drops claim removal via `1 -> COUNTER_TOMBSTONE` CAS; new
-///    registrations spin past TOMBSTONE-valued counters and retry with a
-///    fresh entry.
+/// The commit snapshot is loaded BEFORE the version snapshot, and from
+/// the contiguous completed watermark rather than the raw commit id: a
+/// commit id becomes visible before its merge version is published, so
+/// snapshotting the raw id could exclude a commit from our conflict
+/// window while its writes are invisible at our version snapshot — a
+/// lost update. Every commit at or below the watermark has published
+/// its merge version, so the version snapshot (loaded after) always
+/// covers the excluded prefix; any commit landing between the two
+/// loads simply falls inside our conflict window, which is at worst a
+/// spurious conflict, never a missed one.
 #[inline]
-fn register_counter(
-	map: &SkipMap<u64, Arc<AtomicU64>>,
-	atomic: &AtomicU64,
-	gc_floor: Option<&AtomicU64>,
-) -> (u64, Arc<AtomicU64>) {
-	loop {
-		let v = atomic.load(Ordering::SeqCst);
-		let counter = map.get_or_insert_with(v, || Arc::new(AtomicU64::new(0))).value().clone();
-		// CAS-increment, skipping the tombstone sentinel.
-		let acquired = loop {
-			let cur = counter.load(Ordering::Acquire);
-			if cur == COUNTER_TOMBSTONE {
-				break false;
-			}
-			if counter
-				.compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
-				.is_ok()
-			{
-				break true;
-			}
-		};
-		if !acquired {
-			continue;
-		}
-		fence(Ordering::SeqCst);
-		// Two validations after publishing our counter:
-		// (a) `atomic` must not have advanced — a writer that reads
-		//     `iter()` after this fence (in SC total order) will see our
-		//     positive count, but a `fetch_max` between our load and now
-		//     means our snapshot is stale.
-		// (b) `gc_floor` (if applicable) must be `<= v`. The BG sweeper
-		//     publishes its cleanup_ts to `gc_floor` before reclaiming
-		//     any versions, so a value above ours means the version we
-		//     wanted is about to disappear and we must retry.
-		let oracle_stable = atomic.load(Ordering::SeqCst) == v;
-		let floor_ok = match gc_floor {
-			Some(f) => f.load(Ordering::SeqCst) <= v,
-			None => true,
-		};
-		if oracle_stable && floor_ok {
-			return (v, counter);
-		}
-		// Roll back, mirroring the Drop path so a concurrent register
-		// cannot land on this counter once we tombstone it.
-		if release_counter(&counter) {
-			if let Some(e) = map.get(&v) {
-				if Arc::ptr_eq(e.value(), &counter) {
-					e.remove();
-				}
-			}
-		}
-	}
-}
-
-/// Decrement a counter and try to claim removal of its SkipMap entry.
-/// Returns `true` if the caller should remove the entry from the map.
-#[inline]
-fn release_counter(counter: &AtomicU64) -> bool {
-	loop {
-		let cur = counter.load(Ordering::Acquire);
-		if cur > 1 {
-			if counter
-				.compare_exchange_weak(cur, cur - 1, Ordering::AcqRel, Ordering::Acquire)
-				.is_ok()
-			{
-				return false;
-			}
-			continue;
-		}
-		debug_assert_eq!(cur, 1);
-		if counter
-			.compare_exchange(1, COUNTER_TOMBSTONE, Ordering::AcqRel, Ordering::Acquire)
-			.is_ok()
-		{
-			return true;
-		}
-	}
+fn pin_slot(db: &Inner, slot: &Arc<Slot>) -> (u64, u64, u64) {
+	// Publish the pinning sentinels before the slot becomes visible
+	slot.version.store(SLOT_PINNING, Ordering::SeqCst);
+	slot.commit.store(SLOT_PINNING, Ordering::SeqCst);
+	// Insert the slot into the readers map under a fresh id
+	let slot_id = db.reader_slot_id.fetch_add(1, Ordering::Relaxed) + 1;
+	db.readers.insert(slot_id, slot.clone());
+	// Pair with the fence in every watermark scan
+	fence(Ordering::SeqCst);
+	// Load the commit snapshot, then the version snapshot
+	let commit = db.commit_watermark.load(Ordering::SeqCst);
+	let version = db.oracle.timestamp.load(Ordering::SeqCst);
+	// Publish the chosen snapshot into the slot
+	slot.commit.store(commit, Ordering::SeqCst);
+	slot.version.store(version, Ordering::SeqCst);
+	// Return the slot id and the snapshot
+	(slot_id, commit, version)
 }
 
 impl TransactionInner {
 	/// Create a new read-only or writeable transaction
 	pub(crate) fn new(db: Arc<Inner>, write: bool) -> Self {
-		// Register against both watermark counters
-		let (version, counter_version) =
-			register_counter(&db.counter_by_oracle, &db.oracle.inner.timestamp, Some(&db.gc_floor));
-		let (commit, counter_commit) =
-			register_counter(&db.counter_by_commit, &db.transaction_commit_id, None);
+		// Allocate this transaction's slot and pin it
+		let slot = Arc::new(Slot::pinning());
+		let (slot_id, commit, version) = pin_slot(&db, &slot);
 		// Store the threshold separately before moving db
 		let threshold = db.reset_threshold;
 		// Create the transaction
@@ -585,8 +521,8 @@ impl TransactionInner {
 			scanset: SkipMap::new(),
 			writeset: BTreeMap::new(),
 			database: db,
-			counter_commit,
-			counter_version,
+			slot,
+			slot_id,
 			reset_threshold: threshold,
 			savepoint_stack: Vec::new(),
 		}
@@ -598,17 +534,8 @@ impl TransactionInner {
 		self.mode = IsolationLevel::SerializableSnapshotIsolation;
 		// Update the reset threshold from the database
 		self.reset_threshold = self.database.reset_threshold;
-		// Re-register against both watermark counters
-		let (version, counter_version) = register_counter(
-			&self.database.counter_by_oracle,
-			&self.database.oracle.inner.timestamp,
-			Some(&self.database.gc_floor),
-		);
-		let (commit, counter_commit) = register_counter(
-			&self.database.counter_by_commit,
-			&self.database.transaction_commit_id,
-			None,
-		);
+		// Re-pin the retained slot allocation under a fresh id
+		let (slot_id, commit, version) = pin_slot(&self.database, &self.slot);
 		// Clear savepoint stack
 		self.savepoint_stack.clear();
 		// Clear or completely reset the allocated readset
@@ -633,8 +560,7 @@ impl TransactionInner {
 		self.write = write;
 		self.commit = commit;
 		self.version = version;
-		self.counter_commit = counter_commit;
-		self.counter_version = counter_version;
+		self.slot_id = slot_id;
 	}
 
 	/// Get the starting sequence number of this transaction
@@ -766,30 +692,72 @@ impl TransactionInner {
 		}
 		// Take ownership over the local modifications
 		let writeset = Arc::new(std::mem::take(&mut self.writeset));
+		// Collect the sorted writeset keys for conflict detection. The
+		// commit queue entry retains only these keys: conflict detection
+		// never reads values, and the entry outlives the merge queue's
+		// value-bearing writeset by the whole cleanup window.
+		let keys: Arc<[Bytes]> = writeset.keys().cloned().collect();
 		// Build a bloom filter over the writeset keys
 		let mut writeset_bloom = BloomFilter::new();
-		for key in writeset.keys() {
+		for key in keys.iter() {
 			writeset_bloom.insert(key);
 		}
-		// Collect the sorted writeset keys for conflict detection. The
-		// commit queue stores keys only: its entries outlive the merge
-		// queue entry (they are trimmed later by the cleanup worker),
-		// and storing the values would pin them in memory until then.
-		let keys = writeset.keys().cloned().collect();
 		// Insert this transaction into the commit queue
-		let (version, entry) = self.atomic_commit(Commit {
+		let (commit_slot, commit_entry) = self.atomic_commit(Commit {
 			keys,
-			id: self.database.transaction_queue_id.fetch_add(1, Ordering::AcqRel) + 1,
 			writeset_bloom,
+			merge_version: AtomicU64::new(0),
 		});
+		// Unwind guard: if this transaction panics after publishing its
+		// commit slot, mark the entry aborted and advance the completed
+		// watermark, so an abandoned in-flight entry can never wedge the
+		// contiguous prefix that every future reader's conflict window is
+		// based on. The abort-on-conflict paths below also rely on this
+		// guard for their watermark advance after removing the entry.
+		let mut commit_guard = OnUnwind {
+			armed: true,
+			action: {
+				let database = self.database.clone();
+				let entry = commit_entry.clone();
+				move || {
+					entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
+					database.advance_commit_watermark();
+				}
+			},
+		};
 		// Check wether we should check reads conflicts on commit
 		if self.mode >= IsolationLevel::SnapshotIsolation {
-			// Retrieve all transactions committed since we began
-			for tx in self.database.transaction_commit_queue.range(self.commit + 1..version) {
+			// Retrieve all transactions committed since we began. The
+			// window base is the completed watermark our snapshot was
+			// taken from, which over-approximates concurrency: it can
+			// include commits our version snapshot already sees.
+			for tx in self.database.transaction_commit_queue.range(self.commit + 1..commit_slot) {
+				// Skip aborted commits: their writes will never publish
+				let merge_version = tx.value().merge_version.load(Ordering::SeqCst);
+				if merge_version == COMMIT_ABORTED {
+					continue;
+				}
+				// Skip commits whose merge version is visible in our
+				// snapshot: a visible commit happened strictly before our
+				// snapshot in version order, so it is not concurrent with
+				// this transaction and first-committer-wins does not
+				// apply — we read its effects rather than raced with it.
+				if merge_version != 0 && merge_version <= self.version {
+					continue;
+				}
 				// Check if a previous transaction conflicts against writes
-				if !tx.value().is_disjoint_writeset_bloom(&entry) {
-					// Remove the transaction from the commit queue
-					self.database.transaction_commit_queue.remove(&version);
+				if !tx.value().is_disjoint_writeset_bloom(&commit_entry) {
+					// Do NOT remove the entry here: the commit-queue
+					// insertion-order watermark is advanced opportunistically
+					// (see `Inner::try_advance_commit_prefix`) rather than
+					// synchronously by this slot's own claim, so an entry
+					// must stay visible until that watermark has confirmably
+					// passed it — otherwise a concurrent advance could
+					// mistake "removed early" for "never inserted" and stall
+					// forever. The unwind guard (dropped below, on return)
+					// marks the entry aborted and advances the completed
+					// watermark; `cleanup_commit_queue` removes it later,
+					// once it is safely below every reader's visibility.
 					// Clear the transaction state
 					self.scanset.clear();
 					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
@@ -809,8 +777,9 @@ impl TransactionInner {
 						.value()
 						.is_disjoint_readset_bloom(&self.readset, &self.readset_bloom.lock())
 					{
-						// Remove the transaction from the commit queue
-						self.database.transaction_commit_queue.remove(&version);
+						// Do not remove the entry here — see the comment
+						// on the writeset-conflict branch above. The
+						// unwind guard marks it aborted on return.
 						// Clear the transaction state
 						self.scanset.clear();
 						self.readset.pin().clear();
@@ -841,8 +810,10 @@ impl TransactionInner {
 							if let Some(entry) = self.scanset.range::<Bytes, _>(..=k).next_back() {
 								// Check if the range includes this key (load from ArcSwap)
 								if **entry.value().load() > *k {
-									// Remove the transaction from the commit queue
-									self.database.transaction_commit_queue.remove(&version);
+									// Do not remove the entry here — see the
+									// comment on the writeset-conflict branch
+									// above. The unwind guard marks it
+									// aborted on return.
 									// Clear the transaction state
 									self.readset.pin().clear();
 									self.readset_bloom.lock().clear();
@@ -865,32 +836,57 @@ impl TransactionInner {
 		// Insert this transaction into the merge queue
 		let (version, entry) = self.atomic_merge(Merge {
 			writeset,
-			id: self.database.transaction_merge_id.fetch_add(1, Ordering::AcqRel) + 1,
+			applied: AtomicBool::new(false),
 		});
-		// Apply each writeset entry. Inline gc has intentionally been
-		// removed from this path: the registration race in PR #77 stems
-		// from the gap between `earliest_active_version` and
-		// `gc_older_versions`, where a reader registering in that window
-		// would have its snapshot version swept by a cleanup_ts computed
-		// without it. We defer all version reclamation to the background
-		// gc worker (bounded by `gc_floor`), which runs far less
-		// frequently and so does not race with the steady-state reader
-		// registration pattern. The commit path now only publishes the
-		// new version and queues the key for later sweeping.
+		// Our merge version is now published, so record it on the
+		// commit-queue entry, disarm the abort guard, and advance the
+		// contiguous completed watermark: readers snapshotting the
+		// watermark from here on may exclude this commit from their
+		// conflict windows, because their version snapshot (loaded after
+		// the watermark) is guaranteed to cover our merge version — in
+		// the queue overlay or applied below.
+		commit_entry.merge_version.store(version, Ordering::SeqCst);
+		commit_guard.armed = false;
+		self.database.advance_commit_watermark();
+		// Unwind guard for the apply phase: a panic mid-apply leaves the
+		// chains partially updated (a pre-existing atomicity limitation),
+		// but must not wedge the in-order merge retirement — mark the
+		// entry applied and advance so later merges can still retire.
+		let mut merge_guard = OnUnwind {
+			armed: true,
+			action: {
+				let database = self.database.clone();
+				let entry = entry.clone();
+				move || {
+					entry.applied.store(true, Ordering::SeqCst);
+					database.advance_merge_retirement();
+				}
+			},
+		};
+		// Compute the inline-GC watermark ONCE for this commit, after our
+		// merge version is published and before the apply loop. The
+		// pin-then-read slot protocol makes this safe where it once was
+		// not (the PR #77 race): every current transaction is visible in
+		// the slot scan or forces a skip, and every future transaction
+		// snapshots at or above the clock bound loaded inside — while our
+		// own excluded slot is pinned at our start version, so the
+		// watermark can never sit above the version we push.
+		let watermark = self.database.inline_gc_watermark(self.slot_id);
+		// Apply each writeset entry, reclaiming superseded versions
+		// inline while the chain write lock is already held.
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
 			// Publish the new version into the datastore, guarding against a
-			// concurrent background gc that may be unlinking this key: the
-			// sweeper calls `Entry::remove` while holding the entry's write
+			// concurrent gc sweep that may be unlinking this key: sweeps
+			// call `Entry::remove` while holding the entry's write
 			// lock, so once we hold that lock `is_removed()` tells us whether
 			// the node is still live. `get_or_insert_with` (unlike `insert`)
 			// never replaces a live node, so a concurrent writer's entry can
-			// never be clobbered; if the sweeper unlinked the node we landed
+			// never be clobbered; if a sweep unlinked the node we landed
 			// on, we retry and get a fresh one. The closure seeds the chain
 			// with this version so a freshly-inserted node is never an empty,
-			// immediately-gc-reclaimable node mid-insert. See
-			// `Inner::run_gc_dirty_inner`.
+			// immediately-gc-reclaimable node mid-insert.
 			loop {
 				let entry = self.database.datastore.get_or_insert_with(key.clone(), || {
 					RwLock::new(Versions::from(Version {
@@ -899,7 +895,7 @@ impl TransactionInner {
 					}))
 				});
 				let mut versions = entry.value().write();
-				// The sweeper unlinked this node between lookup and lock; retry
+				// A sweep unlinked this node between lookup and lock; retry
 				// onto a fresh one rather than writing into a detached node.
 				if entry.is_removed() {
 					continue;
@@ -909,18 +905,37 @@ impl TransactionInner {
 					version,
 					value,
 				});
+				// Reclaim versions no live or future transaction can see,
+				// under the write lock we already hold. When the chain
+				// collapses entirely — the entry visible at the watermark
+				// is a delete tombstone with nothing newer, e.g. our own
+				// delete with no readers below — unlink the node while
+				// still holding the lock, so a concurrent committer
+				// observes `is_removed()` and re-inserts.
+				if let Some(w) = watermark {
+					if versions.gc_older_versions(w) == 0 {
+						entry.remove();
+					}
+				}
 				break;
 			}
-			// Queue the key for background gc. Each commit publishes
-			// fresh stale versions, so every modified key is dirty.
-			self.database.gc_dirty_keys.push(key.clone());
 		}
 		// Append the transaction to the persistence layer
 		#[cfg(not(target_arch = "wasm32"))]
 		if let Some(p) = self.database.persistence.read().clone() {
 			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
-				// Remove this transaction from the merge queue
-				self.database.transaction_merge_queue.remove(&version);
+				// Do NOT remove the entry here: the merge clock's
+				// insertion-order advance is opportunistic (see
+				// `Inner::try_advance_merge_clock`), so an entry must stay
+				// visible until the clock has confirmably passed it —
+				// removing it early would be indistinguishable from "never
+				// inserted" to a concurrent advance and could stall it
+				// forever. The unwind guard (dropped below, on return)
+				// marks this entry applied and lets retirement remove it
+				// once the clock naturally reaches this version — the
+				// datastore chains already hold this data regardless (the
+				// pre-existing applied-but-unpersisted limitation of this
+				// error path).
 				// Clear the transaction state
 				self.scanset.clear();
 				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
@@ -934,8 +949,15 @@ impl TransactionInner {
 				return Err(Error::TxCommitNotPersisted(e));
 			}
 		}
-		// Remove this transaction from the merge queue
-		self.database.transaction_merge_queue.remove(&version);
+		// Mark this merge as applied and retire the contiguous applied
+		// prefix of the merge queue. Entries are NEVER removed directly
+		// here: removal out of version order would let a reader find an
+		// older in-flight version's surviving entry in the overlay while
+		// a newer version already sits applied in the chain, returning a
+		// stale value for a snapshot that should see the newer write.
+		entry.applied.store(true, Ordering::SeqCst);
+		merge_guard.armed = false;
+		self.database.advance_merge_retirement();
 		// Clear the transaction state
 		self.scanset.clear();
 		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
@@ -2197,22 +2219,46 @@ impl TransactionInner {
 	fn atomic_commit(&self, updates: Commit) -> (u64, Arc<Commit>) {
 		// Store the number of spins
 		let mut spins = 0;
-		// Get the commit attempt id
-		let id = updates.id;
 		// Store the commit in an Arc
 		let updates = Arc::new(updates);
-		// Get the database transaction merge queue
+		// Get the database transaction commit queue
 		let queue = &self.database.transaction_commit_queue;
-		// Loop until the atomic operation is successful
+		// Claim a unique commit slot from the allocation counter. A dense
+		// claim is always unique, so no collision retry is needed, unlike
+		// probing a queue whose entries can be removed and (if probed by
+		// value) re-claimed out from under a slow concurrent committer.
+		let slot = self.database.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1;
+		// Insert the commit entry at the claimed slot
+		let entry = queue.get_or_insert_with(slot, || Arc::clone(&updates));
+		// Publish strictly in claim order: wait until every lower slot
+		// has been published, then advance the inserted-prefix bound to
+		// cover our own. This is NOT purely a courtesy to others — a
+		// subsequent transaction on this same thread relies on being
+		// able to see this commit's effects via the published bound
+		// alone (it has no other source of "how recent" information),
+		// so our own slot must be reflected before we return.
 		loop {
-			// Get the current commit queue number
-			let version = self.database.transaction_commit_id.load(Ordering::Acquire) + 1;
-			// Insert into the queue if the number is the same
-			let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
-			// Check if the entry was inserted correctly
-			if id == entry.value().id {
-				self.database.transaction_commit_id.fetch_add(1, Ordering::SeqCst);
-				return (version, entry.value().clone());
+			// Reload the current bound rather than retrying a fixed CAS:
+			// a concurrent opportunistic helper (`try_advance_commit_prefix`,
+			// used by the cleanup/GC paths) can advance this same bound on
+			// our behalf once our entry is inserted, using only presence
+			// in the queue as its criterion. If we kept retrying a stale
+			// `compare_exchange(slot - 1, slot)` after that happens, the
+			// bound can never return to `slot - 1` (it is monotonic), so
+			// our CAS would never succeed again — a livelock. Treat the
+			// bound already having reached our slot as success.
+			let cur = self.database.transaction_commit_id.load(Ordering::SeqCst);
+			if cur >= slot {
+				return (slot, entry.value().clone());
+			}
+			if cur == slot - 1
+				&& self
+					.database
+					.transaction_commit_id
+					.compare_exchange_weak(cur, slot, Ordering::SeqCst, Ordering::Acquire)
+					.is_ok()
+			{
+				return (slot, entry.value().clone());
 			}
 			// Ensure the thread backs off when under contention
 			backoff(spins);
@@ -2226,29 +2272,34 @@ impl TransactionInner {
 	fn atomic_merge(&self, updates: Merge) -> (u64, Arc<Merge>) {
 		// Store the number of spins
 		let mut spins = 0;
-		// Get the commit attempt id
-		let id = updates.id;
 		// Store the commit in an Arc
 		let updates = Arc::new(updates);
-		// Get the database timestamp oracle
+		// Get the database logical clock
 		let oracle = self.database.oracle.clone();
 		// Get the database transaction merge queue
 		let queue = &self.database.transaction_merge_queue;
-		// Loop until we reach the next incremental timestamp
+		// Claim a unique merge version from the allocation counter. See
+		// the equivalent comment in `atomic_commit`: a dense claim is
+		// always unique, so no collision retry is needed.
+		let version = oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
+		// Insert the merge entry at the claimed version
+		let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
+		// Publish strictly in claim order — see the equivalent comment
+		// in `atomic_commit` for why this must cover our own version
+		// before we return, and why we reload rather than retry a fixed
+		// CAS (a concurrent `try_advance_merge_clock` call can publish
+		// our version on our behalf).
 		loop {
-			// Get the current nanoseconds since the Unix epoch
-			let mut version = oracle.current_time_ns();
-			// Get the last timestamp for this oracle
-			let last_ts = oracle.inner.timestamp.load(Ordering::Acquire);
-			// Increase the timestamp to ensure monotonicity
-			if version <= last_ts {
-				version = last_ts + 1;
+			let cur = oracle.timestamp.load(Ordering::SeqCst);
+			if cur >= version {
+				return (version, entry.value().clone());
 			}
-			// Insert into the queue if the number is the same
-			let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
-			// Check if the entry was inserted correctly
-			if id == entry.value().id {
-				oracle.inner.timestamp.fetch_max(version, Ordering::SeqCst);
+			if cur == version - 1
+				&& oracle
+					.timestamp
+					.compare_exchange_weak(cur, version, Ordering::SeqCst, Ordering::Acquire)
+					.is_ok()
+			{
 				return (version, entry.value().clone());
 			}
 			// Ensure the thread backs off when under contention
@@ -2261,7 +2312,7 @@ impl TransactionInner {
 
 /// Progressive backoff strategy for contention in atomic queues.
 #[inline(always)]
-fn backoff(spins: usize) {
+pub(crate) fn backoff(spins: usize) {
 	if spins < 10 {
 		std::hint::spin_loop();
 	} else {
@@ -2273,6 +2324,28 @@ fn backoff(spins: usize) {
 		}
 		#[cfg(target_arch = "wasm32")]
 		std::hint::spin_loop();
+	}
+}
+
+/// Runs a completion action when dropped while still armed.
+///
+/// Used by the commit path to guarantee forward progress of the
+/// contiguous commit and merge watermarks when a transaction unwinds
+/// mid-commit: an abandoned in-flight queue entry would otherwise wedge
+/// the prefix forever. Disarmed on the success path once the completion
+/// has been performed explicitly.
+struct OnUnwind<F: FnMut()> {
+	/// The completion action to run on an armed drop
+	action: F,
+	/// Whether the action still needs to run
+	armed: bool,
+}
+
+impl<F: FnMut()> Drop for OnUnwind<F> {
+	fn drop(&mut self) {
+		if self.armed {
+			(self.action)();
+		}
 	}
 }
 
@@ -4450,27 +4523,26 @@ mod tests {
 
 	#[test]
 	fn snapshot_isolation_reader_registration_race_does_not_lose_versions() {
-		// Reproduces a snapshot-isolation registration race in
-		// `TransactionInner::new` and `TransactionInner::reset`:
-		// `oracle.inner.timestamp` is loaded *before* the new
-		// transaction's start version is registered in `counter_by_oracle`.
+		// Historic regression test for a snapshot-isolation registration
+		// race: a transaction loaded its snapshot version BEFORE becoming
+		// visible to sweepers, so a concurrently computed `cleanup_ts`
+		// could miss the registering reader and sweep the versions its
+		// snapshot needed — the reader then observed `None` for a key
+		// that was committed before its snapshot.
 		//
-		// A committer running in that load-then-register window computes
-		// `earliest = counter_by_oracle.front()` without seeing the new
-		// reader, so its inline GC in `commit()` advances
-		// `cleanup_ts = history.min(earliest)` past the reader's
-		// `self.version`. With no other live readers, `earliest` defaults
-		// to the committer's own version, so the GC sweeps *every* version
-		// older than the new commit. The pending reader then snapshots at
-		// `self.version`, calls `versions.fetch_version`, and gets `None`
-		// even though a committed value was visible at its snapshot
-		// timestamp.
+		// The pin-then-read slot protocol closes this structurally: a
+		// transaction publishes its pinning slot before loading the
+		// clock, so every sweep either sees the slot (as a sentinel or a
+		// bounding value) or precedes the snapshot load in the SeqCst
+		// total order, in which case the snapshot is at or above the
+		// sweep's clock bound — and reclamation always retains the entry
+		// visible at its watermark. This test remains as the empirical
+		// validator for that protocol.
 		//
-		// In the SurrealDB embedded `memory` backend this surfaces as a
-		// flake on tests that poll `INFO FOR INDEX` while a concurrent
-		// index builder is committing rapid heartbeat updates to the
-		// build-state key (`distributed_*_replays_second_node_update`
-		// in `surrealdb-private`).
+		// In the SurrealDB embedded `memory` backend the original bug
+		// surfaced as a flake on tests that poll `INFO FOR INDEX` while a
+		// concurrent index builder is committing rapid heartbeat updates
+		// to the build-state key.
 		use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 		use std::sync::Arc;
 		use std::thread;
@@ -4509,11 +4581,11 @@ mod tests {
 			})
 		};
 
-		// Reader threads open many short-lived snapshots. The bug
-		// triggers when a reader enters `TransactionInner::new`/`reset`,
-		// loads the oracle timestamp, and is descheduled before it can
-		// register in `counter_by_oracle`. More readers means more
-		// chances to land in that window.
+		// Reader threads open many short-lived snapshots. The original
+		// bug triggered when a reader entered `TransactionInner::new` or
+		// `reset` and was descheduled between choosing its snapshot and
+		// becoming visible to sweepers. More readers means more chances
+		// to land in that window.
 		let mut readers = Vec::new();
 		for _ in 0..6 {
 			let db = Arc::clone(&db);
@@ -4550,21 +4622,20 @@ mod tests {
 			nones, 0,
 			"reader observed `None` for a key that was seeded with a value \
 			 and never deleted ({nones} of {total} reads returned `None`). \
-			 This is a snapshot-isolation registration race: \
-			 `TransactionInner::new` (and `::reset`) load \
-			 `oracle.inner.timestamp` before registering the \
-			 transaction's start version in `counter_by_oracle`, so a \
-			 concurrent committer's inline GC can advance `cleanup_ts` \
-			 past the reader's snapshot. The reader then sees no visible \
-			 version at its snapshot timestamp."
+			 This is a snapshot-isolation registration race: a transaction \
+			 chose its snapshot before its slot was visible to sweepers, \
+			 so a concurrently computed `cleanup_ts` swept the versions \
+			 its snapshot needed. The pin-then-read slot protocol in \
+			 `pin_slot` is supposed to make this impossible."
 		);
 	}
 
 	/// Per-key version chain: many overlapping writers on one key, then
 	/// verify the raw chain is strictly monotonic and holds every committed
-	/// value exactly once. Background workers are disabled so the chain is
-	/// never pruned while the test inspects it: the commit path performs no
-	/// inline GC, so all reclamation happens in the (disabled) worker.
+	/// value exactly once. A reader pinned at the seed version holds every
+	/// commit's inline-GC watermark below the whole test's writes, so the
+	/// chain retains the full history for inspection; background workers
+	/// are disabled so no safety-net sweep runs either.
 	#[test]
 	fn test_version_chain_monotonic_under_concurrent_writers() {
 		const THREADS: usize = 8;
@@ -4578,6 +4649,9 @@ mod tests {
 			tx.set(b"hotkey".to_vec(), b"seed".to_vec()).unwrap();
 			tx.commit().unwrap();
 		}
+		// Pin a reader at the seed version so inline commit-time GC keeps
+		// the seed and every later version alive for the whole test.
+		let pin = db.transaction(false);
 		let barrier = Arc::new(std::sync::Barrier::new(THREADS));
 		let written: Arc<std::sync::Mutex<std::collections::BTreeSet<Vec<u8>>>> =
 			Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
@@ -4625,16 +4699,22 @@ mod tests {
 			chain.iter().filter_map(|v| v.value.as_ref().map(|b| b.to_vec())).collect();
 		got.remove(b"seed".as_slice());
 		assert_eq!(got, committed, "chain values diverge from committed writes");
+		// Release the pinned reader
+		drop(pin);
 	}
 
 	/// Repeated sequential writes to the same keys: each key's raw version
-	/// chain accumulates every committed round in order. Background workers
-	/// are disabled so chains retain all versions during inspection.
+	/// chain accumulates every committed round in order. A reader pinned
+	/// before the first round holds every commit's inline-GC watermark
+	/// below the whole test's writes; background workers are disabled so
+	/// no safety-net sweep runs either.
 	#[test]
 	fn test_version_chain_accumulates_repeated_writes() {
 		let db = Database::new_with_options(
 			crate::DatabaseOptions::default().with_all_workers_disabled(),
 		);
+		// Pin a reader so inline commit-time GC retains every round
+		let pin = db.transaction(false);
 		// Five writes per key, on 200 keys
 		for round in 0..5 {
 			let mut tx = db.transaction(true);
@@ -4665,5 +4745,7 @@ mod tests {
 				);
 			}
 		}
+		// Release the pinned reader
+		drop(pin);
 	}
 }
