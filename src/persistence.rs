@@ -321,7 +321,11 @@ impl Persistence {
 				// observable state. The encoded element type is unchanged, so
 				// snapshot files remain readable across releases in both
 				// directions.
-				if let Some((version, value)) = entry.value().read().latest() {
+				// `latest` returns owned values, so the per-key version read guard is
+				// released at the end of this statement rather than being held across
+				// the encode and write below.
+				let latest = entry.value().read().latest();
+				if let Some((version, value)) = latest {
 					// Serialize and write this single entry
 					bincode::serde::encode_into_std_write(
 						&(entry.key().clone(), vec![(version, Some(value))]),
@@ -538,6 +542,10 @@ impl Persistence {
 
 	/// Truncate the AOL file up to the specified position, preserving any data
 	/// after.
+	#[expect(
+		clippy::significant_drop_tightening,
+		reason = "the file guard must cover the pending_syncs store, or a concurrent append's increment is silently discarded along with its required fsync"
+	)]
 	fn truncate(
 		aol: &Option<Arc<Mutex<File>>>,
 		position: u64,
@@ -545,7 +553,8 @@ impl Persistence {
 	) -> Result<(), PersistenceError> {
 		// Check that we have a AOL file handle
 		if let Some(ref aol) = aol {
-			// Lock the AOL file
+			// Lock the AOL file. The mutex is deliberately held past its last
+			// file use so that it still covers the `pending_syncs` store below.
 			let mut file = aol.lock()?;
 			// Get the current file length
 			let file_len = file.metadata()?.len();
@@ -701,7 +710,11 @@ impl Persistence {
 							// Persist only the latest committed version of
 							// each key, omitting keys whose newest entry is
 							// a delete tombstone. See `snapshot()` above.
-							if let Some((version, value)) = entry.value().read().latest() {
+							// `latest` returns owned values, so the per-key version read guard is
+							// released at the end of this statement rather than being held across
+							// the encode and write below.
+							let latest = entry.value().read().latest();
+							if let Some((version, value)) = latest {
 								// Serialize and write this single entry
 								bincode::serde::encode_into_std_write(
 									&(entry.key().clone(), vec![(version, Some(value))]),
@@ -890,6 +903,10 @@ impl Persistence {
 	///
 	/// # Returns
 	/// * `Result<(), PersistenceError>` - Success or an error
+	#[expect(
+		clippy::significant_drop_tightening,
+		reason = "the file guard must cover the pending_syncs store, or a concurrent append's increment is silently discarded along with its required fsync"
+	)]
 	pub(crate) fn append(
 		&self,
 		version: u64,
@@ -914,7 +931,9 @@ impl Persistence {
 				}
 			}
 			if self.aol_mode == AolMode::SynchronousOnCommit {
-				// Lock the AOL file for writing
+				// Lock the AOL file for writing. The mutex is deliberately held
+				// past its last file use so that it still covers the
+				// `pending_syncs` store below.
 				let mut file = aol.lock()?;
 				// Create a new buffer for the AOL file
 				let mut writer = BufWriter::new(&mut *file);
@@ -983,18 +1002,23 @@ impl Drop for Persistence {
 	fn drop(&mut self) {
 		// Signal shutdown to the worker threads
 		self.background_threads_enabled.store(false, Ordering::Release);
-		// Stop the fsync worker if it exists
-		if let Some(handle) = self.fsync_handle.write().take() {
+		// Stop the fsync worker if it exists. The `take` is hoisted into its
+		// own statement so the write guard is released before the blocking
+		// `join`, instead of being held across it.
+		let fsync = self.fsync_handle.write().take();
+		if let Some(handle) = fsync {
 			handle.thread().unpark();
 			let _ = handle.join();
 		}
 		// Stop the snapshot worker if it exists
-		if let Some(handle) = self.snapshot_handle.write().take() {
+		let snapshot = self.snapshot_handle.write().take();
+		if let Some(handle) = snapshot {
 			handle.thread().unpark();
 			let _ = handle.join();
 		}
 		// Stop the async append worker if it exists
-		if let Some(handle) = self.appender_handle.write().take() {
+		let appender = self.appender_handle.write().take();
+		if let Some(handle) = appender {
 			handle.thread().unpark();
 			let _ = handle.join();
 		}

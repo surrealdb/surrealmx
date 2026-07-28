@@ -603,6 +603,6 @@ fn hot_key_concurrent_writers_converge() {
 	let mut tx = db.transaction(false);
 	let val = tx.get(b"hotkey".to_vec()).unwrap().expect("hotkey must exist");
 	tx.cancel().unwrap();
-	let expected = written.lock().unwrap();
-	assert!(expected.contains(val.as_ref()), "latest value is not one of the committed writes");
+	let is_committed = written.lock().unwrap().contains(val.as_ref());
+	assert!(is_committed, "latest value is not one of the committed writes");
 }

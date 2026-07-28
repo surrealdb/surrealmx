@@ -956,9 +956,13 @@ impl TransactionInner {
 				candidates.insert(key);
 			}
 		}
-		// Append the transaction to the persistence layer
+		// Append the transaction to the persistence layer. Clone the `Arc` out
+		// first so the `persistence` read guard is not held across `append`,
+		// which performs file I/O and may fsync.
 		#[cfg(not(target_arch = "wasm32"))]
-		if let Some(p) = self.database.persistence.read().clone() {
+		let persistence = self.database.persistence.read().clone();
+		#[cfg(not(target_arch = "wasm32"))]
+		if let Some(p) = persistence {
 			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
 				// Do NOT remove the entry here: the merge clock's
 				// insertion-order advance is opportunistic (see
@@ -2386,6 +2390,10 @@ impl<F: FnMut()> Drop for OnUnwind<F> {
 }
 
 #[cfg(test)]
+#[allow(
+	clippy::significant_drop_tightening,
+	reason = "lock contention is irrelevant in single-threaded assertions"
+)]
 mod tests {
 
 	use crate::err::Error;

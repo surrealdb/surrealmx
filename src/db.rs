@@ -233,16 +233,21 @@ impl Database {
 			if let Some(ref persistence) = self.persistence {
 				// Disable the persistence background workers
 				persistence.background_threads_enabled.store(false, Ordering::Release);
-				// Wait for persistence threads to exit
-				if let Some(handle) = persistence.fsync_handle.write().take() {
+				// Wait for persistence threads to exit. Each `take` is hoisted
+				// into its own statement so the write guard is released before
+				// the blocking `join`, instead of being held across it.
+				let fsync = persistence.fsync_handle.write().take();
+				if let Some(handle) = fsync {
 					handle.thread().unpark();
 					let _ = handle.join();
 				}
-				if let Some(handle) = persistence.snapshot_handle.write().take() {
+				let snapshot = persistence.snapshot_handle.write().take();
+				if let Some(handle) = snapshot {
 					handle.thread().unpark();
 					let _ = handle.join();
 				}
-				if let Some(handle) = persistence.appender_handle.write().take() {
+				let appender = persistence.appender_handle.write().take();
+				if let Some(handle) = appender {
 					handle.thread().unpark();
 					let _ = handle.join();
 				}
@@ -253,12 +258,14 @@ impl Database {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
 			// Wait for the transaction cleanup thread to exit
-			if let Some(handle) = self.transaction_cleanup_handle.write().take() {
+			let cleanup = self.transaction_cleanup_handle.write().take();
+			if let Some(handle) = cleanup {
 				handle.thread().unpark();
 				let _ = handle.join();
 			}
 			// Wait for the garbage collector thread to exit
-			if let Some(handle) = self.garbage_collection_handle.write().take() {
+			let gc = self.garbage_collection_handle.write().take();
+			if let Some(handle) = gc {
 				handle.thread().unpark();
 				let _ = handle.join();
 			}
@@ -344,6 +351,10 @@ impl Database {
 }
 
 #[cfg(test)]
+#[allow(
+	clippy::significant_drop_tightening,
+	reason = "lock contention is irrelevant in single-threaded assertions"
+)]
 mod tests {
 
 	use super::*;

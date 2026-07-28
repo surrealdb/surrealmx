@@ -18,6 +18,22 @@ keywords = [
 categories = ["database-implementations", "data-structures", "embedded"]
 license = "Apache-2.0"
 
+[lints.clippy]
+
+# Checks for temporaries with a significant `Drop` in `if let`/`match`
+# scrutinees, which live until the end of the whole expression. For a
+# lock-free MVCC engine this is the difference between releasing a lock
+# before a blocking `join`/fsync and holding it across one.
+# https://rust-lang.github.io/rust-clippy/master/#significant_drop_in_scrutinee
+significant_drop_in_scrutinee = "warn"
+
+# Checks for lock guards held longer than their last use. Flags contention
+# that is invisible when reading the code. Some holds here are deliberate
+# and load-bearing; those carry an `#[expect]` with the invariant spelled
+# out rather than being "fixed".
+# https://rust-lang.github.io/rust-clippy/master/#significant_drop_tightening
+significant_drop_tightening = "warn"
+
 [dependencies]
 arc-swap = "1.9.1"
 bincode = { version = "2.0.1", features = ["serde"] }

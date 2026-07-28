@@ -499,6 +499,10 @@ impl Inner {
 	/// the trimmed chain still holds reclaimable versions (a reader
 	/// watermark is pinning them), the key is re-tracked for the next
 	/// sweep.
+	#[expect(
+		clippy::significant_drop_tightening,
+		reason = "the version write guard must cover entry.remove() so a committer blocked on it observes is_removed() and re-inserts"
+	)]
 	pub(crate) fn run_gc_tracked(&self, cleanup_ts: u64) {
 		// A single map guard serves the whole sweep: guard churn per
 		// candidate costs more than holding one across the pass, and the
@@ -523,7 +527,10 @@ impl Inner {
 			let Some(entry) = self.datastore.get(&key) else {
 				continue;
 			};
-			// Get a mutable reference to the versions list
+			// Get a mutable reference to the versions list. The write guard is
+			// deliberately held across `entry.remove()` below: a committer
+			// blocked on this lock must observe `is_removed()` and re-insert,
+			// rather than writing into a node we are about to unlink.
 			let mut versions = entry.value().write();
 			// A sweep or commit-time collapse unlinked this node between
 			// lookup and lock; any recreation re-tracks the key itself
@@ -553,6 +560,10 @@ impl Inner {
 	/// every key, it supersedes the candidate set: callers clear the set
 	/// before scanning (commits racing with the scan re-track their keys
 	/// as usual).
+	#[expect(
+		clippy::significant_drop_tightening,
+		reason = "the version write guard must cover entry.remove() so a committer blocked on it observes is_removed() and re-inserts"
+	)]
 	pub(crate) fn run_gc_full(&self, cleanup_ts: u64) {
 		// Iterate over the entire datastore
 		for entry in self.datastore.iter() {
