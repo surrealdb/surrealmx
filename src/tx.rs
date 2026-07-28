@@ -424,20 +424,6 @@ impl Transaction {
 }
 
 // --------------------------------------------------
-// SavepointState
-// --------------------------------------------------
-
-/// A savepoint state capturing transaction state at a specific point
-struct SavepointState {
-	/// The readset at the time of the savepoint
-	readset: HashSet<Bytes>,
-	/// The scanset at the time of the savepoint
-	scanset: SkipMap<Bytes, ArcSwap<Bytes>>,
-	/// The writeset at the time of the savepoint
-	writeset: BTreeMap<Bytes, Option<Bytes>>,
-}
-
-// --------------------------------------------------
 // TransactionInner
 // --------------------------------------------------
 
@@ -469,8 +455,11 @@ pub(crate) struct TransactionInner {
 	pub(crate) slot_id: u64,
 	/// Threshold after which transaction state is reset
 	reset_threshold: usize,
-	/// Stack of savepoint states for nested partial rollbacks
-	savepoint_stack: Vec<SavepointState>,
+	/// Stack of writeset snapshots for nested partial rollbacks. Only the
+	/// writeset is captured: reads and scans are tracked monotonically and
+	/// are never rewound by a rollback, so a surviving write can never
+	/// depend on a read the transaction has forgotten
+	savepoint_stack: Vec<BTreeMap<Bytes, Option<Bytes>>>,
 }
 
 /// Register a transaction in the readers map and choose its snapshot.
@@ -620,37 +609,16 @@ impl TransactionInner {
 		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
-		// Create a new readset for the savepoint
-		let readset = HashSet::new();
-		// Store the readset for the savepoint
-		{
-			// Pin the readset for access
-			let pin = readset.pin();
-			// Clone the readset for the savepoint
-			for key in &self.readset.pin() {
-				pin.insert(key.clone());
-			}
-		};
-		// Create a new scanset for the savepoint
-		let scanset = SkipMap::new();
-		// Clone the scanset for the savepoint
-		for entry in &self.scanset {
-			// Load the Arc from ArcSwap and clone it for the new savepoint
-			let value = Arc::clone(&entry.value().load());
-			scanset.insert(entry.key().clone(), ArcSwap::new(value));
-		}
-		// Create the savepoint state
-		self.savepoint_stack.push(SavepointState {
-			readset,
-			scanset,
-			writeset: self.writeset.clone(),
-		});
+		// Snapshot the writeset for the savepoint
+		self.savepoint_stack.push(self.writeset.clone());
 		// Continue
 		Ok(())
 	}
 
 	/// Rollback the transaction to the most recently set savepoint
-	/// Pops the latest savepoint from the stack and restores transaction state
+	/// Pops the latest savepoint from the stack and restores the writeset
+	/// Reads and scans made since the savepoint are deliberately retained, so
+	/// that conflict detection stays conservative for any write that survives
 	pub fn rollback_to_savepoint(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
 		if self.done {
@@ -660,26 +628,8 @@ impl TransactionInner {
 		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
-		// Pop the most recent savepoint from the stack
-		let savepoint = self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
-		// Pin the readset for access
-		let readset = self.readset.pin();
-		// Clear the readset
-		readset.clear();
-		// Clone the readset from the savepoint
-		for key in &savepoint.readset.pin() {
-			readset.insert(key.clone());
-		}
-		// Restore the scanset to the savepoint
-		self.scanset.clear();
-		// Clone the scanset from the savepoint
-		for entry in &savepoint.scanset {
-			// Load the Arc from ArcSwap and clone it for the restored scanset
-			let value = Arc::clone(&entry.value().load());
-			self.scanset.insert(entry.key().clone(), ArcSwap::new(value));
-		}
-		// Restore the other transaction state
-		self.writeset = savepoint.writeset;
+		// Pop the most recent savepoint and restore the writeset
+		self.writeset = self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
 		// Continue
 		Ok(())
 	}
@@ -3953,11 +3903,12 @@ mod tests {
 		// Rollback to savepoint
 		tx.rollback_to_savepoint().unwrap();
 
-		// First scan should still be there (check length matches)
-		assert_eq!(
-			tx.inner.as_ref().unwrap().scanset.len(),
-			scanset_before_len,
-			"Scanset should be restored to state before savepoint"
+		// The first scan must still be tracked. Scans are tracked monotonically,
+		// so the scan made inside the rolled back scope is retained too, keeping
+		// conflict detection conservative for any write that survives
+		assert!(
+			tx.inner.as_ref().unwrap().scanset.len() >= scanset_before_len,
+			"Scans from before the savepoint should never be lost by a rollback"
 		);
 
 		// Add a write
