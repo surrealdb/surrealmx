@@ -110,7 +110,7 @@ impl Transaction {
 
 	/// Set a savepoint in the transaction for partial rollback
 	/// This method is stackable and can be called multiple times with
-	/// corresponding calls to `rollback_to_savepoint`
+	/// corresponding calls to `rollback_to_savepoint` or `release_savepoint`
 	pub fn set_savepoint(&mut self) -> Result<(), Error> {
 		self.inner.as_mut().expect(INNER_TAKEN).set_savepoint()
 	}
@@ -119,8 +119,23 @@ impl Transaction {
 	/// After calling this method, subsequent modifications within this
 	/// transaction can be rolled back by calling `rollback_to_savepoint`
 	/// again if there are more savepoints in the stack
+	/// Reads and scans made since the savepoint are deliberately retained, so
+	/// that conflict detection stays conservative for any write that survives
 	pub fn rollback_to_savepoint(&mut self) -> Result<(), Error> {
 		self.inner.as_mut().expect(INNER_TAKEN).rollback_to_savepoint()
+	}
+
+	/// Release the most recent savepoint, keeping everything done since it
+	/// Writes made after the savepoint stay in the transaction, and remain
+	/// undoable by the savepoint set before the released one, which is what
+	/// `rollback_to_savepoint` will target next
+	/// Savepoints are anonymous, so releasing more savepoints than were set
+	/// cannot be detected once the stack is non-empty again: a later
+	/// `rollback_to_savepoint` will silently unwind to an earlier savepoint
+	/// than intended. Pair every `set_savepoint` with exactly one release or
+	/// rollback
+	pub fn release_savepoint(&mut self) -> Result<(), Error> {
+		self.inner.as_mut().unwrap().release_savepoint()
 	}
 
 	/// Get the starting sequence number of this transaction
@@ -630,6 +645,25 @@ impl TransactionInner {
 		}
 		// Pop the most recent savepoint and restore the writeset
 		self.writeset = self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
+		// Continue
+		Ok(())
+	}
+
+	/// Release the most recent savepoint, keeping everything done since it
+	/// Writes made after the savepoint stay in the transaction, and remain
+	/// undoable by the savepoint set before the released one, which is what
+	/// `rollback_to_savepoint` will target next
+	pub fn release_savepoint(&mut self) -> Result<(), Error> {
+		// Check to see if transaction is closed
+		if self.done == true {
+			return Err(Error::TxClosed);
+		}
+		// Check to see if transaction is writable
+		if self.write == false {
+			return Err(Error::TxNotWritable);
+		}
+		// Discard the most recent savepoint, keeping the current writeset
+		self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
 		// Continue
 		Ok(())
 	}
@@ -3642,17 +3676,20 @@ mod tests {
 		// Test error when no savepoint is set
 		let mut tx = db.transaction(true);
 		assert!(matches!(tx.rollback_to_savepoint(), Err(Error::NoSavepoint)));
+		assert!(matches!(tx.release_savepoint(), Err(Error::NoSavepoint)));
 
 		// Test error on read-only transaction
 		let mut tx_readonly = db.transaction(false);
 		assert!(matches!(tx_readonly.set_savepoint(), Err(Error::TxNotWritable)));
 		assert!(matches!(tx_readonly.rollback_to_savepoint(), Err(Error::TxNotWritable)));
+		assert!(matches!(tx_readonly.release_savepoint(), Err(Error::TxNotWritable)));
 
 		// Test error on closed transaction
 		let mut tx_closed = db.transaction(true);
 		tx_closed.cancel().unwrap();
 		assert!(matches!(tx_closed.set_savepoint(), Err(Error::TxClosed)));
 		assert!(matches!(tx_closed.rollback_to_savepoint(), Err(Error::TxClosed)));
+		assert!(matches!(tx_closed.release_savepoint(), Err(Error::TxClosed)));
 
 		// Test stack exhaustion - error when rolling back more savepoints than were set
 		let db_stack = Database::new();
@@ -3688,6 +3725,8 @@ mod tests {
 		tx1.set("key2", "value2").unwrap();
 		tx1.set_savepoint().unwrap();
 		tx1.set("key3", "value3").unwrap();
+		tx1.set_savepoint().unwrap();
+		tx1.release_savepoint().unwrap();
 
 		// Verify savepoints exist
 		assert!(!tx1.inner.as_ref().unwrap().savepoint_stack.is_empty());
@@ -3746,6 +3785,100 @@ mod tests {
 		);
 
 		tx4.cancel().unwrap();
+	}
+
+	#[test]
+	fn test_release_savepoint() {
+		// Verify that releasing a savepoint discards exactly one marker while
+		// keeping the writes made after it, and that a later rollback then
+		// targets the savepoint set before the released one.
+
+		let db = Database::new();
+
+		let mut tx = db.transaction(true);
+
+		// Build a stack three deep
+		tx.set_savepoint().unwrap();
+		tx.set_savepoint().unwrap();
+		tx.set_savepoint().unwrap();
+		assert_eq!(tx.inner.as_ref().unwrap().savepoint_stack.len(), 3);
+
+		// Releasing discards exactly one marker
+		tx.release_savepoint().unwrap();
+		assert_eq!(tx.inner.as_ref().unwrap().savepoint_stack.len(), 2);
+
+		tx.cancel().unwrap();
+
+		// Now the load bearing behaviour: a released scope's writes stay
+		// undoable by the enclosing savepoint
+		let mut tx = db.transaction(true);
+
+		// Outer savepoint, then a write
+		tx.set_savepoint().unwrap();
+		tx.set("outer", "value").unwrap();
+
+		// Inner savepoint, then a write
+		tx.set_savepoint().unwrap();
+		tx.set("inner", "value").unwrap();
+		assert_eq!(tx.inner.as_ref().unwrap().savepoint_stack.len(), 2);
+
+		// Releasing the inner savepoint keeps its write visible
+		tx.release_savepoint().unwrap();
+		assert_eq!(tx.inner.as_ref().unwrap().savepoint_stack.len(), 1);
+		assert_eq!(tx.get("inner").unwrap().as_deref(), Some(b"value" as &[u8]));
+		assert_eq!(tx.get("outer").unwrap().as_deref(), Some(b"value" as &[u8]));
+
+		// A single rollback now unwinds past the released savepoint to the
+		// enclosing one, taking both writes with it
+		tx.rollback_to_savepoint().unwrap();
+		assert_eq!(tx.inner.as_ref().unwrap().savepoint_stack.len(), 0);
+		assert_eq!(tx.get("inner").unwrap(), None, "released scope's write should be undone");
+		assert_eq!(tx.get("outer").unwrap(), None, "enclosing scope's write should be undone");
+
+		// The stack is now empty again
+		assert!(matches!(tx.rollback_to_savepoint(), Err(Error::NoSavepoint)));
+
+		tx.cancel().unwrap();
+	}
+
+	#[test]
+	fn test_release_savepoint_bounds_stack_depth() {
+		// Verify that a savepoint per unit of work, each one released, keeps the
+		// savepoint stack at a bounded depth rather than accumulating one
+		// retained writeset snapshot per savepoint. This is a structural
+		// assertion, not a performance test: the timing and allocation story
+		// belongs in the criterion benchmarks.
+
+		let db = Database::new();
+
+		// Released savepoints do not accumulate
+		let mut tx = db.transaction(true);
+		for i in 0..1000 {
+			tx.set_savepoint().unwrap();
+			tx.set(format!("key{}", i), "value").unwrap();
+			tx.release_savepoint().unwrap();
+		}
+		let inner = tx.inner.as_ref().unwrap();
+		assert_eq!(inner.savepoint_stack.len(), 0, "released savepoints should not accumulate");
+		assert!(
+			inner.savepoint_stack.capacity() <= 8,
+			"a stack that never exceeded depth one should not have grown, got: {}",
+			inner.savepoint_stack.capacity()
+		);
+		tx.cancel().unwrap();
+
+		// Control: without releasing, every savepoint is retained
+		let mut tx = db.transaction(true);
+		for i in 0..1000 {
+			tx.set_savepoint().unwrap();
+			tx.set(format!("key{}", i), "value").unwrap();
+		}
+		assert_eq!(
+			tx.inner.as_ref().unwrap().savepoint_stack.len(),
+			1000,
+			"unreleased savepoints should accumulate"
+		);
+		tx.cancel().unwrap();
 	}
 
 	#[test]
