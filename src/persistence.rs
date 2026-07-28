@@ -242,7 +242,9 @@ impl Persistence {
 			base_path.join("snapshot.bin")
 		};
 		// Initialize AOL components if enabled
-		let aol = if !matches!(options.aol_mode, AolMode::Never) {
+		let aol = if matches!(options.aol_mode, AolMode::Never) {
+			None
+		} else {
 			// Ensure parent directories exist for AOL path
 			if let Some(parent) = aol_path.parent() {
 				fs::create_dir_all(parent)?;
@@ -250,8 +252,6 @@ impl Persistence {
 			// Open the AOL file with append mode
 			let file = OpenOptions::new().create(true).append(true).read(true).open(&aol_path)?;
 			Some(Arc::new(Mutex::new(file)))
-		} else {
-			None
 		};
 		// Ensure parent directories exist for snapshot path
 		if let Some(parent) = snapshot_path.parent() {
@@ -314,7 +314,7 @@ impl Persistence {
 				0
 			};
 			// Stream write each key-value pair to reduce memory usage
-			for entry in self.inner.datastore.iter() {
+			for entry in &self.inner.datastore {
 				// Persist only the latest committed version of each key. Keys
 				// whose newest entry is a delete tombstone are omitted: on
 				// reload the key is simply absent, which is the same
@@ -706,7 +706,7 @@ impl Persistence {
 							0
 						};
 						// Stream write each entry to reduce memory usage
-						for entry in db.datastore.iter() {
+						for entry in &db.datastore {
 							// Persist only the latest committed version of
 							// each key, omitting keys whose newest entry is
 							// a delete tombstone. See `snapshot()` above.

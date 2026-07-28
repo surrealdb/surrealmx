@@ -150,7 +150,7 @@ impl MergeQueueScenario {
 				// Cheap deterministic spread; collisions across sources are
 				// expected and exercise the dedup path.
 				let key_idx = (i.wrapping_mul(31) + j.wrapping_mul(17)) % total_keys;
-				let key = Bytes::from(format!("key_{:08}", key_idx).into_bytes());
+				let key = Bytes::from(format!("key_{key_idx:08}").into_bytes());
 				ws.insert(key, Some(Bytes::from_static(b"v")));
 			}
 			sources.push(Arc::new(Merge {
@@ -159,7 +159,7 @@ impl MergeQueueScenario {
 			}));
 		}
 		let beg = Bytes::from(b"key_00000000".to_vec());
-		let end = Bytes::from(format!("key_{:08}", total_keys).into_bytes());
+		let end = Bytes::from(format!("key_{total_keys:08}").into_bytes());
 		Self {
 			sources,
 			beg,

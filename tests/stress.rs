@@ -75,7 +75,7 @@ fn concurrent_random_transactions() {
 		let key = Bytes::from(key_num.to_be_bytes().to_vec());
 		let val = tx.get(&key).unwrap();
 		let expected_val = snapshot.get(&key).cloned().unwrap_or(None);
-		assert_eq!(val, expected_val, "mismatch for key {}", key_num);
+		assert_eq!(val, expected_val, "mismatch for key {key_num}");
 	}
 	tx.cancel().unwrap();
 }

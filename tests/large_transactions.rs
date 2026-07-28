@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Large transaction stress tests for SurrealMX.
+//! Large transaction stress tests for `SurrealMX`.
 //!
 //! Tests high-volume transaction scenarios including many keys,
 //! large values, and sustained write pressure.
@@ -37,8 +37,8 @@ fn transaction_with_thousands_of_keys() {
 	// Write many keys in a single transaction
 	let mut tx = db.transaction(true);
 	for i in 0..num_keys {
-		let key = format!("key_{:06}", i);
-		let value = format!("value_{}", i);
+		let key = format!("key_{i:06}");
+		let value = format!("value_{i}");
 		tx.set(key, value).unwrap();
 	}
 	tx.commit().unwrap();
@@ -46,7 +46,7 @@ fn transaction_with_thousands_of_keys() {
 	// Verify all keys are present
 	let tx = db.transaction(false);
 	let results = tx.scan("key_".."key_z", None, None).unwrap();
-	assert_eq!(results.len(), num_keys, "All {} keys should be present", num_keys);
+	assert_eq!(results.len(), num_keys, "All {num_keys} keys should be present");
 
 	// Spot check some values
 	assert_eq!(tx.get("key_000000").unwrap(), Some(Bytes::from("value_0")));
@@ -64,7 +64,7 @@ fn large_value_handling() {
 
 	let mut tx = db.transaction(true);
 	for (i, size) in sizes.iter().enumerate() {
-		let key = format!("large_key_{}", i);
+		let key = format!("large_key_{i}");
 		// Create a value of the specified size
 		let value = vec![b'x'; *size];
 		tx.set(key, value).unwrap();
@@ -74,9 +74,9 @@ fn large_value_handling() {
 	// Verify all values are retrievable and correct size
 	let tx = db.transaction(false);
 	for (i, expected_size) in sizes.iter().enumerate() {
-		let key = format!("large_key_{}", i);
+		let key = format!("large_key_{i}");
 		let value = tx.get(&key).unwrap().expect("Value should exist");
-		assert_eq!(value.len(), *expected_size, "Value {} should be {} bytes", i, expected_size);
+		assert_eq!(value.len(), *expected_size, "Value {i} should be {expected_size} bytes");
 		// Verify content
 		assert!(value.iter().all(|&b| b == b'x'), "All bytes should be 'x'");
 	}
@@ -94,7 +94,7 @@ fn many_small_writes() {
 	for tx_num in 0..num_transactions {
 		let mut tx = db.transaction(true);
 		for key_num in 0..keys_per_tx {
-			let key = format!("tx{:04}_key{:02}", tx_num, key_num);
+			let key = format!("tx{tx_num:04}_key{key_num:02}");
 			tx.set(key, "value").unwrap();
 		}
 		tx.commit().unwrap();
@@ -122,8 +122,8 @@ fn large_scan_results() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..num_keys {
-			let key = format!("scan_key_{:05}", i);
-			let value = format!("value_for_{}", i);
+			let key = format!("scan_key_{i:05}");
+			let value = format!("value_for_{i}");
 			tx.set(key, value).unwrap();
 		}
 		tx.commit().unwrap();
@@ -162,7 +162,7 @@ fn memory_under_write_pressure() {
 		let mut tx = db.transaction(true);
 		for key_num in 0..keys_per_iteration {
 			// Reuse key names to simulate updates (overwriting existing data)
-			let key = format!("pressure_key_{:03}", key_num);
+			let key = format!("pressure_key_{key_num:03}");
 			let value = vec![(iter % 256) as u8; value_size];
 			tx.set(key, value).unwrap();
 		}
@@ -172,7 +172,7 @@ fn memory_under_write_pressure() {
 	// Verify final state
 	let tx = db.transaction(false);
 	let results = tx.scan("pressure_key_".."pressure_key_z", None, None).unwrap();
-	assert_eq!(results.len(), keys_per_iteration, "Should have {} unique keys", keys_per_iteration);
+	assert_eq!(results.len(), keys_per_iteration, "Should have {keys_per_iteration} unique keys");
 
 	// Verify values have the content from the last iteration
 	let expected_byte = ((iterations - 1) % 256) as u8;
@@ -196,8 +196,8 @@ fn large_batch_getm() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..num_keys {
-			let key = format!("batch_key_{:04}", i);
-			let value = format!("batch_value_{}", i);
+			let key = format!("batch_key_{i:04}");
+			let value = format!("batch_value_{i}");
 			tx.set(key, value).unwrap();
 		}
 		tx.commit().unwrap();
@@ -205,16 +205,16 @@ fn large_batch_getm() {
 
 	// Perform a large batch get
 	let tx = db.transaction(false);
-	let keys: Vec<String> = (0..num_keys).map(|i| format!("batch_key_{:04}", i)).collect();
-	let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+	let keys: Vec<String> = (0..num_keys).map(|i| format!("batch_key_{i:04}")).collect();
+	let key_refs: Vec<&str> = keys.iter().map(std::string::String::as_str).collect();
 
 	let results = tx.getm(key_refs).unwrap();
 	assert_eq!(results.len(), num_keys);
 
 	// All values should be present
 	for (i, result) in results.iter().enumerate() {
-		assert!(result.is_some(), "Key {} should have a value", i);
-		let expected = format!("batch_value_{}", i);
+		assert!(result.is_some(), "Key {i} should have a value");
+		let expected = format!("batch_value_{i}");
 		assert_eq!(result.as_ref().unwrap(), &Bytes::from(expected));
 	}
 
@@ -222,13 +222,13 @@ fn large_batch_getm() {
 	let mixed_keys: Vec<String> = (0..100)
 		.map(|i| {
 			if i % 2 == 0 {
-				format!("batch_key_{:04}", i)
+				format!("batch_key_{i:04}")
 			} else {
-				format!("nonexistent_{:04}", i)
+				format!("nonexistent_{i:04}")
 			}
 		})
 		.collect();
-	let mixed_refs: Vec<&str> = mixed_keys.iter().map(|s| s.as_str()).collect();
+	let mixed_refs: Vec<&str> = mixed_keys.iter().map(std::string::String::as_str).collect();
 
 	let mixed_results = tx.getm(mixed_refs).unwrap();
 	assert_eq!(mixed_results.len(), 100);
@@ -236,9 +236,9 @@ fn large_batch_getm() {
 	// Every other result should be Some/None
 	for (i, result) in mixed_results.iter().enumerate() {
 		if i % 2 == 0 {
-			assert!(result.is_some(), "Even index {} should have value", i);
+			assert!(result.is_some(), "Even index {i} should have value");
 		} else {
-			assert!(result.is_none(), "Odd index {} should be None", i);
+			assert!(result.is_none(), "Odd index {i} should be None");
 		}
 	}
 }

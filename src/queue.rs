@@ -111,7 +111,7 @@ impl Commit {
 			// Choose iteration direction based on size to minimize iterations
 			if other.len() < self.keys.len() {
 				// Check if any key in readset exists in the writeset
-				for key in other.iter() {
+				for key in &other {
 					if self.contains_key(key) {
 						// Log the error for debug purposes
 						#[cfg(debug_assertions)]

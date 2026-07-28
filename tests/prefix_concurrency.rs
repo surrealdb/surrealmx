@@ -167,7 +167,7 @@ fn concurrent_writers_compete_for_same_keys() {
 						tx.set(key.clone(), val.clone()).unwrap();
 						match tx.commit() {
 							Ok(()) => break,
-							Err(Error::KeyWriteConflict) | Err(Error::KeyReadConflict) => {
+							Err(Error::KeyWriteConflict | Error::KeyReadConflict) => {
 								conflicts.fetch_add(1, Ordering::Relaxed);
 								continue;
 							}
@@ -243,7 +243,7 @@ fn ssi_increment_counter_under_contention() {
 							successes.fetch_add(1, Ordering::Relaxed);
 							break;
 						}
-						Err(Error::KeyReadConflict) | Err(Error::KeyWriteConflict) => {
+						Err(Error::KeyReadConflict | Error::KeyWriteConflict) => {
 							conflicts.fetch_add(1, Ordering::Relaxed);
 							continue;
 						}
@@ -546,7 +546,11 @@ fn sustained_mixed_workload_prefix_keys() {
 	for (k, v) in &scanned {
 		// scan and get must agree
 		let g = tx.get(k.as_ref()).unwrap();
-		assert_eq!(g.as_ref().map(|b| b.as_ref()), Some(v.as_ref()), "scan/get disagree");
+		assert_eq!(
+			g.as_ref().map(std::convert::AsRef::as_ref),
+			Some(v.as_ref()),
+			"scan/get disagree"
+		);
 		// And the value must be one some thread actually wrote
 		assert!(
 			values.contains(v.as_ref()),

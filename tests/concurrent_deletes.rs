@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Concurrent delete tests for SurrealMX.
+//! Concurrent delete tests for `SurrealMX`.
 //!
 //! Tests delete operations under concurrent access, including racing
 //! deletes, delete vs update conflicts, and phantom delete detection.
@@ -131,7 +131,7 @@ fn delete_during_range_scan() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..10 {
-			tx.set(format!("key{:02}", i), format!("value{}", i)).unwrap();
+			tx.set(format!("key{i:02}"), format!("value{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 	}
@@ -318,7 +318,7 @@ fn ssi_delete_read_conflict() {
 ///
 /// Note: the specific remove-vs-reinsert window is extremely narrow and this
 /// test is not a deterministic reproducer of it (it did not fail even with the
-/// guard removed under ThreadSanitizer); it is a sanity/stress guard over the
+/// guard removed under `ThreadSanitizer`); it is a sanity/stress guard over the
 /// delete-recreate-under-GC pattern. A side thread hammers `run_gc()`.
 #[test]
 fn delete_then_recreate_under_gc_keeps_value() {

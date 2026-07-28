@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Concurrent range operation tests for SurrealMX.
+//! Concurrent range operation tests for `SurrealMX`.
 //!
 //! Tests range scans under concurrent modifications including inserts,
 //! deletes, and updates within scanned ranges.
@@ -86,7 +86,7 @@ fn delete_from_scanned_range() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..5 {
-			tx.set(format!("key_{}", i), format!("value_{}", i)).unwrap();
+			tx.set(format!("key_{i}"), format!("value_{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 	}
@@ -133,7 +133,7 @@ fn update_within_scanned_range() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..5 {
-			tx.set(format!("key_{}", i), format!("value_{}", i)).unwrap();
+			tx.set(format!("key_{i}"), format!("value_{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 	}
@@ -189,7 +189,7 @@ fn concurrent_range_scans() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..20 {
-			tx.set(format!("key_{:02}", i), format!("value_{}", i)).unwrap();
+			tx.set(format!("key_{i:02}"), format!("value_{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 	}
@@ -214,7 +214,7 @@ fn concurrent_range_scans() {
 
 	// All scanners should see the same count (consistent snapshot)
 	for (scanner_id, count) in &results {
-		assert_eq!(*count, 20, "Scanner {} should see all 20 keys, got {}", scanner_id, count);
+		assert_eq!(*count, 20, "Scanner {scanner_id} should see all 20 keys, got {count}");
 	}
 }
 
@@ -226,7 +226,7 @@ fn scan_while_bulk_insert() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..10 {
-			tx.set(format!("existing_{:02}", i), "initial").unwrap();
+			tx.set(format!("existing_{i:02}"), "initial").unwrap();
 		}
 		tx.commit().unwrap();
 	}
@@ -250,7 +250,7 @@ fn scan_while_bulk_insert() {
 		barrier2.wait();
 		let mut tx = db2.transaction(true);
 		for i in 0..100 {
-			tx.set(format!("new_{:03}", i), "bulk").unwrap();
+			tx.set(format!("new_{i:03}"), "bulk").unwrap();
 		}
 		tx.commit()
 	});
@@ -278,7 +278,7 @@ fn range_scan_consistency() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..10 {
-			tx.set(format!("data_{:02}", i), format!("v{}", i)).unwrap();
+			tx.set(format!("data_{i:02}"), format!("v{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 	}

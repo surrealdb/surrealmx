@@ -56,9 +56,9 @@ pub(crate) const COMMIT_ABORTED: u64 = u64::MAX;
 /// transaction and is exclusively owned by it, so state transitions are
 /// plain stores — no CAS protocol is required.
 pub(crate) struct Slot {
-	/// The owner's snapshot merge version, or SLOT_PINNING
+	/// The owner's snapshot merge version, or `SLOT_PINNING`
 	pub(crate) version: AtomicU64,
-	/// The owner's snapshot commit id, or SLOT_PINNING
+	/// The owner's snapshot commit id, or `SLOT_PINNING`
 	pub(crate) commit: AtomicU64,
 }
 
@@ -218,7 +218,7 @@ impl Inner {
 	/// loaded BEFORE the fence-and-scan over the slots. This ordering is
 	/// load-bearing: a transaction missed by the scan pinned its slot
 	/// after the scan, so its subsequent commit-snapshot load is ordered
-	/// after our bound load in the SeqCst total order and (the watermark
+	/// after our bound load in the `SeqCst` total order and (the watermark
 	/// being monotonic) returns at least our bound — its conflict window
 	/// `snapshot + 1 ..` sits strictly above everything we trim. A
 	/// transaction seen by the scan bounds the trim directly, and a slot
@@ -566,7 +566,7 @@ impl Inner {
 	)]
 	pub(crate) fn run_gc_full(&self, cleanup_ts: u64) {
 		// Iterate over the entire datastore
-		for entry in self.datastore.iter() {
+		for entry in &self.datastore {
 			// Get a mutable reference to the versions list
 			let mut versions = entry.value().write();
 			// Clean up unnecessary older versions
@@ -594,7 +594,7 @@ impl Inner {
 /// holds [`SLOT_PINNING`] in that dimension.
 ///
 /// The fence pairs with the fence in the pin-then-read registration
-/// protocol: a transaction whose pin-fence precedes ours in the SeqCst
+/// protocol: a transaction whose pin-fence precedes ours in the `SeqCst`
 /// total order is visible to this scan (as a value or as the sentinel);
 /// a transaction whose pin-fence follows ours performs its snapshot
 /// loads after the caller's bound load, so its snapshot is at least the
@@ -610,7 +610,7 @@ pub(crate) fn earliest_pinned(
 ) -> Option<u64> {
 	fence(Ordering::SeqCst);
 	let mut min = fallback;
-	for entry in map.iter() {
+	for entry in map {
 		if Some(*entry.key()) == exclude {
 			continue;
 		}

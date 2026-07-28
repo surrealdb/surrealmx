@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Conditional operation tests for SurrealMX.
+//! Conditional operation tests for `SurrealMX`.
 //!
 //! Tests `put()`, `putc()`, and `delc()` behavior for conditional
 //! insert, update, and delete operations.

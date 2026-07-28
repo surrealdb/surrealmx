@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Persistence edge case tests for SurrealMX.
+//! Persistence edge case tests for `SurrealMX`.
 //!
 //! Tests recovery scenarios, edge cases, and persistence behavior.
 
@@ -334,7 +334,7 @@ fn fsync_interval_mode() {
 	// Write multiple transactions
 	for i in 0..5 {
 		let mut tx = db.transaction(true);
-		tx.set(format!("key_{}", i), format!("value_{}", i)).unwrap();
+		tx.set(format!("key_{i}"), format!("value_{i}")).unwrap();
 		tx.commit().unwrap();
 	}
 
@@ -505,7 +505,7 @@ fn snapshot_truncates_aol() {
 	// Add lots of data to AOL
 	for i in 0..100 {
 		let mut tx = db.transaction(true);
-		tx.set(format!("key_{:04}", i), format!("value_{}", i)).unwrap();
+		tx.set(format!("key_{i:04}"), format!("value_{i}")).unwrap();
 		tx.commit().unwrap();
 	}
 
@@ -521,8 +521,6 @@ fn snapshot_truncates_aol() {
 
 	assert!(
 		aol_size_after < aol_size_before,
-		"AOL should be truncated after snapshot ({} < {})",
-		aol_size_after,
-		aol_size_before
+		"AOL should be truncated after snapshot ({aol_size_after} < {aol_size_before})"
 	);
 }

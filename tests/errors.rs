@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Error handling tests for SurrealMX.
+//! Error handling tests for `SurrealMX`.
 //!
 //! Tests error conditions and proper error handling behavior.
 

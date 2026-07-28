@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Batch operation tests for SurrealMX.
+//! Batch operation tests for `SurrealMX`.
 //!
 //! Tests `getm()` for multi-key operations.
 
@@ -77,7 +77,7 @@ fn getm_handles_all_missing_keys() {
 	let results = tx.getm(keys).unwrap();
 
 	assert_eq!(results.len(), 3);
-	assert!(results.iter().all(|r| r.is_none()), "All results should be None");
+	assert!(results.iter().all(std::option::Option::is_none), "All results should be None");
 }
 
 #[test]
@@ -158,18 +158,18 @@ fn getm_large_batch() {
 	let count = 1000;
 	let mut tx = db.transaction(true);
 	for i in 0..count {
-		tx.set(format!("key_{:04}", i), format!("value_{}", i)).unwrap();
+		tx.set(format!("key_{i:04}"), format!("value_{i}")).unwrap();
 	}
 	tx.commit().unwrap();
 
 	// Get all keys
 	let tx = db.transaction(false);
-	let keys: Vec<String> = (0..count).map(|i| format!("key_{:04}", i)).collect();
+	let keys: Vec<String> = (0..count).map(|i| format!("key_{i:04}")).collect();
 	let results = tx.getm(keys).unwrap();
 
 	assert_eq!(results.len(), count);
 	for (i, result) in results.iter().enumerate() {
-		assert_eq!(*result, Some(Bytes::from(format!("value_{}", i))));
+		assert_eq!(*result, Some(Bytes::from(format!("value_{i}"))));
 	}
 }
 

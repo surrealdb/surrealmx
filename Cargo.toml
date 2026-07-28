@@ -20,6 +20,39 @@ license = "Apache-2.0"
 
 [lints.clippy]
 
+# The `pedantic` group, enabled wholesale. surrealdb/surrealdb hand-picks
+# individual lints instead, because `pedantic` over ~300k LOC is not
+# tractable; surrealmx is ~12k LOC of library code and can afford the whole
+# group. `priority = -1` lets the individual `allow` entries below override
+# the group rather than colliding with it.
+pedantic = { level = "warn", priority = -1 }
+
+# Documenting every `# Errors` and `# Panics` section is prose work, not
+# linting, and would gate this change on writing ~60 doc sections. Left as
+# a follow-up rather than silently unfulfilled.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# `#[must_use]` on every getter is noise, and adding it to public methods
+# that already return owned values changes the API surface for no benefit.
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+
+# `#[inline(always)]` in the hot read/commit paths is a deliberate choice
+# here, not an oversight.
+inline_always = "allow"
+
+# A transaction commit and a version-chain merge are genuinely long
+# functions; splitting them to satisfy a line count would obscure the
+# ordering arguments documented inline.
+too_many_lines = "allow"
+
+# Numeric casts are checked on the library only, via the `--lib` clippy
+# pass in CI. Test and benchmark code casts loop counters freely and the
+# noise there would bury the two real sites in the engine.
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+
 # Checks for temporaries with a significant `Drop` in `if let`/`match`
 # scrutinees, which live until the end of the whole expression. For a
 # lock-free MVCC engine this is the difference between releasing a lock

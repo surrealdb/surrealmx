@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 /// Owned range bounds for the skip list range iterator.
 /// Using owned Bytes avoids lifetime coupling between range bounds
-/// and the MergeIterator, enabling persistent storage (e.g., in a Cursor).
+/// and the `MergeIterator`, enabling persistent storage (e.g., in a Cursor).
 pub(crate) type SkipBounds = (Bound<Bytes>, Bound<Bytes>);
 
 /// Lazy k-way merge iterator over committed merge-queue writesets.
@@ -40,7 +40,7 @@ pub(crate) type SkipBounds = (Bound<Bytes>, Bound<Bytes>);
 ///
 /// Holds an `Arc<Merge>` per source to keep the underlying `Arc<BTreeMap>`
 /// alive without storing any borrows from it; advancement re-seeks the
-/// BTreeMap each step (O(log n) per advance).
+/// `BTreeMap` each step (O(log n) per advance).
 pub(crate) struct MergeQueueIter {
 	sources: Vec<Arc<Merge>>,
 	heads: Vec<Option<(Bytes, Option<Bytes>)>>,
@@ -132,7 +132,7 @@ impl Iterator for MergeQueueIter {
 		let (out_key, out_val) = self.heads[winner].take().unwrap();
 		// Discard older duplicates at the same key, re-seeking past it.
 		for i in (winner + 1)..self.heads.len() {
-			let same = self.heads[i].as_ref().map(|(k, _)| k == &out_key).unwrap_or(false);
+			let same = self.heads[i].as_ref().is_some_and(|(k, _)| k == &out_key);
 			if same {
 				let new = seek_in_writeset(
 					&self.sources[i],
@@ -524,7 +524,7 @@ impl<'a> MergeIterator<'a> {
 	}
 }
 
-impl<'a> Iterator for MergeIterator<'a> {
+impl Iterator for MergeIterator<'_> {
 	type Item = (Bytes, Option<Bytes>);
 
 	fn next(&mut self) -> Option<Self::Item> {

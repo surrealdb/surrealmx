@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Recovery edge case tests for SurrealMX.
+//! Recovery edge case tests for `SurrealMX`.
 //!
 //! Tests crash recovery scenarios including partial writes, corruption,
 //! and concurrent recovery attempts.
@@ -63,19 +63,16 @@ fn recovery_after_partial_aol_write() {
 	// The database should either:
 	// 1. Successfully recover, ignoring the garbage, OR
 	// 2. Return an error indicating corruption
-	match result {
-		Ok(db) => {
-			// If recovery succeeds, valid data should be present
-			let tx = db.transaction(false);
-			let value = tx.get("valid_key").unwrap();
-			// Value might be present (if garbage was ignored/truncated)
-			// or might not be (if recovery stopped before valid data)
-			// Just verify the database is operational
-			drop(value);
-		}
-		Err(_) => {
-			// Error is acceptable - it indicates corruption was detected
-		}
+	if let Ok(db) = result {
+		// If recovery succeeds, valid data should be present
+		let tx = db.transaction(false);
+		let value = tx.get("valid_key").unwrap();
+		// Value might be present (if garbage was ignored/truncated)
+		// or might not be (if recovery stopped before valid data)
+		// Just verify the database is operational
+		drop(value);
+	} else {
+		// Error is acceptable - it indicates corruption was detected
 	}
 }
 
@@ -110,7 +107,7 @@ fn recovery_with_corrupted_snapshot() {
 	for entry in fs::read_dir(temp_path).unwrap() {
 		let entry = entry.unwrap();
 		let path = entry.path();
-		if path.extension().map(|e| e == "snap").unwrap_or(false) {
+		if path.extension().is_some_and(|e| e == "snap") {
 			// Overwrite snapshot with garbage
 			fs::write(&path, b"CORRUPTED_SNAPSHOT_DATA").unwrap();
 		}
@@ -121,16 +118,13 @@ fn recovery_with_corrupted_snapshot() {
 	// 2. Return an error
 	let result = Database::new_with_persistence(db_opts, persistence_opts);
 
-	match result {
-		Ok(db) => {
-			// If recovery succeeds via AOL, data might still be present
-			let tx = db.transaction(false);
-			// Database is operational, that's what matters
-			let _ = tx.get("key1");
-		}
-		Err(_) => {
-			// Error is acceptable for corrupted snapshot
-		}
+	if let Ok(db) = result {
+		// If recovery succeeds via AOL, data might still be present
+		let tx = db.transaction(false);
+		// Database is operational, that's what matters
+		let _ = tx.get("key1");
+	} else {
+		// Error is acceptable for corrupted snapshot
 	}
 }
 

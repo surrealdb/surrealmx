@@ -4,7 +4,7 @@
 //!
 //! Symptom (in the parent project): a range scan against
 //! `[/*0*0*aaa+ix!dc\0 , /*0*0*aaa+ix!dc\xff*40)` would occasionally
-//! return keys with a *different* IndexId (different bytes inside the
+//! return keys with a *different* `IndexId` (different bytes inside the
 //! shared prefix) and a *different* category byte (`!tt`, `!dl`, …).
 //! The decode of the value as `DocLengthAndCount` then failed with
 //! either "Invalid revision 0" (8-byte u64 doc-length value) or
@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use surrealmx::Database;
 
-/// Build a key shaped like SurrealDB's index keys:
+/// Build a key shaped like `SurrealDB`'s index keys:
 ///   `/ * 00 00 00 00 * 00 00 00 00 * aaa \0 + <ix:4 BE> ! <kind:2> <doc:8 BE> <nid:16> <uid:16>`
 /// `nid`/`uid` are filled with a counter so writers don't collide on the same
 /// key — every put is a fresh delta-style key, like the full-text index does.
@@ -95,7 +95,7 @@ fn run_once(budget: Duration) -> (usize, usize, usize) {
 		let stop = Arc::clone(&stop);
 		let writes_done = Arc::clone(&writes_done);
 		writers.push(thread::spawn(move || {
-			let mut counter: u128 = (ix as u128 + 1) << 96;
+			let mut counter: u128 = (u128::from(ix) + 1) << 96;
 			let mut doc: u64 = 0;
 			while !stop.load(Ordering::Relaxed) {
 				for &kind in KINDS {
@@ -195,7 +195,7 @@ fn run_once(budget: Duration) -> (usize, usize, usize) {
 fn hex(b: &[u8]) -> String {
 	let mut s = String::with_capacity(b.len() * 2);
 	for c in b {
-		s.push_str(&format!("{:02x}", c));
+		s.push_str(&format!("{c:02x}"));
 	}
 	s
 }

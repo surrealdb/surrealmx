@@ -21,7 +21,7 @@ pub(crate) enum IndexOrUpdate<'a> {
 /// for the steady state keeps every cold key at ~a third of the memory
 /// a four-slot buffer costs, which dominates total datastore footprint
 /// by key count. Keys that do grow a chain under a pinned reader spill
-/// to a small heap buffer once (SmallVec retains it thereafter), and
+/// to a small heap buffer once (`SmallVec` retains it thereafter), and
 /// even a spilled two-entry chain occupies no more total memory than
 /// the old four-slot inline layout.
 pub struct Versions {
@@ -111,13 +111,13 @@ impl Versions {
 	/// existing entry.
 	///
 	/// This function works in the following way:
-	/// - Return IndexOrUpdate::Ignore if:
+	/// - Return `IndexOrUpdate::Ignore` if:
 	///   - There is no entry with a version <= value.version and the new
 	///     value is a delete (an absent prefix already reads as `None`)
-	/// - Return IndexOrUpdate::Update(version) if:
+	/// - Return `IndexOrUpdate::Update(version)` if:
 	///   - The new value version is the same as an existing version and we
 	///     should update the entry
-	/// - Return IndexOrUpdate::Index(index) if:
+	/// - Return `IndexOrUpdate::Index(index)` if:
 	///   - The entry belongs at any other sorted position
 	#[inline]
 	pub(crate) fn fetch_index_or_update(&mut self, value: &Version) -> IndexOrUpdate<'_> {
@@ -899,7 +899,7 @@ mod tests {
 		let mut versions = Versions::new();
 		// Push many versions in order (all fast path appends)
 		for i in 0..100 {
-			let value = format!("v{}", i);
+			let value = format!("v{i}");
 			versions.push(make_version(i * 10, Some(&value)));
 		}
 		assert_eq!(versions.inner.len(), 100);
@@ -913,7 +913,7 @@ mod tests {
 		versions.push(make_version(10, Some("v1")));
 		// Update the same version many times (all fast path updates)
 		for i in 0..100 {
-			let value = format!("v{}", i);
+			let value = format!("v{i}");
 			versions.push(make_version(10, Some(&value)));
 		}
 		assert_eq!(versions.inner.len(), 1);

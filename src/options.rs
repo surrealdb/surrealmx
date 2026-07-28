@@ -119,7 +119,7 @@ impl DatabaseOptions {
 	/// latency for minimal background CPU.
 	pub fn with_low_resource(mut self) -> Self {
 		self.pool_size /= 2;
-		self.gc_interval = Duration::from_secs(60);
+		self.gc_interval = Duration::from_mins(1);
 		self.cleanup_interval = Duration::from_millis(500);
 		self.reset_threshold /= 2;
 		self

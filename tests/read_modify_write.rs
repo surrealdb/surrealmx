@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Read-modify-write pattern tests for SurrealMX.
+//! Read-modify-write pattern tests for `SurrealMX`.
 //!
 //! Tests common transactional patterns including increment, compare-and-swap,
 //! conditional updates, and retry-on-conflict logic.
@@ -129,7 +129,7 @@ fn conditional_update_chain() {
 		let mut tx = db.transaction(true);
 		// Use putc to ensure atomic state transition
 		let result = tx.putc("state", new_state, Some::<&str>(expected));
-		assert!(result.is_ok(), "Transition from {} to {} should succeed", expected, new_state);
+		assert!(result.is_ok(), "Transition from {expected} to {new_state} should succeed");
 		tx.commit().unwrap();
 	}
 
@@ -229,15 +229,12 @@ fn retry_on_conflict() {
 			tx.set("retry_counter", (current_val + 1).to_string()).unwrap();
 
 			// Try to commit
-			match tx.commit() {
-				Ok(_) => break,
-				Err(_) => {
-					retries += 1;
-					total_retries += 1;
-					if retries >= max_retries {
-						panic!("Exceeded max retries");
-					}
-				}
+			if let Ok(()) = tx.commit() {
+				break;
+			} else {
+				retries += 1;
+				total_retries += 1;
+				assert!(retries < max_retries, "Exceeded max retries");
 			}
 		}
 	}

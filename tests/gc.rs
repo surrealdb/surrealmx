@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Garbage collection tests for SurrealMX.
+//! Garbage collection tests for `SurrealMX`.
 //!
 //! Tests manual `run_gc()` and background GC behavior.
 
@@ -30,14 +30,14 @@ use surrealmx::{Database, DatabaseOptions};
 fn manual_gc_removes_stale_versions() {
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
-			.with_gc_interval(Duration::from_secs(3600)) // Disable background GC
-			.with_cleanup_interval(Duration::from_secs(3600)),
+			.with_gc_interval(Duration::from_hours(1)) // Disable background GC
+			.with_cleanup_interval(Duration::from_hours(1)),
 	);
 
 	// Create multiple versions
 	for i in 0..10 {
 		let mut tx = db.transaction(true);
-		tx.set("key", format!("v{}", i)).unwrap();
+		tx.set("key", format!("v{i}")).unwrap();
 		tx.commit().unwrap();
 	}
 
@@ -56,8 +56,8 @@ fn manual_gc_removes_stale_versions() {
 fn manual_gc_respects_active_transactions() {
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
-			.with_gc_interval(Duration::from_secs(3600))
-			.with_cleanup_interval(Duration::from_secs(3600)),
+			.with_gc_interval(Duration::from_hours(1))
+			.with_cleanup_interval(Duration::from_hours(1)),
 	);
 
 	// Create initial version
@@ -73,7 +73,7 @@ fn manual_gc_respects_active_transactions() {
 	// Update multiple times
 	for i in 2..10 {
 		let mut tx = db.transaction(true);
-		tx.set("key", format!("v{}", i)).unwrap();
+		tx.set("key", format!("v{i}")).unwrap();
 		tx.commit().unwrap();
 	}
 
@@ -93,8 +93,8 @@ fn manual_gc_respects_active_transactions() {
 fn manual_gc_removes_deleted_keys() {
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
-			.with_gc_interval(Duration::from_secs(3600))
-			.with_cleanup_interval(Duration::from_secs(3600)),
+			.with_gc_interval(Duration::from_hours(1))
+			.with_cleanup_interval(Duration::from_hours(1)),
 	);
 
 	// Create and delete key
@@ -133,7 +133,7 @@ fn background_gc_runs_automatically() {
 	// Create many versions quickly
 	for i in 0..20 {
 		let mut tx = db.transaction(true);
-		tx.set("gc_key", format!("value_{}", i)).unwrap();
+		tx.set("gc_key", format!("value_{i}")).unwrap();
 		tx.commit().unwrap();
 	}
 
@@ -163,7 +163,7 @@ fn gc_handles_multiple_keys() {
 	for key_id in 0..10 {
 		for version in 0..5 {
 			let mut tx = db.transaction(true);
-			tx.set(format!("key_{}", key_id), format!("v{}", version)).unwrap();
+			tx.set(format!("key_{key_id}"), format!("v{version}")).unwrap();
 			tx.commit().unwrap();
 		}
 	}
@@ -174,8 +174,8 @@ fn gc_handles_multiple_keys() {
 	// All keys should still have their latest values
 	let mut tx = db.transaction(false);
 	for key_id in 0..10 {
-		let val = tx.get(format!("key_{}", key_id)).unwrap();
-		assert_eq!(val, Some(Bytes::from("v4")), "Key {} should have latest value", key_id);
+		let val = tx.get(format!("key_{key_id}")).unwrap();
+		assert_eq!(val, Some(Bytes::from("v4")), "Key {key_id} should have latest value");
 	}
 	tx.cancel().unwrap();
 }
@@ -222,14 +222,14 @@ fn gc_with_mixed_deletes() {
 fn transaction_cleanup_runs_automatically() {
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
-			.with_gc_interval(Duration::from_secs(3600))
+			.with_gc_interval(Duration::from_hours(1))
 			.with_cleanup_interval(Duration::from_millis(100)),
 	);
 
 	// Create and complete many transactions
 	for i in 0..50 {
 		let mut tx = db.transaction(true);
-		tx.set(format!("key_{}", i), "value").unwrap();
+		tx.set(format!("key_{i}"), "value").unwrap();
 		tx.commit().unwrap();
 	}
 
@@ -239,7 +239,7 @@ fn transaction_cleanup_runs_automatically() {
 	// New transactions should work fine
 	let mut tx = db.transaction(false);
 	for i in 0..50 {
-		assert!(tx.exists(format!("key_{}", i)).unwrap());
+		assert!(tx.exists(format!("key_{i}")).unwrap());
 	}
 	tx.cancel().unwrap();
 }
@@ -248,14 +248,14 @@ fn transaction_cleanup_runs_automatically() {
 fn manual_cleanup() {
 	let db = Database::new_with_options(
 		DatabaseOptions::default()
-			.with_gc_interval(Duration::from_secs(3600))
-			.with_cleanup_interval(Duration::from_secs(3600)), // Disable auto cleanup
+			.with_gc_interval(Duration::from_hours(1))
+			.with_cleanup_interval(Duration::from_hours(1)), // Disable auto cleanup
 	);
 
 	// Create transactions
 	for i in 0..20 {
 		let mut tx = db.transaction(true);
-		tx.set(format!("key_{}", i), "value").unwrap();
+		tx.set(format!("key_{i}"), "value").unwrap();
 		tx.commit().unwrap();
 	}
 
@@ -265,7 +265,7 @@ fn manual_cleanup() {
 	// Should still work
 	let mut tx = db.transaction(false);
 	for i in 0..20 {
-		assert!(tx.exists(format!("key_{}", i)).unwrap());
+		assert!(tx.exists(format!("key_{i}")).unwrap());
 	}
 	tx.cancel().unwrap();
 }
@@ -295,7 +295,7 @@ fn concurrent_gc_and_transactions() {
 
 					// Write
 					let mut tx = db.transaction(true);
-					tx.set(&key, format!("value_{}_{}", thread_id, op)).unwrap();
+					tx.set(&key, format!("value_{thread_id}_{op}")).unwrap();
 					let _ = tx.commit();
 
 					// Read
@@ -314,9 +314,9 @@ fn concurrent_gc_and_transactions() {
 	let mut tx = db.transaction(false);
 	for thread_id in 0..num_threads {
 		for key_id in 0..10 {
-			let key = format!("thread_{}_key_{}", thread_id, key_id);
+			let key = format!("thread_{thread_id}_key_{key_id}");
 			let val = tx.get(&key).unwrap();
-			assert!(val.is_some(), "Key {} should exist", key);
+			assert!(val.is_some(), "Key {key} should exist");
 		}
 	}
 	tx.cancel().unwrap();
@@ -337,13 +337,13 @@ fn gc_with_only_deleted_keys() {
 	// Create and immediately delete
 	let mut tx = db.transaction(true);
 	for i in 0..10 {
-		tx.set(format!("temp_{}", i), "value").unwrap();
+		tx.set(format!("temp_{i}"), "value").unwrap();
 	}
 	tx.commit().unwrap();
 
 	let mut tx = db.transaction(true);
 	for i in 0..10 {
-		tx.del(format!("temp_{}", i)).unwrap();
+		tx.del(format!("temp_{i}")).unwrap();
 	}
 	tx.commit().unwrap();
 
@@ -353,7 +353,7 @@ fn gc_with_only_deleted_keys() {
 	// All should be gone
 	let mut tx = db.transaction(false);
 	for i in 0..10 {
-		assert!(tx.get(format!("temp_{}", i)).unwrap().is_none());
+		assert!(tx.get(format!("temp_{i}")).unwrap().is_none());
 	}
 	tx.cancel().unwrap();
 }

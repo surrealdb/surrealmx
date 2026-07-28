@@ -85,7 +85,7 @@ impl BloomFilter {
 		// Compute the primary FNV-1a hash
 		let mut h1: u64 = 0xcbf29ce484222325;
 		for &b in key {
-			h1 ^= b as u64;
+			h1 ^= u64::from(b);
 			h1 = h1.wrapping_mul(0x100000001b3);
 		}
 		// Derive the secondary hash via multiplication and rotation
@@ -97,7 +97,7 @@ impl BloomFilter {
 	/// Compute the nth hash from the dual hash pair
 	#[inline]
 	fn nth_hash(hashes: (u64, u64), n: u32) -> u64 {
-		hashes.0.wrapping_add((n as u64).wrapping_mul(hashes.1))
+		hashes.0.wrapping_add(u64::from(n).wrapping_mul(hashes.1))
 	}
 }
 
@@ -135,7 +135,7 @@ mod tests {
 				false_positives += 1;
 			}
 		}
-		assert!(false_positives < 100, "too many false positives: {}", false_positives);
+		assert!(false_positives < 100, "too many false positives: {false_positives}");
 	}
 
 	#[test]
