@@ -576,7 +576,7 @@ impl TransactionInner {
 	/// Cancel the transaction and rollback any changes
 	pub fn cancel(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Mark this transaction as done
@@ -598,11 +598,11 @@ impl TransactionInner {
 	/// This method is stackable and can be called multiple times
 	pub fn set_savepoint(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Create a new readset for the savepoint
@@ -638,11 +638,11 @@ impl TransactionInner {
 	/// Pops the latest savepoint from the stack and restores transaction state
 	pub fn rollback_to_savepoint(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Pop the most recent savepoint from the stack
@@ -672,7 +672,7 @@ impl TransactionInner {
 	/// Commit the transaction and store all changes
 	pub fn commit(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Mark this transaction as done
@@ -1015,7 +1015,7 @@ impl TransactionInner {
 		// Get the key reference
 		let lookup = key.as_slice();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check the transaction type
@@ -1052,7 +1052,7 @@ impl TransactionInner {
 		// Get the key reference
 		let lookup = key.as_slice();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check the transaction type
@@ -1090,7 +1090,7 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector with the same capacity
@@ -1146,11 +1146,11 @@ impl TransactionInner {
 		V: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
@@ -1168,11 +1168,11 @@ impl TransactionInner {
 		// Get the key reference
 		let lookup = key.as_slice();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
@@ -1201,11 +1201,11 @@ impl TransactionInner {
 		// Get the key reference
 		let lookup = key.as_slice();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
@@ -1240,11 +1240,11 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Remove the key
@@ -1262,11 +1262,11 @@ impl TransactionInner {
 		// Get the key reference
 		let lookup = key.as_slice();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Remove the key
@@ -1373,7 +1373,7 @@ impl TransactionInner {
 		F: FnMut(&Bytes, &Bytes) -> bool,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Initialise the entry counter
@@ -1472,7 +1472,7 @@ impl TransactionInner {
 		F: FnMut(&Bytes) -> bool,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Initialise the entry counter
@@ -1571,7 +1571,7 @@ impl TransactionInner {
 		// Clear the output buffer, reusing its capacity
 		buf.clear();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Compute the range
@@ -1662,7 +1662,7 @@ impl TransactionInner {
 		// Clear the output buffer, reusing its capacity
 		buf.clear();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Compute the range
@@ -1786,7 +1786,7 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result count
@@ -1888,7 +1888,7 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector
@@ -1992,7 +1992,7 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector
@@ -2095,7 +2095,7 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Compute the range

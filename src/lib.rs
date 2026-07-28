@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(clippy::bool_comparison)]
-
 /// Tracing target for transaction conflict diagnostics
 pub const LOG_TARGET_CONFLICTS: &str = "surrealmx::conflicts";
 
