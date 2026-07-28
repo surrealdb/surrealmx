@@ -64,11 +64,24 @@ similar_names = "allow"
 # its code does not have these two shapes.
 needless_pass_by_value = "allow"
 
-# Numeric casts are checked on the library only, via the `--lib` clippy
-# pass in CI. Test and benchmark code casts loop counters freely and the
-# noise there would bury the two real sites in the engine.
+# Numeric casts are checked on the library only, via the stricter `--lib`
+# clippy pass in CI, along with `unwrap_used` and friends. Test and
+# benchmark code casts loop counters freely and correctly, and the noise
+# there would bury any real site in the engine. Cargo's `[lints]` table
+# cannot be scoped to a single target, hence the split.
 cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
+
+# NOT enabled, in either pass. All 11 sites it flags are indices derived
+# internally and provably in bounds: a `buffer[0..4]` guarded by a
+# `len() >= 4` check directly above it, `heads[i]`/`sources[i]` indices
+# from `enumerate()` over those same vectors, and bloom-filter bits
+# already masked to the filter width. Rewriting them as
+# `.get(i).expect(..)` panics identically while reading worse, and the
+# lint would keep firing on every future internal index. Its value is for
+# indices that come from untrusted input, which this crate does not have.
+# https://rust-lang.github.io/rust-clippy/master/#indexing_slicing
+indexing_slicing = "allow"
 
 # It is fine to write `assert_eq!(val, true)` in tests, and often more
 # readable than `assert!(val)`. Matches surrealdb/surrealdb.

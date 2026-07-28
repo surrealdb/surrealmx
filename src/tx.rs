@@ -57,6 +57,14 @@ pub struct Transaction {
 	pub(crate) inner: Option<TransactionInner>,
 }
 
+/// Panic message for the `Transaction::inner` accessors below.
+///
+/// `inner` is only an `Option` so that `Drop` can move the inner transaction
+/// out and return it to the pool. It is `Some` for the entire lifetime of a
+/// `Transaction`, and the only `take` is in `Drop`, so no method on a live
+/// `Transaction` can observe `None`.
+const INNER_TAKEN: &str = "Transaction::inner is only taken in Drop";
+
 // Transaction must be Send + Sync so downstream callers can place it
 // behind shared locks like `tokio::sync::RwLock<Transaction>`.
 const _: fn() = || {
@@ -82,14 +90,15 @@ impl Drop for Transaction {
 impl Transaction {
 	/// Ensure this transaction is committed with snapshot isolation guarantees
 	pub const fn with_snapshot_isolation(mut self) -> Self {
-		self.inner.as_mut().unwrap().mode = IsolationLevel::SnapshotIsolation;
+		self.inner.as_mut().expect(INNER_TAKEN).mode = IsolationLevel::SnapshotIsolation;
 		self
 	}
 
 	/// Ensure this transaction is committed with serializable snapshot
 	/// isolation guarantees
 	pub const fn with_serializable_snapshot_isolation(mut self) -> Self {
-		self.inner.as_mut().unwrap().mode = IsolationLevel::SerializableSnapshotIsolation;
+		self.inner.as_mut().expect(INNER_TAKEN).mode =
+			IsolationLevel::SerializableSnapshotIsolation;
 		self
 	}
 
@@ -97,7 +106,7 @@ impl Transaction {
 	/// This method is stackable and can be called multiple times with
 	/// corresponding calls to `rollback_to_savepoint`
 	pub fn set_savepoint(&mut self) -> Result<(), Error> {
-		self.inner.as_mut().unwrap().set_savepoint()
+		self.inner.as_mut().expect(INNER_TAKEN).set_savepoint()
 	}
 
 	/// Rollback the transaction to the most recently set savepoint
@@ -105,27 +114,27 @@ impl Transaction {
 	/// transaction can be rolled back by calling `rollback_to_savepoint`
 	/// again if there are more savepoints in the stack
 	pub fn rollback_to_savepoint(&mut self) -> Result<(), Error> {
-		self.inner.as_mut().unwrap().rollback_to_savepoint()
+		self.inner.as_mut().expect(INNER_TAKEN).rollback_to_savepoint()
 	}
 
 	/// Get the starting sequence number of this transaction
 	pub const fn version(&self) -> u64 {
-		self.inner.as_ref().unwrap().version()
+		self.inner.as_ref().expect(INNER_TAKEN).version()
 	}
 
 	/// Check if the transaction is closed
 	pub const fn closed(&self) -> bool {
-		self.inner.as_ref().unwrap().closed()
+		self.inner.as_ref().expect(INNER_TAKEN).closed()
 	}
 
 	/// Cancel the transaction and rollback any changes
 	pub fn cancel(&mut self) -> Result<(), Error> {
-		self.inner.as_mut().unwrap().cancel()
+		self.inner.as_mut().expect(INNER_TAKEN).cancel()
 	}
 
 	/// Commit the transaction and store all changes
 	pub fn commit(&mut self) -> Result<(), Error> {
-		self.inner.as_mut().unwrap().commit()
+		self.inner.as_mut().expect(INNER_TAKEN).commit()
 	}
 
 	/// Check if a key exists in the database
@@ -133,7 +142,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().exists(key)
+		self.inner.as_ref().expect(INNER_TAKEN).exists(key)
 	}
 
 	/// Fetch a key from the database
@@ -141,7 +150,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().get(key)
+		self.inner.as_ref().expect(INNER_TAKEN).get(key)
 	}
 
 	/// Fetch multiple keys from the database
@@ -149,7 +158,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().getm(keys)
+		self.inner.as_ref().expect(INNER_TAKEN).getm(keys)
 	}
 
 	/// Insert or update a key in the database
@@ -158,7 +167,7 @@ impl Transaction {
 		K: IntoBytes,
 		V: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().set(key, val)
+		self.inner.as_mut().expect(INNER_TAKEN).set(key, val)
 	}
 
 	/// Insert a key if it doesn't exist in the database
@@ -167,7 +176,7 @@ impl Transaction {
 		K: IntoBytes,
 		V: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().put(key, val)
+		self.inner.as_mut().expect(INNER_TAKEN).put(key, val)
 	}
 
 	/// Insert a key if it matches a value
@@ -177,7 +186,7 @@ impl Transaction {
 		V: IntoBytes,
 		C: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().putc(key, val, chk)
+		self.inner.as_mut().expect(INNER_TAKEN).putc(key, val, chk)
 	}
 
 	/// Delete a key from the database
@@ -185,7 +194,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().del(key)
+		self.inner.as_mut().expect(INNER_TAKEN).del(key)
 	}
 
 	/// Delete a key if it matches a value
@@ -194,7 +203,7 @@ impl Transaction {
 		K: IntoBytes,
 		C: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().delc(key, chk)
+		self.inner.as_mut().expect(INNER_TAKEN).delc(key, chk)
 	}
 
 	/// Retrieve a count of keys from the database
@@ -207,7 +216,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().total(rng, skip, limit)
+		self.inner.as_ref().expect(INNER_TAKEN).total(rng, skip, limit)
 	}
 
 	/// Retrieve a range of keys from the database
@@ -220,7 +229,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().keys(rng, skip, limit)
+		self.inner.as_ref().expect(INNER_TAKEN).keys(rng, skip, limit)
 	}
 
 	/// Retrieve a range of keys from the database, in reverse order
@@ -233,7 +242,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().keys_reverse(rng, skip, limit)
+		self.inner.as_ref().expect(INNER_TAKEN).keys_reverse(rng, skip, limit)
 	}
 
 	/// Retrieve a range of keys and values from the database
@@ -246,7 +255,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().scan(rng, skip, limit)
+		self.inner.as_ref().expect(INNER_TAKEN).scan(rng, skip, limit)
 	}
 
 	/// Retrieve a range of keys and values from the database in reverse order
@@ -259,7 +268,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().scan_reverse(rng, skip, limit)
+		self.inner.as_ref().expect(INNER_TAKEN).scan_reverse(rng, skip, limit)
 	}
 
 	// --------------------------------------------------
@@ -279,7 +288,7 @@ impl Transaction {
 		K: IntoBytes,
 		F: FnMut(&Bytes, &Bytes) -> bool,
 	{
-		self.inner.as_ref().unwrap().scan_for_each(rng, skip, limit, f)
+		self.inner.as_ref().expect(INNER_TAKEN).scan_for_each(rng, skip, limit, f)
 	}
 
 	/// Call a closure for each key in a range, avoiding intermediate Vec
@@ -295,7 +304,7 @@ impl Transaction {
 		K: IntoBytes,
 		F: FnMut(&Bytes) -> bool,
 	{
-		self.inner.as_ref().unwrap().keys_for_each(rng, skip, limit, f)
+		self.inner.as_ref().expect(INNER_TAKEN).keys_for_each(rng, skip, limit, f)
 	}
 
 	/// Scan key-value pairs into a caller-provided Vec, reusing its capacity.
@@ -309,7 +318,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().scan_into(rng, skip, limit, buf)
+		self.inner.as_ref().expect(INNER_TAKEN).scan_into(rng, skip, limit, buf)
 	}
 
 	/// Scan keys into a caller-provided Vec, reusing its capacity.
@@ -323,7 +332,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().keys_into(rng, skip, limit, buf)
+		self.inner.as_ref().expect(INNER_TAKEN).keys_into(rng, skip, limit, buf)
 	}
 
 	// --------------------------------------------------
@@ -350,7 +359,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().cursor(rng)
+		self.inner.as_ref().expect(INNER_TAKEN).cursor(rng)
 	}
 
 	/// Iterate over keys in a range.
@@ -369,7 +378,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().keys_iter(rng)
+		self.inner.as_ref().expect(INNER_TAKEN).keys_iter(rng)
 	}
 
 	/// Iterate over keys in a range, in reverse order.
@@ -377,7 +386,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().keys_iter_reverse(rng)
+		self.inner.as_ref().expect(INNER_TAKEN).keys_iter_reverse(rng)
 	}
 
 	/// Iterate over key-value pairs in a range.
@@ -396,7 +405,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().scan_iter(rng)
+		self.inner.as_ref().expect(INNER_TAKEN).scan_iter(rng)
 	}
 
 	/// Iterate over key-value pairs in a range, in reverse order.
@@ -404,7 +413,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().scan_iter_reverse(rng)
+		self.inner.as_ref().expect(INNER_TAKEN).scan_iter_reverse(rng)
 	}
 }
 
