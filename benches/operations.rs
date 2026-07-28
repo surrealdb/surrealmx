@@ -1391,6 +1391,154 @@ fn bench_cursor_pagination(c: &mut Criterion) {
 	group.finish();
 }
 
+// Per-call savepoint cost, against a pre-populated writeset and isolated
+// from any stack depth effect. A savepoint snapshots the writeset, so
+// setting one costs O(writeset); releasing then discards that snapshot,
+// while rolling back installs it.
+//
+// Both pairs are expected to cost about the same, because the snapshot
+// taken by `set_savepoint` dominates either ending. Release is not a
+// cheaper alternative to rollback on a per-call basis, and it does not
+// reduce the cost of taking a savepoint — see
+// `bench_savepoint_release_vs_emulated_unwind` for what it does improve.
+fn bench_savepoint_snapshot_cost(c: &mut Criterion) {
+	let mut group = c.benchmark_group("savepoint_snapshot_cost");
+
+	for writeset_size in [10usize, 100, 1_000, 10_000].iter() {
+		let value = generate_sequential_value(0, 100);
+
+		// Set then release: snapshot the writeset, then discard the snapshot
+		group.bench_with_input(
+			BenchmarkId::new("set_then_release", writeset_size),
+			writeset_size,
+			|b, &size| {
+				let db = Database::new_with_options(
+					DatabaseOptions::default().with_all_workers_disabled(),
+				);
+				b.iter_batched(
+					|| {
+						let mut tx = db.transaction(true);
+						for i in 0..size {
+							tx.set(generate_sequential_key(i), value.clone()).unwrap();
+						}
+						tx
+					},
+					|mut tx| {
+						tx.set_savepoint().unwrap();
+						tx.release_savepoint().unwrap();
+						black_box(&mut tx);
+					},
+					criterion::BatchSize::LargeInput,
+				)
+			},
+		);
+
+		// Set then rollback: snapshot the writeset, then install the snapshot
+		group.bench_with_input(
+			BenchmarkId::new("set_then_rollback", writeset_size),
+			writeset_size,
+			|b, &size| {
+				let db = Database::new_with_options(
+					DatabaseOptions::default().with_all_workers_disabled(),
+				);
+				b.iter_batched(
+					|| {
+						let mut tx = db.transaction(true);
+						for i in 0..size {
+							tx.set(generate_sequential_key(i), value.clone()).unwrap();
+						}
+						tx
+					},
+					|mut tx| {
+						tx.set_savepoint().unwrap();
+						tx.rollback_to_savepoint().unwrap();
+						black_box(&mut tx);
+					},
+					criterion::BatchSize::LargeInput,
+				)
+			},
+		);
+	}
+
+	group.finish();
+}
+
+// The cost of unwinding a scope that contained n released savepoints,
+// native release against the userland emulation it replaces.
+//
+// Without a native release, a caller emulates one by leaving the released
+// savepoint on the stack and remembering how many markers the enclosing
+// scope must unwind. Undoing that scope then costs n + 1 rollbacks, each
+// installing a whole writeset. With a native release each marker is
+// discarded as its scope ends, so the same unwind is a single rollback.
+//
+// Only the unwind is timed; building the scopes is identical work in both
+// arms and happens in the batch setup. Note that this measures the unwind
+// only: `set_savepoint` snapshots the writeset on every call whether or
+// not the savepoint is later released, so release does not reduce the cost
+// of taking savepoints. What it bounds is retained memory — one live
+// snapshot instead of n — which criterion cannot measure, and the unwind
+// measured here.
+fn bench_savepoint_release_vs_emulated_unwind(c: &mut Criterion) {
+	let mut group = c.benchmark_group("savepoint_release_vs_emulated_unwind");
+	group.sample_size(20);
+
+	for n in [10usize, 100, 1_000].iter() {
+		let value = generate_sequential_value(0, 100);
+
+		// Native: each scope released as it ends, so one rollback unwinds all
+		group.bench_with_input(BenchmarkId::new("native_single_rollback", n), n, |b, &n| {
+			let db =
+				Database::new_with_options(DatabaseOptions::default().with_all_workers_disabled());
+			b.iter_batched(
+				|| {
+					let mut tx = db.transaction(true);
+					// The enclosing savepoint that will be unwound to
+					tx.set_savepoint().unwrap();
+					for i in 0..n {
+						tx.set_savepoint().unwrap();
+						tx.set(generate_sequential_key(i), value.clone()).unwrap();
+						tx.release_savepoint().unwrap();
+					}
+					tx
+				},
+				|mut tx| {
+					tx.rollback_to_savepoint().unwrap();
+					black_box(&mut tx);
+				},
+				criterion::BatchSize::LargeInput,
+			)
+		});
+
+		// Emulated: every marker retained, so the unwind is n + 1 rollbacks
+		group.bench_with_input(BenchmarkId::new("emulated_n_rollbacks", n), n, |b, &n| {
+			let db =
+				Database::new_with_options(DatabaseOptions::default().with_all_workers_disabled());
+			b.iter_batched(
+				|| {
+					let mut tx = db.transaction(true);
+					// The enclosing savepoint that will be unwound to
+					tx.set_savepoint().unwrap();
+					for i in 0..n {
+						tx.set_savepoint().unwrap();
+						tx.set(generate_sequential_key(i), value.clone()).unwrap();
+					}
+					tx
+				},
+				|mut tx| {
+					for _ in 0..=n {
+						tx.rollback_to_savepoint().unwrap();
+					}
+					black_box(&mut tx);
+				},
+				criterion::BatchSize::LargeInput,
+			)
+		});
+	}
+
+	group.finish();
+}
+
 criterion_group!(
 	database_benchmarks,
 	bench_transaction_creation,
@@ -1433,7 +1581,9 @@ criterion_group!(
 	bench_readset_bloom_conflict_path,
 	bench_writeset_bloom_impact,
 	bench_writeset_bloom_conflict_path,
-	bench_bloom_concurrent_throughput
+	bench_bloom_concurrent_throughput,
+	bench_savepoint_snapshot_cost,
+	bench_savepoint_release_vs_emulated_unwind
 );
 
 criterion_main!(
