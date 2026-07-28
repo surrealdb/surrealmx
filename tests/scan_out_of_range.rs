@@ -72,14 +72,13 @@ fn make_range(ix: u32, kind: [u8; 2]) -> (Vec<u8>, Vec<u8>) {
 fn run_once(budget: Duration) -> (usize, usize, usize) {
 	const N_INDEXES: u32 = 5;
 	const SCAN_IX: u32 = 3;
-	const SCAN_KIND: [u8; 2] = [b'd', b'c'];
+	const SCAN_KIND: [u8; 2] = *b"dc";
 
 	// All the (ix, kind) combinations that the writers will hit. The mix
 	// matters: full-text writes `!dc`, `!dl`, `!td`, `!tt`, `!ii`, `!tv`,
 	// etc., spread over `N_INDEXES` indexes. We just pick the same letter
 	// pairs from the real code.
-	const KINDS: &[[u8; 2]] =
-		&[[b'd', b'c'], [b'd', b'l'], [b't', b'd'], [b't', b't'], [b'i', b'i'], [b't', b'v']];
+	const KINDS: &[[u8; 2]] = &[*b"dc", *b"dl", *b"td", *b"tt", *b"ii", *b"tv"];
 
 	let db = Arc::new(Database::new());
 	let stop = Arc::new(AtomicBool::new(false));
@@ -106,10 +105,10 @@ fn run_once(budget: Duration) -> (usize, usize, usize) {
 					let key = make_key(ix, kind, doc, counter);
 					counter = counter.wrapping_add(1);
 					doc = doc.wrapping_add(1);
-					let value: Vec<u8> = if kind == [b'd', b'l'] {
+					let value: Vec<u8> = if kind == *b"dl" {
 						// DocLength-style value: 8 bytes, starts with zero.
 						doc.to_be_bytes().to_vec()
-					} else if kind == [b't', b't'] {
+					} else if kind == *b"tt" {
 						// Tt-style value: empty.
 						Vec::new()
 					} else {
