@@ -60,6 +60,18 @@ impl CompressedWriter {
 	}
 
 	/// Finish compression (for LZ4, this finalizes the stream)
+	///
+	/// Takes `self` by value so that the encoder is dropped, and the stream
+	/// finalized, at an explicit point chosen by the caller rather than
+	/// wherever the writer happens to go out of scope.
+	#[expect(
+		clippy::unnecessary_wraps,
+		reason = "fallible signature is part of the writer API and mirrors the io::Result of every other method here"
+	)]
+	#[expect(
+		clippy::unused_self,
+		reason = "consuming self is the point: the drop finalizes the stream"
+	)]
 	pub(crate) fn finish(self) -> io::Result<()> {
 		// The encoder will be dropped here, which finalizes the stream
 		Ok(())

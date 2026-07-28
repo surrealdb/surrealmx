@@ -480,7 +480,7 @@ fn high_contention_counter() {
 	// The maximum possible value is num_threads * increments_per_thread
 	let max_possible = num_threads * increments_per_thread;
 	assert!(
-		final_val <= max_possible as i32,
+		final_val <= i32::try_from(max_possible).unwrap(),
 		"Counter should not exceed maximum possible increments"
 	);
 }

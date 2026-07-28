@@ -548,9 +548,9 @@ impl TransactionInner {
 		self.readset_bloom.lock().clear();
 		// Clear or completely reset the allocated writeset
 		if self.writeset.len() > threshold {
-			self.writeset = BTreeMap::new()
+			self.writeset = BTreeMap::new();
 		} else {
-			self.writeset.clear()
+			self.writeset.clear();
 		}
 		// Clear or completely reset the allocated savepoints
 		if self.savepoint_stack.len() > threshold {
@@ -1025,21 +1025,20 @@ impl TransactionInner {
 		}
 		// Check the transaction type
 		let res = if self.write {
-			match self.writeset.get(lookup) {
-				// The key exists in the writeset
-				Some(_) => true,
+			// The key exists in the writeset
+			if self.writeset.contains_key(lookup) {
+				true
+			} else {
 				// Check for the key in the tree
-				None => {
-					// Fetch for the key from the datastore
-					let res = self.exists_in_datastore(lookup, self.version);
-					// Check whether we should track key reads
-					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-						self.readset_bloom.lock().insert(lookup);
-						self.readset.pin().insert(key.into_bytes());
-					}
-					// Return the result
-					res
+				// Fetch for the key from the datastore
+				let res = self.exists_in_datastore(lookup, self.version);
+				// Check whether we should track key reads
+				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+					self.readset_bloom.lock().insert(lookup);
+					self.readset.pin().insert(key.into_bytes());
 				}
+				// Return the result
+				res
 			}
 		} else {
 			self.exists_in_datastore(lookup, self.version)
@@ -1061,24 +1060,23 @@ impl TransactionInner {
 		}
 		// Check the transaction type
 		let res = if self.write {
-			match self.writeset.get(lookup) {
-				// The key exists in the writeset
-				Some(v) => v.clone(),
+			// The key exists in the writeset
+			if let Some(v) = self.writeset.get(lookup) {
+				v.clone()
+			} else {
 				// Check for the key in the tree
-				None => {
-					// Fetch for the key from the datastore
-					let res = self.fetch_in_datastore(lookup, self.version);
-					// Check whether we should track key reads
-					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-						let guard = self.readset.pin();
-						if !guard.contains(lookup) {
-							self.readset_bloom.lock().insert(lookup);
-							guard.insert(key.into_bytes());
-						}
+				// Fetch for the key from the datastore
+				let res = self.fetch_in_datastore(lookup, self.version);
+				// Check whether we should track key reads
+				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+					let guard = self.readset.pin();
+					if !guard.contains(lookup) {
+						self.readset_bloom.lock().insert(lookup);
+						guard.insert(key.into_bytes());
 					}
-					// Return the result
-					res
 				}
+				// Return the result
+				res
 			}
 		} else {
 			self.fetch_in_datastore(lookup, self.version)
@@ -1104,23 +1102,22 @@ impl TransactionInner {
 				// Get the key reference
 				let lookup = key.as_slice();
 				// Check the writeset first
-				let res = match self.writeset.get(lookup) {
-					// The key exists in the writeset
-					Some(v) => v.clone(),
+				// The key exists in the writeset
+				let res = if let Some(v) = self.writeset.get(lookup) {
+					v.clone()
+				} else {
 					// Check for the key in the tree
-					None => {
-						// Fetch for the key from the datastore
-						let res = self.fetch_in_datastore(lookup, self.version);
-						// Check whether we should track key reads
-						if self.mode >= IsolationLevel::SerializableSnapshotIsolation
-							&& !self.readset.pin().contains(lookup)
-						{
-							self.readset_bloom.lock().insert(lookup);
-							self.readset.pin().insert(key.into_bytes());
-						}
-						// Return the result
-						res
+					// Fetch for the key from the datastore
+					let res = self.fetch_in_datastore(lookup, self.version);
+					// Check whether we should track key reads
+					if self.mode >= IsolationLevel::SerializableSnapshotIsolation
+						&& !self.readset.pin().contains(lookup)
+					{
+						self.readset_bloom.lock().insert(lookup);
+						self.readset.pin().insert(key.into_bytes());
 					}
+					// Return the result
+					res
 				};
 				results.push(res);
 			}
@@ -1173,19 +1170,12 @@ impl TransactionInner {
 		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
-		// Set the key
-		match self.writeset.get(lookup) {
-			// The key exists in the writeset
-			Some(_) => return Err(Error::KeyAlreadyExists),
-			// Check for the key in the tree
-			None => {
-				if self.exists_in_datastore(lookup, self.version) {
-					return Err(Error::KeyAlreadyExists);
-				} else {
-					self.writeset.insert(key.into_bytes(), Some(val.into_bytes()))
-				}
-			}
-		};
+		// Set the key. The key must not already exist, either in the
+		// writeset or in the tree.
+		if self.writeset.contains_key(lookup) || self.exists_in_datastore(lookup, self.version) {
+			return Err(Error::KeyAlreadyExists);
+		}
+		self.writeset.insert(key.into_bytes(), Some(val.into_bytes()));
 		// Return result
 		Ok(())
 	}

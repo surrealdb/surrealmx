@@ -876,6 +876,7 @@ fn test_loads_multiversion_snapshot_files() {
 	// tombstone. Loading must surface only the newest value of the first
 	// key, and treat the second as absent.
 	{
+		use std::io::Write as _;
 		let file = std::fs::File::create(temp_path.join("snapshot.bin")).unwrap();
 		let mut writer = std::io::BufWriter::new(file);
 		let multi: (Bytes, Vec<(u64, Option<Bytes>)>) = (
@@ -892,7 +893,6 @@ fn test_loads_multiversion_snapshot_files() {
 			.unwrap();
 		bincode::serde::encode_into_std_write(&gone, &mut writer, bincode::config::standard())
 			.unwrap();
-		use std::io::Write;
 		writer.flush().unwrap();
 	}
 

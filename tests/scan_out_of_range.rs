@@ -146,9 +146,8 @@ fn run_once(budget: Duration) -> (usize, usize, usize) {
 				let tx = db.transaction(false).with_snapshot_isolation();
 				let beg_b = Bytes::copy_from_slice(&beg);
 				let end_b = Bytes::copy_from_slice(&end);
-				let res = match tx.scan(beg_b..end_b, None, None) {
-					Ok(r) => r,
-					Err(_) => continue,
+				let Ok(res) = tx.scan(beg_b..end_b, None, None) else {
+					continue;
 				};
 				scans_done.fetch_add(1, Ordering::Relaxed);
 				for (k, v) in res {
@@ -193,9 +192,10 @@ fn run_once(budget: Duration) -> (usize, usize, usize) {
 }
 
 fn hex(b: &[u8]) -> String {
+	use std::fmt::Write as _;
 	let mut s = String::with_capacity(b.len() * 2);
 	for c in b {
-		s.push_str(&format!("{c:02x}"));
+		let _ = write!(s, "{c:02x}");
 	}
 	s
 }

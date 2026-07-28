@@ -83,13 +83,13 @@ impl BloomFilter {
 	#[inline]
 	fn hash(key: &[u8]) -> (u64, u64) {
 		// Compute the primary FNV-1a hash
-		let mut h1: u64 = 0xcbf29ce484222325;
+		let mut h1: u64 = 0xcbf2_9ce4_8422_2325;
 		for &b in key {
 			h1 ^= u64::from(b);
-			h1 = h1.wrapping_mul(0x100000001b3);
+			h1 = h1.wrapping_mul(0x0100_0000_01b3);
 		}
 		// Derive the secondary hash via multiplication and rotation
-		let h2 = h1.wrapping_mul(0x9e3779b97f4a7c15).rotate_left(31);
+		let h2 = h1.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(31);
 		// Return the dual hash pair
 		(h1, h2)
 	}

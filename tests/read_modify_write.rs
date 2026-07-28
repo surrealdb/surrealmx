@@ -231,11 +231,10 @@ fn retry_on_conflict() {
 			// Try to commit
 			if let Ok(()) = tx.commit() {
 				break;
-			} else {
-				retries += 1;
-				total_retries += 1;
-				assert!(retries < max_retries, "Exceeded max retries");
 			}
+			retries += 1;
+			total_retries += 1;
+			assert!(retries < max_retries, "Exceeded max retries");
 		}
 	}
 

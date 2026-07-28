@@ -169,7 +169,6 @@ fn concurrent_writers_compete_for_same_keys() {
 							Ok(()) => break,
 							Err(Error::KeyWriteConflict | Error::KeyReadConflict) => {
 								conflicts.fetch_add(1, Ordering::Relaxed);
-								continue;
 							}
 							Err(e) => panic!("unexpected commit error: {e:?}"),
 						}
@@ -245,7 +244,6 @@ fn ssi_increment_counter_under_contention() {
 						}
 						Err(Error::KeyReadConflict | Error::KeyWriteConflict) => {
 							conflicts.fetch_add(1, Ordering::Relaxed);
-							continue;
 						}
 						Err(other) => panic!("unexpected error: {other:?}"),
 					}
@@ -500,10 +498,11 @@ fn sustained_mixed_workload_prefix_keys() {
 		handles.push(thread::spawn(move || {
 			barrier.wait();
 			let start = Instant::now();
-			let mut local_seed = tid as u64 * 0xdeadbeef;
+			let mut local_seed = tid as u64 * 0xdead_beef;
 			while start.elapsed() < DURATION {
-				local_seed =
-					local_seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+				local_seed = local_seed
+					.wrapping_mul(6_364_136_223_846_793_005)
+					.wrapping_add(1_442_695_040_888_963_407);
 				let op = (local_seed >> 56) % 4;
 				let k = (local_seed >> 32) as u32 % KEY_SPACE;
 				let key = Bytes::from(pkey("workload", k as usize));

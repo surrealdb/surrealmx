@@ -47,6 +47,23 @@ inline_always = "allow"
 # ordering arguments documented inline.
 too_many_lines = "allow"
 
+# Fires on natural plural/singular pairs — `keys` next to `key1`, a
+# `writes` counter next to a `writers` thread list. Both readings are
+# correct as written, and renaming to satisfy the lint makes the code
+# worse rather than better.
+similar_names = "allow"
+
+# Every site this fires on is a deliberate convention rather than an
+# oversight, so it costs more than it finds here. The datastore helpers are
+# generic over `K: IntoBytes` and take the key by value so that `K` may
+# itself be a reference type (`&[u8]`) without a double indirection, and
+# `Database::new_with_options` / `new_with_persistence` take their options
+# struct by value because that is the builder convention and because
+# narrowing a published constructor to `&DatabaseOptions` would be a
+# breaking change for dependents. surrealdb/surrealdb enables this lint;
+# its code does not have these two shapes.
+needless_pass_by_value = "allow"
+
 # Numeric casts are checked on the library only, via the `--lib` clippy
 # pass in CI. Test and benchmark code casts loop counters freely and the
 # noise there would bury the two real sites in the engine.

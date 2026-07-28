@@ -335,9 +335,9 @@ impl Inner {
 			// past us, so reload and continue from the fresh bound. Back
 			// off on contention: a caller of this function (e.g. a
 			// cleanup sweep with no delay between iterations) can end up
-			// calling it far more often than intended, and an
-			// unconditional `continue` here would otherwise hammer this
-			// cache line against every other thread doing the same.
+			// calling it far more often than intended, and retrying here
+			// without a delay would otherwise hammer this cache line
+			// against every other thread doing the same.
 			if self
 				.transaction_commit_id
 				.compare_exchange_weak(cur, next, Ordering::SeqCst, Ordering::SeqCst)
@@ -345,7 +345,6 @@ impl Inner {
 			{
 				crate::tx::backoff(spins);
 				spins += 1;
-				continue;
 			}
 		}
 	}
@@ -380,7 +379,6 @@ impl Inner {
 			{
 				crate::tx::backoff(spins);
 				spins += 1;
-				continue;
 			}
 		}
 	}

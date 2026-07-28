@@ -346,7 +346,7 @@ impl Persistence {
 				final_file.sync_all()?;
 			}
 			// Truncate AOL only up to the cutoff position
-			Self::truncate(&self.aol, aol_cutoff_position, &self.pending_syncs)?;
+			Self::truncate(self.aol.as_ref(), aol_cutoff_position, &self.pending_syncs)?;
 			// All ok
 			Ok(())
 		})();
@@ -365,6 +365,9 @@ impl Persistence {
 	/// 1. Loads the latest snapshot if it exists
 	/// 2. Applies any changes from the append-only log
 	fn load(&self) -> Result<(), PersistenceError> {
+		// Decoded record shapes, one per file format
+		type SnapshotEntry = (Bytes, Vec<(u64, Option<Bytes>)>);
+		type AolEntry = (Bytes, u64, Option<Bytes>);
 		// Track the maximum version seen across EVERY decoded record —
 		// snapshot entries (including keys skipped as tombstone-topped)
 		// and every append-only log record (including deletes). The
@@ -393,10 +396,8 @@ impl Persistence {
 					count += 1;
 					// Trace the loading of the snapshot entry
 					tracing::trace!("Loading snapshot entry: {count}");
-					// Type alias for the entry
-					type Entry = (Bytes, Vec<(u64, Option<Bytes>)>);
 					// Attempt to decode the next entry, handling EOF gracefully
-					let result: Result<Entry, _> =
+					let result: Result<SnapshotEntry, _> =
 						bincode::serde::decode_from_std_read(&mut reader, config::standard());
 					// Detech any end of file errors
 					match result {
@@ -459,10 +460,8 @@ impl Persistence {
 					count += 1;
 					// Trace the loading of the append-only entry
 					tracing::trace!("Loading AOL entry: {count}");
-					// Type alias for the entry
-					type Entry = (Bytes, u64, Option<Bytes>);
 					// Explicitly type the result to help type inference
-					let result: Result<Entry, _> =
+					let result: Result<AolEntry, _> =
 						bincode::serde::decode_from_std_read(&mut reader, config::standard());
 					// Detech any end of file errors
 					match result {
@@ -547,12 +546,12 @@ impl Persistence {
 		reason = "the file guard must cover the pending_syncs store, or a concurrent append's increment is silently discarded along with its required fsync"
 	)]
 	fn truncate(
-		aol: &Option<Arc<Mutex<File>>>,
+		aol: Option<&Arc<Mutex<File>>>,
 		position: u64,
 		pending_syncs: &Arc<AtomicU64>,
 	) -> Result<(), PersistenceError> {
 		// Check that we have a AOL file handle
-		if let Some(ref aol) = aol {
+		if let Some(aol) = aol {
 			// Lock the AOL file. The mutex is deliberately held past its last
 			// file use so that it still covers the `pending_syncs` store below.
 			let mut file = aol.lock()?;
@@ -735,7 +734,7 @@ impl Persistence {
 							final_file.sync_all()?;
 						}
 						// Truncate AOL to the cutoff position
-						Self::truncate(&aol, aol_cutoff_position, &pending_syncs)?;
+						Self::truncate(aol.as_ref(), aol_cutoff_position, &pending_syncs)?;
 						// All ok
 						Ok(())
 					})();
@@ -795,7 +794,6 @@ impl Persistence {
 							match injector.steal() {
 								Steal::Retry => {
 									std::thread::yield_now();
-									continue;
 								}
 								Steal::Success(op) => {
 									batch.push(op);
