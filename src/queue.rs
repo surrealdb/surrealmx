@@ -138,7 +138,7 @@ impl Commit {
 	/// Returns true if self has no elements in common with other.
 	/// Uses bloom filters and key bounds for fast pre-checks before the
 	/// exact sorted merge.
-	pub fn is_disjoint_writeset_bloom(&self, other: &Arc<Commit>) -> bool {
+	pub fn is_disjoint_writeset_bloom(&self, other: &Arc<Self>) -> bool {
 		// Fast path: check if the key ranges overlap at all
 		match (self.min_key(), self.max_key(), other.min_key(), other.max_key()) {
 			(Some(self_min), Some(self_max), Some(other_min), Some(other_max)) => {
@@ -178,7 +178,7 @@ impl Commit {
 	}
 
 	/// Returns true if self has no elements in common with other
-	pub fn is_disjoint_writeset(&self, other: &Arc<Commit>) -> bool {
+	pub fn is_disjoint_writeset(&self, other: &Arc<Self>) -> bool {
 		// Create a key iterator for each writeset
 		let mut a = self.keys.iter();
 		let mut b = other.keys.iter();

@@ -70,6 +70,57 @@ needless_pass_by_value = "allow"
 cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
 
+# It is fine to write `assert_eq!(val, true)` in tests, and often more
+# readable than `assert!(val)`. Matches surrealdb/surrealdb.
+# https://rust-lang.github.io/rust-clippy/master/#bool_assert_comparison
+bool_assert_comparison = "allow"
+
+# --- Parity with the surrealdb/surrealdb lint set -------------------------
+# These are the lints from that workspace's `[workspace.lints.clippy]` that
+# the `pedantic` group above does not already cover. `disallowed_methods`
+# is deliberately omitted: it is a no-op without a `clippy.toml` listing
+# methods to ban, which is why it currently does nothing in that repo
+# either.
+
+# `Arc::clone(&x)` over `x.clone()`, so pointer duplication is obvious
+# rather than looking like a deep copy. This engine is Arc-heavy enough
+# that the distinction matters when reading a hot path.
+# https://rust-lang.github.io/rust-clippy/master/#clone_on_ref_ptr
+clone_on_ref_ptr = "warn"
+
+# `clone_from` / `clone_into` can reuse an existing allocation.
+# https://rust-lang.github.io/rust-clippy/master/#assigning_clones
+assigning_clones = "warn"
+
+# Mutating inside `debug_assert!` behaves differently in release builds,
+# where the macro is compiled out entirely.
+# https://rust-lang.github.io/rust-clippy/master/#debug_assert_with_mut_call
+debug_assert_with_mut_call = "warn"
+
+# A `From` impl that can panic should be `TryFrom`.
+# https://rust-lang.github.io/rust-clippy/master/#fallible_impl_from
+fallible_impl_from = "warn"
+
+# `.get().unwrap()` should be `[]`.
+# https://rust-lang.github.io/rust-clippy/master/#get_unwrap
+get_unwrap = "warn"
+
+# Float literals that cannot be represented exactly in the target type.
+# https://rust-lang.github.io/rust-clippy/master/#lossy_float_literal
+lossy_float_literal = "warn"
+
+# `Mutex<bool>` / `Mutex<usize>` where an atomic would do.
+# https://rust-lang.github.io/rust-clippy/master/#mutex_atomic
+mutex_atomic = "warn"
+
+# `.contains()` then `.insert()` double-looks-up the set.
+# https://rust-lang.github.io/rust-clippy/master/#set_contains_or_insert
+set_contains_or_insert = "warn"
+
+# --- Nursery lints worth the risk here -----------------------------------
+# The nursery group as a whole is not stable enough to enable, but these
+# individually pay for themselves in a lock-free engine.
+
 # Checks for temporaries with a significant `Drop` in `if let`/`match`
 # scrutinees, which live until the end of the whole expression. For a
 # lock-free MVCC engine this is the difference between releasing a lock
@@ -83,6 +134,32 @@ significant_drop_in_scrutinee = "warn"
 # out rather than being "fixed".
 # https://rust-lang.github.io/rust-clippy/master/#significant_drop_tightening
 significant_drop_tightening = "warn"
+
+# Clones whose value is dropped without being read.
+# https://rust-lang.github.io/rust-clippy/master/#redundant_clone
+redundant_clone = "warn"
+
+# NOT enabled. Every site it fires on in this repo is the
+#
+#     let handles: Vec<_> = (0..N).map(|_| thread::spawn(..)).collect();
+#     let results: Vec<_> = handles.into_iter().map(|h| h.join()).collect();
+#
+# pattern in the concurrency tests, and the suggested fix is to fuse the two
+# chains. Because iterators are lazy that would spawn thread i, join it, then
+# spawn thread i+1 — serialising the threads and quietly destroying the
+# concurrency the test exists to exercise. Collecting the handles is what
+# makes all N threads run at once, so it is load-bearing, not needless.
+# https://rust-lang.github.io/rust-clippy/master/#needless_collect
+needless_collect = "allow"
+
+# Functions that could be `const fn`. Free at the call site and lets more
+# of the option//key plumbing be evaluated at compile time.
+# https://rust-lang.github.io/rust-clippy/master/#missing_const_for_fn
+missing_const_for_fn = "warn"
+
+# `Self` over repeating the type name in an impl block.
+# https://rust-lang.github.io/rust-clippy/master/#use_self
+use_self = "warn"
 
 [dependencies]
 arc-swap = "1.9.1"

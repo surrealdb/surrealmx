@@ -57,8 +57,8 @@ fn concurrent_writers_disjoint_prefix_groups() {
 
 	let mut handles = Vec::new();
 	for tid in 0..THREADS {
-		let db = db.clone();
-		let barrier = barrier.clone();
+		let db = Arc::clone(&db);
+		let barrier = Arc::clone(&barrier);
 		handles.push(thread::spawn(move || {
 			barrier.wait();
 			for i in 0..PER_THREAD {
@@ -101,8 +101,8 @@ fn concurrent_writers_same_prefix_group_disjoint_keys() {
 
 	let mut handles = Vec::new();
 	for tid in 0..THREADS {
-		let db = db.clone();
-		let barrier = barrier.clone();
+		let db = Arc::clone(&db);
+		let barrier = Arc::clone(&barrier);
 		handles.push(thread::spawn(move || {
 			barrier.wait();
 			for i in 0..PER_THREAD {
@@ -153,9 +153,9 @@ fn concurrent_writers_compete_for_same_keys() {
 	let conflicts = Arc::new(AtomicU64::new(0));
 	let mut handles = Vec::new();
 	for tid in 0..THREADS {
-		let db = db.clone();
-		let barrier = barrier.clone();
-		let conflicts = conflicts.clone();
+		let db = Arc::clone(&db);
+		let barrier = Arc::clone(&barrier);
+		let conflicts = Arc::clone(&conflicts);
 		handles.push(thread::spawn(move || {
 			barrier.wait();
 			for round in 0..ROUNDS {
@@ -218,10 +218,10 @@ fn ssi_increment_counter_under_contention() {
 	let conflicts = Arc::new(AtomicU64::new(0));
 	let mut handles = Vec::new();
 	for _ in 0..THREADS {
-		let db = db.clone();
-		let barrier = barrier.clone();
-		let conflicts = conflicts.clone();
-		let successes = successes.clone();
+		let db = Arc::clone(&db);
+		let barrier = Arc::clone(&barrier);
+		let conflicts = Arc::clone(&conflicts);
+		let successes = Arc::clone(&successes);
 		handles.push(thread::spawn(move || {
 			barrier.wait();
 			for _ in 0..ROUNDS {
@@ -298,8 +298,8 @@ fn snapshot_reader_sees_consistent_value_for_pinned_key() {
 	let read_tx = db.transaction(false).with_snapshot_isolation();
 
 	let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-	let writer_db = db.clone();
-	let writer_stop = stop.clone();
+	let writer_db = Arc::clone(&db);
+	let writer_stop = Arc::clone(&stop);
 	let writer = thread::spawn(move || {
 		let mut rev = 0u32;
 		while !writer_stop.load(Ordering::Relaxed) {
@@ -353,8 +353,8 @@ fn many_readers_during_inserts() {
 
 	let mut reader_handles = Vec::new();
 	for _ in 0..READERS {
-		let db = db.clone();
-		let stop = stop.clone();
+		let db = Arc::clone(&db);
+		let stop = Arc::clone(&stop);
 		reader_handles.push(thread::spawn(move || {
 			for _ in 0..READER_OPS {
 				if stop.load(Ordering::Relaxed) {
@@ -369,7 +369,7 @@ fn many_readers_during_inserts() {
 		}));
 	}
 
-	let writer_db = db.clone();
+	let writer_db = Arc::clone(&db);
 	let writer = thread::spawn(move || {
 		for i in 0..WRITER_KEYS {
 			let mut tx = writer_db.transaction(true);
@@ -409,8 +409,8 @@ fn concurrent_deletes_no_phantom_within_snapshot() {
 	}
 
 	let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-	let deleter_db = db.clone();
-	let deleter_stop = stop.clone();
+	let deleter_db = Arc::clone(&db);
+	let deleter_stop = Arc::clone(&stop);
 	let deleter = thread::spawn(move || {
 		// Delete keys gradually
 		for i in 0..TOTAL_KEYS {
@@ -429,7 +429,7 @@ fn concurrent_deletes_no_phantom_within_snapshot() {
 	// Readers verify that within their snapshot, observed keys stay observed.
 	let mut reader_handles = Vec::new();
 	for _ in 0..4 {
-		let db = db.clone();
+		let db = Arc::clone(&db);
 		reader_handles.push(thread::spawn(move || {
 			for _ in 0..30 {
 				let mut tx = db.transaction(false);
@@ -492,9 +492,9 @@ fn sustained_mixed_workload_prefix_keys() {
 
 	let mut handles = Vec::new();
 	for tid in 0..THREADS {
-		let db = db.clone();
-		let seen_values = seen_values.clone();
-		let barrier = barrier.clone();
+		let db = Arc::clone(&db);
+		let seen_values = Arc::clone(&seen_values);
+		let barrier = Arc::clone(&barrier);
 		handles.push(thread::spawn(move || {
 			barrier.wait();
 			let start = Instant::now();
@@ -583,9 +583,9 @@ fn hot_key_concurrent_writers_converge() {
 		Arc::new(std::sync::Mutex::new(BTreeSet::new()));
 	let mut handles = Vec::new();
 	for tid in 0..THREADS {
-		let db = db.clone();
-		let barrier = barrier.clone();
-		let written = written.clone();
+		let db = Arc::clone(&db);
+		let barrier = Arc::clone(&barrier);
+		let written = Arc::clone(&written);
 		handles.push(thread::spawn(move || {
 			barrier.wait();
 			for i in 0..PER_THREAD {

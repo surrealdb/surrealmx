@@ -345,8 +345,8 @@ fn delete_then_recreate_under_gc_keeps_value() {
 	// Hammer GC to maximise the chance of a remove landing next to a recreate.
 	let stop = Arc::new(AtomicBool::new(false));
 	let gc = {
-		let db = db.clone();
-		let stop = stop.clone();
+		let db = Arc::clone(&db);
+		let stop = Arc::clone(&stop);
 		thread::spawn(move || {
 			while !stop.load(Ordering::Relaxed) {
 				db.run_gc();
@@ -357,7 +357,7 @@ fn delete_then_recreate_under_gc_keeps_value() {
 	let mut handles = Vec::new();
 	for w in 0..WRITERS {
 		// Each writer owns a disjoint key set, so commits never conflict.
-		let db = db.clone();
+		let db = Arc::clone(&db);
 		handles.push(thread::spawn(move || {
 			for round in 0..ROUNDS {
 				for k in 0..KEYS_PER_WRITER {

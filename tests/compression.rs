@@ -255,8 +255,7 @@ fn auto_detect_lz4_compressed_snapshot() {
 		.with_compression(CompressionMode::Lz4);
 
 	{
-		let db =
-			Database::new_with_persistence(db_opts.clone(), persistence_opts_lz4.clone()).unwrap();
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts_lz4).unwrap();
 
 		let mut tx = db.transaction(true);
 		tx.set("key", "compressed_value").unwrap();
@@ -302,8 +301,7 @@ fn auto_detect_uncompressed_snapshot() {
 		.with_compression(CompressionMode::None);
 
 	{
-		let db =
-			Database::new_with_persistence(db_opts.clone(), persistence_opts_none.clone()).unwrap();
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts_none).unwrap();
 
 		let mut tx = db.transaction(true);
 		tx.set("key", "uncompressed_value").unwrap();

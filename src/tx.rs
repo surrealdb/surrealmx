@@ -60,7 +60,7 @@ pub struct Transaction {
 // Transaction must be Send + Sync so downstream callers can place it
 // behind shared locks like `tokio::sync::RwLock<Transaction>`.
 const _: fn() = || {
-	fn assert_send_sync<T: Send + Sync>() {}
+	const fn assert_send_sync<T: Send + Sync>() {}
 	assert_send_sync::<Transaction>();
 };
 
@@ -81,14 +81,14 @@ impl Drop for Transaction {
 
 impl Transaction {
 	/// Ensure this transaction is committed with snapshot isolation guarantees
-	pub fn with_snapshot_isolation(mut self) -> Self {
+	pub const fn with_snapshot_isolation(mut self) -> Self {
 		self.inner.as_mut().unwrap().mode = IsolationLevel::SnapshotIsolation;
 		self
 	}
 
 	/// Ensure this transaction is committed with serializable snapshot
 	/// isolation guarantees
-	pub fn with_serializable_snapshot_isolation(mut self) -> Self {
+	pub const fn with_serializable_snapshot_isolation(mut self) -> Self {
 		self.inner.as_mut().unwrap().mode = IsolationLevel::SerializableSnapshotIsolation;
 		self
 	}
@@ -109,12 +109,12 @@ impl Transaction {
 	}
 
 	/// Get the starting sequence number of this transaction
-	pub fn version(&self) -> u64 {
+	pub const fn version(&self) -> u64 {
 		self.inner.as_ref().unwrap().version()
 	}
 
 	/// Check if the transaction is closed
-	pub fn closed(&self) -> bool {
+	pub const fn closed(&self) -> bool {
 		self.inner.as_ref().unwrap().closed()
 	}
 
@@ -488,7 +488,7 @@ fn pin_slot(db: &Inner, slot: &Arc<Slot>) -> (u64, u64, u64) {
 	slot.commit.store(SLOT_PINNING, Ordering::SeqCst);
 	// Insert the slot into the readers map under a fresh id
 	let slot_id = db.reader_slot_id.fetch_add(1, Ordering::Relaxed) + 1;
-	db.readers.insert(slot_id, slot.clone());
+	db.readers.insert(slot_id, Arc::clone(slot));
 	// Pair with the fence in every watermark scan
 	fence(Ordering::SeqCst);
 	// Load the commit snapshot, then the version snapshot
@@ -565,12 +565,12 @@ impl TransactionInner {
 	}
 
 	/// Get the starting sequence number of this transaction
-	pub fn version(&self) -> u64 {
+	pub const fn version(&self) -> u64 {
 		self.version
 	}
 
 	/// Check if the transaction is closed
-	pub fn closed(&self) -> bool {
+	pub const fn closed(&self) -> bool {
 		self.done
 	}
 
@@ -718,8 +718,8 @@ impl TransactionInner {
 		let mut commit_guard = OnUnwind {
 			armed: true,
 			action: {
-				let database = self.database.clone();
-				let entry = commit_entry.clone();
+				let database = Arc::clone(&self.database);
+				let entry = Arc::clone(&commit_entry);
 				move || {
 					entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
 					database.advance_commit_watermark();
@@ -856,8 +856,8 @@ impl TransactionInner {
 		let mut merge_guard = OnUnwind {
 			armed: true,
 			action: {
-				let database = self.database.clone();
-				let entry = entry.clone();
+				let database = Arc::clone(&self.database);
+				let entry = Arc::clone(&entry);
 				move || {
 					entry.applied.store(true, Ordering::SeqCst);
 					database.advance_merge_retirement();
@@ -1756,7 +1756,7 @@ impl TransactionInner {
 			.transaction_merge_queue
 			.range(..=version)
 			.rev()
-			.map(|e| e.value().clone())
+			.map(|e| Arc::clone(e.value()))
 			.collect()
 	}
 
@@ -2272,7 +2272,7 @@ impl TransactionInner {
 			// bound already having reached our slot as success.
 			let cur = self.database.transaction_commit_id.load(Ordering::SeqCst);
 			if cur >= slot {
-				return (slot, entry.value().clone());
+				return (slot, Arc::clone(entry.value()));
 			}
 			if cur == slot - 1
 				&& self
@@ -2281,7 +2281,7 @@ impl TransactionInner {
 					.compare_exchange_weak(cur, slot, Ordering::SeqCst, Ordering::Acquire)
 					.is_ok()
 			{
-				return (slot, entry.value().clone());
+				return (slot, Arc::clone(entry.value()));
 			}
 			// Ensure the thread backs off when under contention
 			backoff(spins);
@@ -2298,7 +2298,7 @@ impl TransactionInner {
 		// Store the commit in an Arc
 		let updates = Arc::new(updates);
 		// Get the database logical clock
-		let oracle = self.database.oracle.clone();
+		let oracle = Arc::clone(&self.database.oracle);
 		// Get the database transaction merge queue
 		let queue = &self.database.transaction_merge_queue;
 		// Claim a unique merge version from the allocation counter. See
@@ -2315,7 +2315,7 @@ impl TransactionInner {
 		loop {
 			let cur = oracle.timestamp.load(Ordering::SeqCst);
 			if cur >= version {
-				return (version, entry.value().clone());
+				return (version, Arc::clone(entry.value()));
 			}
 			if cur == version - 1
 				&& oracle
@@ -2323,7 +2323,7 @@ impl TransactionInner {
 					.compare_exchange_weak(cur, version, Ordering::SeqCst, Ordering::Acquire)
 					.is_ok()
 			{
-				return (version, entry.value().clone());
+				return (version, Arc::clone(entry.value()));
 			}
 			// Ensure the thread backs off when under contention
 			backoff(spins);
@@ -4668,9 +4668,9 @@ mod tests {
 			Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
 		let mut handles = Vec::new();
 		for tid in 0..THREADS {
-			let db = db.clone();
-			let barrier = barrier.clone();
-			let written = written.clone();
+			let db = Arc::clone(&db);
+			let barrier = Arc::clone(&barrier);
+			let written = Arc::clone(&written);
 			handles.push(thread::spawn(move || {
 				barrier.wait();
 				for i in 0..PER_THREAD {

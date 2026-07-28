@@ -245,7 +245,7 @@ fn concurrent_recovery_attempts() {
 
 	// Create initial data
 	{
-		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts).unwrap();
 
 		let mut tx = db.transaction(true);
 		tx.set("shared_key", "shared_value").unwrap();

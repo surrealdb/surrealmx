@@ -86,6 +86,6 @@ pub enum PersistenceError {
 
 impl<T> From<PoisonError<std::sync::MutexGuard<'_, T>>> for PersistenceError {
 	fn from(error: PoisonError<std::sync::MutexGuard<'_, T>>) -> Self {
-		PersistenceError::LockFailed(error.to_string())
+		Self::LockFailed(error.to_string())
 	}
 }

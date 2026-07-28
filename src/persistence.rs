@@ -127,19 +127,19 @@ impl PersistenceOptions {
 	}
 
 	/// Set the AOL (append-only log) behavior mode
-	pub fn with_aol_mode(mut self, mode: AolMode) -> Self {
+	pub const fn with_aol_mode(mut self, mode: AolMode) -> Self {
 		self.aol_mode = mode;
 		self
 	}
 
 	/// Set the snapshot behavior mode
-	pub fn with_snapshot_mode(mut self, mode: SnapshotMode) -> Self {
+	pub const fn with_snapshot_mode(mut self, mode: SnapshotMode) -> Self {
 		self.snapshot_mode = mode;
 		self
 	}
 
 	/// Set the fsync mode
-	pub fn with_fsync_mode(mut self, mode: FsyncMode) -> Self {
+	pub const fn with_fsync_mode(mut self, mode: FsyncMode) -> Self {
 		self.fsync_mode = mode;
 		self
 	}
@@ -157,7 +157,7 @@ impl PersistenceOptions {
 	}
 
 	/// Set the compression mode for snapshots
-	pub fn with_compression(mut self, mode: CompressionMode) -> Self {
+	pub const fn with_compression(mut self, mode: CompressionMode) -> Self {
 		self.compression_mode = mode;
 		self
 	}
@@ -623,9 +623,9 @@ impl Persistence {
 			// Check if a background thread is already running
 			if self.fsync_handle.read().is_none() {
 				// Clone necessary fields for the worker thread
-				let aol = aol.clone();
-				let pending_syncs = self.pending_syncs.clone();
-				let enabled = self.background_threads_enabled.clone();
+				let aol = Arc::clone(aol);
+				let pending_syncs = Arc::clone(&self.pending_syncs);
+				let enabled = Arc::clone(&self.background_threads_enabled);
 				// Spawn the background worker thread
 				let handle = thread::spawn(move || {
 					// Check whether the persistence process is enabled
@@ -673,11 +673,11 @@ impl Persistence {
 		// Check if a background thread is already running
 		if self.snapshot_handle.read().is_none() {
 			// Clone necessary fields for the worker thread
-			let db = self.inner.clone();
+			let db = Arc::clone(&self.inner);
 			let aol = self.aol.clone();
 			let snapshot_path = self.snapshot_path.clone();
-			let pending_syncs = self.pending_syncs.clone();
-			let enabled = self.background_threads_enabled.clone();
+			let pending_syncs = Arc::clone(&self.pending_syncs);
+			let enabled = Arc::clone(&self.background_threads_enabled);
 			let compression = self.compression_mode;
 			// Spawn the background worker thread
 			let handle = thread::spawn(move || {
@@ -764,12 +764,12 @@ impl Persistence {
 			// Check if a background thread is already running
 			if self.appender_handle.read().is_none() {
 				// Clone necessary fields for the worker thread
-				let injector = self.async_append_injector.clone();
-				let aol = aol.clone();
+				let injector = Arc::clone(&self.async_append_injector);
+				let aol = Arc::clone(aol);
 				let fsync_mode = self.fsync_mode;
-				let enabled = self.background_threads_enabled.clone();
-				let pending_syncs = self.pending_syncs.clone();
-				let last_fsync = self.last_fsync.clone();
+				let enabled = Arc::clone(&self.background_threads_enabled);
+				let pending_syncs = Arc::clone(&self.pending_syncs);
+				let last_fsync = Arc::clone(&self.last_fsync);
 				// Spawn the background worker thread
 				let handle = thread::spawn(move || {
 					// Set the batch size and timeout

@@ -89,7 +89,7 @@ impl<'a> Cursor<'a> {
 			.transaction_merge_queue
 			.range(..=version)
 			.rev()
-			.map(|e| e.value().clone())
+			.map(|e| Arc::clone(e.value()))
 			.collect();
 
 		Cursor {
@@ -108,7 +108,7 @@ impl<'a> Cursor<'a> {
 
 	/// Check if the cursor is positioned at a valid entry.
 	#[inline]
-	pub fn valid(&self) -> bool {
+	pub const fn valid(&self) -> bool {
 		self.current.is_some()
 	}
 

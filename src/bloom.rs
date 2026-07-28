@@ -27,8 +27,8 @@ pub(crate) struct BloomFilter {
 
 impl BloomFilter {
 	/// Create a new empty bloom filter
-	pub fn new() -> Self {
-		BloomFilter {
+	pub const fn new() -> Self {
+		Self {
 			bits: [0; BLOOM_BYTES],
 			count: 0,
 		}
@@ -69,12 +69,12 @@ impl BloomFilter {
 	}
 
 	/// Check whether the filter is empty
-	pub fn is_empty(&self) -> bool {
+	pub const fn is_empty(&self) -> bool {
 		self.count == 0
 	}
 
 	/// Reset the filter to its initial empty state
-	pub fn clear(&mut self) {
+	pub const fn clear(&mut self) {
 		self.bits = [0; BLOOM_BYTES];
 		self.count = 0;
 	}

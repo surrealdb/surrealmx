@@ -32,7 +32,7 @@ impl From<Version> for Versions {
 	fn from(value: Version) -> Self {
 		let mut inner = SmallVec::new();
 		inner.push(value);
-		Versions {
+		Self {
 			inner,
 		}
 	}
@@ -44,7 +44,7 @@ impl Versions {
 	#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 	#[inline]
 	pub(crate) fn new() -> Self {
-		Versions {
+		Self {
 			inner: SmallVec::new(),
 		}
 	}

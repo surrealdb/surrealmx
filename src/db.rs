@@ -53,8 +53,8 @@ pub struct Database {
 impl Default for Database {
 	fn default() -> Self {
 		let inner = Arc::new(Inner::default());
-		let pool = Pool::new(inner.clone(), DEFAULT_POOL_SIZE);
-		Database {
+		let pool = Pool::new(Arc::clone(&inner), DEFAULT_POOL_SIZE);
+		Self {
 			inner,
 			pool,
 			#[cfg(not(target_arch = "wasm32"))]
@@ -92,9 +92,9 @@ impl Database {
 		//  Create a new inner database
 		let inner = Arc::new(Inner::new(&opts));
 		// Initialise a transaction pool
-		let pool = Pool::new(inner.clone(), opts.pool_size);
+		let pool = Pool::new(Arc::clone(&inner), opts.pool_size);
 		// Create the database
-		let db = Database {
+		let db = Self {
 			inner,
 			pool,
 			#[cfg(not(target_arch = "wasm32"))]
@@ -128,14 +128,14 @@ impl Database {
 		//  Create a new inner database
 		let inner = Arc::new(Inner::new(&opts));
 		// Initialise a transaction pool
-		let pool = Pool::new(inner.clone(), opts.pool_size);
+		let pool = Pool::new(Arc::clone(&inner), opts.pool_size);
 		// Create a new persistence layer with options
-		let persist = Persistence::new_with_options(persistence_opts, inner.clone())
+		let persist = Persistence::new_with_options(persistence_opts, Arc::clone(&inner))
 			.map_err(std::io::Error::other)?;
 		// Replace the persistence layer in the database
 		inner.persistence.write().replace(Arc::new(persist.clone()));
 		// Create the database
-		let db = Database {
+		let db = Self {
 			inner,
 			pool,
 			persistence: Some(persist),
@@ -160,7 +160,7 @@ impl Database {
 
 	/// Get a reference to the persistence layer if enabled
 	#[cfg(not(target_arch = "wasm32"))]
-	pub fn persistence(&self) -> Option<&Persistence> {
+	pub const fn persistence(&self) -> Option<&Persistence> {
 		self.persistence.as_ref()
 	}
 
@@ -277,7 +277,7 @@ impl Database {
 	#[cfg(not(target_arch = "wasm32"))]
 	fn initialise_cleanup_worker(&self) {
 		// Clone the underlying datastore inner
-		let db = self.inner.clone();
+		let db = Arc::clone(&self.inner);
 		// Check if a background thread is already running
 		if db.transaction_cleanup_handle.read().is_none() {
 			// Get the specified interval
@@ -305,7 +305,7 @@ impl Database {
 	#[cfg(not(target_arch = "wasm32"))]
 	fn initialise_garbage_worker(&self) {
 		// Clone the underlying datastore inner
-		let db = self.inner.clone();
+		let db = Arc::clone(&self.inner);
 		// Check if a background thread is already running
 		if db.garbage_collection_handle.read().is_none() {
 			// Get the specified interval

@@ -59,43 +59,43 @@ impl DatabaseOptions {
 	}
 
 	/// Set the maximum number of transactions kept in the pool.
-	pub fn with_pool_size(mut self, pool_size: usize) -> Self {
+	pub const fn with_pool_size(mut self, pool_size: usize) -> Self {
 		self.pool_size = pool_size;
 		self
 	}
 
 	/// Set whether the garbage collector thread is started automatically.
-	pub fn with_enable_gc(mut self, enable: bool) -> Self {
+	pub const fn with_enable_gc(mut self, enable: bool) -> Self {
 		self.enable_gc = enable;
 		self
 	}
 
 	/// Set the interval at which the garbage collector wakes up.
-	pub fn with_gc_interval(mut self, interval: Duration) -> Self {
+	pub const fn with_gc_interval(mut self, interval: Duration) -> Self {
 		self.gc_interval = interval;
 		self
 	}
 
 	/// Set whether the cleanup worker thread is started automatically.
-	pub fn with_enable_cleanup(mut self, enable: bool) -> Self {
+	pub const fn with_enable_cleanup(mut self, enable: bool) -> Self {
 		self.enable_cleanup = enable;
 		self
 	}
 
 	/// Set the interval at which the cleanup worker wakes up.
-	pub fn with_cleanup_interval(mut self, interval: Duration) -> Self {
+	pub const fn with_cleanup_interval(mut self, interval: Duration) -> Self {
 		self.cleanup_interval = interval;
 		self
 	}
 
 	/// Set the threshold after which transaction state maps are reset.
-	pub fn with_reset_threshold(mut self, threshold: usize) -> Self {
+	pub const fn with_reset_threshold(mut self, threshold: usize) -> Self {
 		self.reset_threshold = threshold;
 		self
 	}
 
 	/// Disable all background worker threads (gc and cleanup).
-	pub fn with_all_workers_disabled(mut self) -> Self {
+	pub const fn with_all_workers_disabled(mut self) -> Self {
 		self.enable_gc = false;
 		self.enable_cleanup = false;
 		self
@@ -106,7 +106,7 @@ impl DatabaseOptions {
 	/// throughput: more dropped transactions are kept for reuse, and
 	/// reader-pinned garbage waits longer for its tracked sweep —
 	/// steady-state reclamation happens inline at commit time either way.
-	pub fn with_high_performance(mut self) -> Self {
+	pub const fn with_high_performance(mut self) -> Self {
 		self.pool_size *= 2;
 		self.gc_interval = Duration::from_secs(30);
 		self.cleanup_interval = Duration::from_millis(100);
@@ -117,7 +117,7 @@ impl DatabaseOptions {
 	/// Configure for low-CPU scenarios (embedded / battery-powered)
 	/// with slower background workers. Trades memory and reclamation
 	/// latency for minimal background CPU.
-	pub fn with_low_resource(mut self) -> Self {
+	pub const fn with_low_resource(mut self) -> Self {
 		self.pool_size /= 2;
 		self.gc_interval = Duration::from_mins(1);
 		self.cleanup_interval = Duration::from_millis(500);
@@ -131,7 +131,7 @@ impl DatabaseOptions {
 	/// transactions are kept around for reuse. Since a sweep visits only
 	/// the tracked candidate keys, the extra ticks cost little CPU even
 	/// on large datasets.
-	pub fn with_reduced_memory(mut self) -> Self {
+	pub const fn with_reduced_memory(mut self) -> Self {
 		self.pool_size /= 2;
 		self.gc_interval = Duration::from_secs(5);
 		self.cleanup_interval = Duration::from_millis(100);

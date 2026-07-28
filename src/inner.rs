@@ -64,7 +64,7 @@ pub(crate) struct Slot {
 
 impl Slot {
 	/// Create a new slot in the pinning state
-	pub(crate) fn pinning() -> Self {
+	pub(crate) const fn pinning() -> Self {
 		Self {
 			version: AtomicU64::new(SLOT_PINNING),
 			commit: AtomicU64::new(SLOT_PINNING),

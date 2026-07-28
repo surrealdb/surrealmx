@@ -25,9 +25,9 @@ fn concurrent_random_transactions() {
 	// Spin up a number of threads
 	for _ in 0..THREADS {
 		// Clone the database
-		let db = db.clone();
+		let db = Arc::clone(&db);
 		// Clone the expected modifications
-		let expected = expected.clone();
+		let expected = Arc::clone(&expected);
 		// Store the reference to the thread
 		handles.push(thread::spawn(move || {
 			let mut rng = rand::rng();
