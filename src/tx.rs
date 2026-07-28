@@ -551,9 +551,7 @@ impl TransactionInner {
 		self.reset_threshold = self.database.reset_threshold;
 		// Re-pin the retained slot allocation under a fresh id
 		let (slot_id, commit, version) = pin_slot(&self.database, &self.slot);
-		// Clear savepoint stack
-		self.savepoint_stack.clear();
-		// Clear or completely reset the allocated readset
+		// Store the threshold for the allocated state resets
 		let threshold = self.reset_threshold;
 		// Clear the transaction scanset
 		self.scanset.clear();
@@ -568,9 +566,10 @@ impl TransactionInner {
 			self.writeset.clear();
 		}
 		// Clear or completely reset the allocated savepoints
-		if self.savepoint_stack.len() > threshold {
-			self.savepoint_stack = Vec::new();
-		}
+		match self.savepoint_stack.len() > threshold {
+			true => self.savepoint_stack = Vec::new(),
+			false => self.savepoint_stack.clear(),
+		};
 		// Reset the transaction
 		self.done = false;
 		self.write = write;
@@ -2396,6 +2395,7 @@ mod tests {
 
 	use crate::err::Error;
 	use crate::Database;
+	use crate::DatabaseOptions;
 	use std::sync::Arc;
 	use std::thread;
 
@@ -3796,6 +3796,87 @@ mod tests {
 		);
 
 		tx4.cancel().unwrap();
+	}
+
+	#[test]
+	fn test_rollback_keeps_reads_tracked() {
+		// Verify that rolling back a savepoint does not forget reads made inside
+		// the rolled back scope. An application can read a value inside a scope,
+		// roll that scope back, and then make a surviving write that depends on
+		// the value it saw. Dropping those reads from the readset would admit an
+		// SSI anomaly where a concurrent write to the read key does not conflict.
+		// Reads are therefore tracked monotonically, matching the readset bloom
+		// filter, which is never restored either.
+
+		let db = Database::new();
+
+		// Setup initial data
+		let mut tx_setup = db.transaction(true);
+		tx_setup.set("read", "initial").unwrap();
+		tx_setup.set("other", "other").unwrap();
+		tx_setup.commit().unwrap();
+
+		let mut tx1 = db.transaction(true);
+
+		// Read a key inside a savepoint scope, then roll the scope back
+		tx1.set_savepoint().unwrap();
+		assert_eq!(tx1.get("read").unwrap().as_deref(), Some(b"initial" as &[u8]));
+		tx1.rollback_to_savepoint().unwrap();
+
+		// The read must remain tracked for conflict detection
+		assert!(
+			tx1.inner.as_ref().unwrap().readset.pin().contains("read".as_bytes()),
+			"Reads made inside a rolled back scope must remain tracked"
+		);
+
+		// Make a surviving write derived from the value that was read
+		tx1.set("other", "derived").unwrap();
+
+		// A concurrent transaction modifies the key that tx1 read
+		let mut tx2 = db.transaction(true);
+		tx2.set("read", "changed").unwrap();
+		tx2.commit().unwrap();
+
+		// tx1 must abort, because its surviving write depends on a value that
+		// has since changed underneath it
+		let result = tx1.commit();
+		assert!(
+			matches!(result, Err(Error::KeyReadConflict)),
+			"Should detect a read conflict on a key read inside a rolled back scope, got: {:?}",
+			result
+		);
+	}
+
+	#[test]
+	fn test_reset_reclaims_savepoint_stack_capacity() {
+		// Verify that a transaction which grew a large savepoint stack does not
+		// retain that allocation once it has been returned to the pool and
+		// reused. Dropping a transaction without committing or cancelling
+		// returns it to the pool with its savepoint stack still populated, so
+		// `reset` is the only place the allocation can be reclaimed.
+
+		let db = Database::new_with_options(DatabaseOptions::new().with_reset_threshold(2));
+
+		// Build a savepoint stack deeper than the reset threshold
+		let mut tx1 = db.transaction(true);
+		for i in 0..5 {
+			tx1.set(format!("key{}", i), "value").unwrap();
+			tx1.set_savepoint().unwrap();
+		}
+		assert_eq!(tx1.inner.as_ref().unwrap().savepoint_stack.len(), 5);
+
+		// Drop without committing or cancelling, so the transaction returns to
+		// the pool with its savepoint stack intact
+		drop(tx1);
+
+		// The next transaction reuses the pooled allocation
+		let tx2 = db.transaction(true);
+		let capacity = tx2.inner.as_ref().unwrap().savepoint_stack.capacity();
+		assert!(
+			capacity < 5,
+			"Savepoint stack capacity should be reclaimed on reset when it exceeds the threshold, got: {}",
+			capacity
+		);
 	}
 
 	#[test]
