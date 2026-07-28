@@ -25,6 +25,7 @@
 - In-memory database
 - Multi-version concurrency control
 - Rich transaction support with rollbacks
+- Stackable savepoints with partial rollback and release
 - Multiple concurrent readers without locking
 - Multiple concurrent writers without locking
 - Support for serializable, snapshot isolated transactions
@@ -388,6 +389,57 @@ Or via the `RUST_LOG` environment variable:
 ```sh
 RUST_LOG="info,surrealmx::conflicts=debug" cargo run
 ```
+
+#### Savepoints
+
+Savepoints mark a point inside a transaction that later writes can be undone back to, without discarding the whole transaction. They are stackable, so scopes can nest.
+
+```rust
+let db = Database::new();
+let mut tx = db.transaction(true);
+
+tx.set("user:1", "alice").unwrap();
+
+// Mark a point, then make some changes
+tx.set_savepoint().unwrap();
+tx.set("user:1", "bob").unwrap();
+tx.set("user:2", "carol").unwrap();
+
+// Undo everything back to the savepoint
+tx.rollback_to_savepoint().unwrap();
+
+assert_eq!(tx.get("user:1").unwrap(), Some("alice".into()));
+assert_eq!(tx.get("user:2").unwrap(), None);
+
+tx.commit().unwrap();
+```
+
+Every `set_savepoint` should be paired with exactly one of:
+
+- `rollback_to_savepoint` — undo every write made since the savepoint, and discard it.
+- `release_savepoint` — keep every write made since the savepoint, and discard it.
+
+Releasing is what a nested scope does when it succeeds. Its writes join the enclosing scope, so a later rollback of that enclosing scope still undoes them:
+
+```rust
+tx.set_savepoint().unwrap();          // outer scope
+tx.set("a", "1").unwrap();
+
+tx.set_savepoint().unwrap();          // inner scope
+tx.set("b", "2").unwrap();
+tx.release_savepoint().unwrap();      // inner scope succeeded, so keep "b"
+
+assert_eq!(tx.get("b").unwrap(), Some("2".into()));
+
+// Unwinding the outer scope still undoes the released scope's write
+tx.rollback_to_savepoint().unwrap();
+assert_eq!(tx.get("a").unwrap(), None);
+assert_eq!(tx.get("b").unwrap(), None);
+```
+
+Both methods return `Error::NoSavepoint` when no savepoint is set, and `Error::TxNotWritable` on a read-only transaction. Savepoints are anonymous, so releasing more savepoints than were set cannot be detected once the stack is non-empty again: a later rollback will silently unwind further than intended.
+
+Note that a rollback rewinds writes only. Keys read and ranges scanned inside a rolled back scope stay tracked for conflict detection, because a write that survives the rollback may have been derived from a value that scope read. This keeps serializable transactions conservative — it can produce a retryable conflict error, never a missed one.
 
 #### Range operations
 
