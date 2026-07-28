@@ -18,7 +18,39 @@ keywords = [
 categories = ["database-implementations", "data-structures", "embedded"]
 license = "Apache-2.0"
 
+[lints.rust]
+
+# This engine contains no `unsafe` at all: every lock-free primitive it uses
+# is encapsulated behind a safe API by `crossbeam-skiplist`, `papaya`, and
+# `arc-swap`. That is a property worth keeping deliberately rather than
+# accidentally, so it is forbidden (which, unlike `deny`, cannot be
+# re-enabled by an inner `#[allow]` further down the tree).
+unsafe_code = "forbid"
+
+# `missing_docs` is enforced on the library only, via the stricter `--lib`
+# clippy pass in CI. Applied crate-wide it would demand a `//!` header on
+# every integration test and benchmark crate too.
+
 [lints.clippy]
+
+# --- Guardrails ----------------------------------------------------------
+# All of these are at zero across every target today, so denying them costs
+# nothing now and stops the pattern from reappearing later.
+
+# Unfinished work must not reach a release.
+todo = "deny"
+unimplemented = "deny"
+
+# Debugging leftovers.
+dbg_macro = "deny"
+
+# `==` on floats. There is no float arithmetic in the engine; keep it that
+# way, and make it a conscious decision if that ever changes.
+float_cmp = "deny"
+
+# Leaking a value rather than dropping it hides resource lifetimes, which in
+# an engine that returns transactions to a pool would be a real bug.
+mem_forget = "deny"
 
 # The `pedantic` group, enabled wholesale. surrealdb/surrealdb hand-picks
 # individual lints instead, because `pedantic` over ~300k LOC is not

@@ -15,12 +15,14 @@
 //! This module stores the transaction commit and merge queues.
 
 use crate::bloom::BloomFilter;
+#[cfg(debug_assertions)]
 use crate::LOG_TARGET_CONFLICTS;
 use bytes::Bytes;
 use papaya::HashSet;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
+#[cfg(debug_assertions)]
 use tracing::debug;
 
 /// A transaction entry in the transaction commit queue

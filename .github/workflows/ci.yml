@@ -96,14 +96,10 @@ jobs:
         run: |
           cargo clippy --lib --all-features -- \
             -D warnings \
+            -D missing_docs \
             -D clippy::unwrap_used \
             -D clippy::get_unwrap \
             -D clippy::panic \
-            -D clippy::todo \
-            -D clippy::unimplemented \
-            -D clippy::dbg_macro \
-            -D clippy::float_cmp \
-            -D clippy::mem_forget \
             -D clippy::cast_possible_truncation \
             -D clippy::cast_sign_loss \
             -D clippy::cast_possible_wrap

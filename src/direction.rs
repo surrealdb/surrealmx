@@ -17,6 +17,8 @@
 /// The direction that the iterator should iterate
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Direction {
+	/// Iterate from the start of the range towards the end
 	Forward,
+	/// Iterate from the end of the range towards the start
 	Reverse,
 }

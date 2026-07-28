@@ -25,6 +25,7 @@ use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::versions::Versions;
+#[cfg(debug_assertions)]
 use crate::LOG_TARGET_CONFLICTS;
 use arc_swap::ArcSwap;
 use bytes::Bytes;
@@ -36,12 +37,17 @@ use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(debug_assertions)]
 use tracing::debug;
 
 /// The isolation level of a database transaction
 #[derive(PartialEq, PartialOrd)]
 pub enum IsolationLevel {
+	/// Reads see a consistent snapshot, and commits conflict only on
+	/// write-write overlap
 	SnapshotIsolation,
+	/// As snapshot isolation, and additionally tracks the read set so that
+	/// read-write conflicts are detected at commit time
 	SerializableSnapshotIsolation,
 }
 
