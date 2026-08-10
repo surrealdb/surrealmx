@@ -627,7 +627,7 @@ fn savepoint_release_many_cycles() {
 	// A savepoint per unit of work, each one released
 	for i in 0..num_cycles {
 		tx.set_savepoint().unwrap();
-		tx.set(format!("key_{}", i), format!("value_{}", i)).unwrap();
+		tx.set(format!("key_{i}"), format!("value_{i}")).unwrap();
 		tx.release_savepoint().unwrap();
 	}
 
@@ -637,10 +637,9 @@ fn savepoint_release_many_cycles() {
 	let mut verify_tx = db.transaction(false);
 	for i in 0..num_cycles {
 		assert_eq!(
-			verify_tx.get(format!("key_{}", i)).unwrap(),
-			Some(Bytes::from(format!("value_{}", i))),
-			"key_{} should be committed",
-			i
+			verify_tx.get(format!("key_{i}")).unwrap(),
+			Some(Bytes::from(format!("value_{i}"))),
+			"key_{i} should be committed"
 		);
 	}
 	verify_tx.cancel().unwrap();
@@ -658,7 +657,7 @@ fn savepoint_release_deep_then_rollback() {
 	// Create many nested savepoints, each with a write
 	for i in 0..num_savepoints {
 		tx.set_savepoint().unwrap();
-		tx.set(format!("key_{}", i), "value").unwrap();
+		tx.set(format!("key_{i}"), "value").unwrap();
 	}
 
 	// Release the top half, keeping their writes
@@ -668,7 +667,7 @@ fn savepoint_release_deep_then_rollback() {
 
 	// All keys should still be present
 	for i in 0..num_savepoints {
-		assert!(tx.get(format!("key_{}", i)).unwrap().is_some(), "key_{} should exist", i);
+		assert!(tx.get(format!("key_{i}")).unwrap().is_some(), "key_{i} should exist");
 	}
 
 	// A single rollback unwinds to the deepest surviving savepoint, which is the
@@ -678,12 +677,12 @@ fn savepoint_release_deep_then_rollback() {
 	// The first half's writes remain, minus the one made in the scope we just
 	// rolled back into
 	for i in 0..(num_savepoints / 2 - 1) {
-		assert!(tx.get(format!("key_{}", i)).unwrap().is_some(), "key_{} should exist", i);
+		assert!(tx.get(format!("key_{i}")).unwrap().is_some(), "key_{i} should exist");
 	}
 
 	// Everything from the rolled back scope onwards is gone
 	for i in (num_savepoints / 2 - 1)..num_savepoints {
-		assert!(tx.get(format!("key_{}", i)).unwrap().is_none(), "key_{} should not exist", i);
+		assert!(tx.get(format!("key_{i}")).unwrap().is_none(), "key_{i} should not exist");
 	}
 
 	tx.commit().unwrap();
@@ -723,8 +722,7 @@ fn savepoint_release_still_detects_read_conflict() {
 	let result = tx1.commit();
 	assert!(
 		matches!(result, Err(Error::KeyReadConflict)),
-		"Should detect a read conflict on a key read inside a released scope, got: {:?}",
-		result
+		"Should detect a read conflict on a key read inside a released scope, got: {result:?}"
 	);
 }
 
@@ -798,7 +796,6 @@ fn savepoint_rollback_still_detects_read_conflict_from_rolled_back_scope() {
 	let result = tx1.commit();
 	assert!(
 		matches!(result, Err(Error::KeyReadConflict)),
-		"Should detect a read conflict on a key read inside a rolled back scope, got: {:?}",
-		result
+		"Should detect a read conflict on a key read inside a rolled back scope, got: {result:?}"
 	);
 }

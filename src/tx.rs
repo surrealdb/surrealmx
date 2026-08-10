@@ -135,7 +135,7 @@ impl Transaction {
 	/// than intended. Pair every `set_savepoint` with exactly one release or
 	/// rollback
 	pub fn release_savepoint(&mut self) -> Result<(), Error> {
-		self.inner.as_mut().unwrap().release_savepoint()
+		self.inner.as_mut().expect(INNER_TAKEN).release_savepoint()
 	}
 
 	/// Get the starting sequence number of this transaction
@@ -570,10 +570,11 @@ impl TransactionInner {
 			self.writeset.clear();
 		}
 		// Clear or completely reset the allocated savepoints
-		match self.savepoint_stack.len() > threshold {
-			true => self.savepoint_stack = Vec::new(),
-			false => self.savepoint_stack.clear(),
-		};
+		if self.savepoint_stack.len() > threshold {
+			self.savepoint_stack = Vec::new();
+		} else {
+			self.savepoint_stack.clear();
+		}
 		// Reset the transaction
 		self.done = false;
 		self.write = write;
@@ -655,11 +656,11 @@ impl TransactionInner {
 	/// `rollback_to_savepoint` will target next
 	pub fn release_savepoint(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Discard the most recent savepoint, keeping the current writeset
@@ -3855,7 +3856,7 @@ mod tests {
 		let mut tx = db.transaction(true);
 		for i in 0..1000 {
 			tx.set_savepoint().unwrap();
-			tx.set(format!("key{}", i), "value").unwrap();
+			tx.set(format!("key{i}"), "value").unwrap();
 			tx.release_savepoint().unwrap();
 		}
 		let inner = tx.inner.as_ref().unwrap();
@@ -3871,7 +3872,7 @@ mod tests {
 		let mut tx = db.transaction(true);
 		for i in 0..1000 {
 			tx.set_savepoint().unwrap();
-			tx.set(format!("key{}", i), "value").unwrap();
+			tx.set(format!("key{i}"), "value").unwrap();
 		}
 		assert_eq!(
 			tx.inner.as_ref().unwrap().savepoint_stack.len(),
@@ -3925,8 +3926,7 @@ mod tests {
 		let result = tx1.commit();
 		assert!(
 			matches!(result, Err(Error::KeyReadConflict)),
-			"Should detect a read conflict on a key read inside a rolled back scope, got: {:?}",
-			result
+			"Should detect a read conflict on a key read inside a rolled back scope, got: {result:?}"
 		);
 	}
 
@@ -3943,7 +3943,7 @@ mod tests {
 		// Build a savepoint stack deeper than the reset threshold
 		let mut tx1 = db.transaction(true);
 		for i in 0..5 {
-			tx1.set(format!("key{}", i), "value").unwrap();
+			tx1.set(format!("key{i}"), "value").unwrap();
 			tx1.set_savepoint().unwrap();
 		}
 		assert_eq!(tx1.inner.as_ref().unwrap().savepoint_stack.len(), 5);
@@ -3957,8 +3957,7 @@ mod tests {
 		let capacity = tx2.inner.as_ref().unwrap().savepoint_stack.capacity();
 		assert!(
 			capacity < 5,
-			"Savepoint stack capacity should be reclaimed on reset when it exceeds the threshold, got: {}",
-			capacity
+			"Savepoint stack capacity should be reclaimed on reset when it exceeds the threshold, got: {capacity}"
 		);
 	}
 

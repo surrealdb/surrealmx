@@ -1404,7 +1404,7 @@ fn bench_cursor_pagination(c: &mut Criterion) {
 fn bench_savepoint_snapshot_cost(c: &mut Criterion) {
 	let mut group = c.benchmark_group("savepoint_snapshot_cost");
 
-	for writeset_size in [10usize, 100, 1_000, 10_000].iter() {
+	for writeset_size in &[10usize, 100, 1_000, 10_000] {
 		let value = generate_sequential_value(0, 100);
 
 		// Set then release: snapshot the writeset, then discard the snapshot
@@ -1429,7 +1429,7 @@ fn bench_savepoint_snapshot_cost(c: &mut Criterion) {
 						black_box(&mut tx);
 					},
 					criterion::BatchSize::LargeInput,
-				)
+				);
 			},
 		);
 
@@ -1455,7 +1455,7 @@ fn bench_savepoint_snapshot_cost(c: &mut Criterion) {
 						black_box(&mut tx);
 					},
 					criterion::BatchSize::LargeInput,
-				)
+				);
 			},
 		);
 	}
@@ -1483,7 +1483,7 @@ fn bench_savepoint_release_vs_emulated_unwind(c: &mut Criterion) {
 	let mut group = c.benchmark_group("savepoint_release_vs_emulated_unwind");
 	group.sample_size(20);
 
-	for n in [10usize, 100, 1_000].iter() {
+	for n in &[10usize, 100, 1_000] {
 		let value = generate_sequential_value(0, 100);
 
 		// Native: each scope released as it ends, so one rollback unwinds all
@@ -1507,7 +1507,7 @@ fn bench_savepoint_release_vs_emulated_unwind(c: &mut Criterion) {
 					black_box(&mut tx);
 				},
 				criterion::BatchSize::LargeInput,
-			)
+			);
 		});
 
 		// Emulated: every marker retained, so the unwind is n + 1 rollbacks
@@ -1532,7 +1532,7 @@ fn bench_savepoint_release_vs_emulated_unwind(c: &mut Criterion) {
 					black_box(&mut tx);
 				},
 				criterion::BatchSize::LargeInput,
-			)
+			);
 		});
 	}
 
