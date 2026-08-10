@@ -43,11 +43,11 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Bytes {
 }
 
 fn generate_sequential_key(index: usize) -> Bytes {
-	Bytes::from(format!("key_{:08}", index).into_bytes())
+	Bytes::from(format!("key_{index:08}").into_bytes())
 }
 
 fn generate_sequential_value(index: usize, size: usize) -> Bytes {
-	let base = format!("value_{:08}", index);
+	let base = format!("value_{index:08}");
 	let mut val = base.into_bytes();
 	val.resize(size, b'x');
 	Bytes::from(val)
@@ -94,22 +94,22 @@ fn bench_transaction_creation(c: &mut Criterion) {
 		b.iter(|| {
 			let tx = db.transaction(false);
 			black_box(tx);
-		})
+		});
 	});
 
 	c.bench_function("transaction_creation_write", |b| {
 		b.iter(|| {
 			let tx = db.transaction(true);
 			black_box(tx);
-		})
+		});
 	});
 }
 
 fn bench_put_operations(c: &mut Criterion) {
 	let mut group = c.benchmark_group("put_operations");
 
-	for data_size in [1, 100, 1000, 10_000].iter() {
-		for entry_count in [100, 1000, 10_000].iter() {
+	for data_size in &[1, 100, 1000, 10_000] {
+		for entry_count in &[100, 1000, 10_000] {
 			let mut rng = StdRng::seed_from_u64(SEED);
 
 			// Pre-generate data for consistent benchmarking
@@ -119,20 +119,20 @@ fn bench_put_operations(c: &mut Criterion) {
 
 			group.throughput(Throughput::Elements(*entry_count as u64));
 			group.bench_with_input(
-				BenchmarkId::new("put", format!("{}b_{}entries", data_size, entry_count)),
+				BenchmarkId::new("put", format!("{data_size}b_{entry_count}entries")),
 				&test_data,
 				|b, data| {
 					b.iter_batched(
 						create_database,
 						|db: Database| {
 							let mut tx = db.transaction(true);
-							for (key, value) in data.iter() {
+							for (key, value) in data {
 								tx.put(key.clone(), value.clone()).unwrap();
 							}
 							tx.commit().unwrap();
 						},
 						criterion::BatchSize::LargeInput,
-					)
+					);
 				},
 			);
 		}
@@ -143,8 +143,8 @@ fn bench_put_operations(c: &mut Criterion) {
 fn bench_get_operations(c: &mut Criterion) {
 	let mut group = c.benchmark_group("get_operations");
 
-	for data_size in [1, 100, 1000, 10_000].iter() {
-		for entry_count in [100, 1000, 10_000].iter() {
+	for data_size in &[1, 100, 1000, 10_000] {
+		for entry_count in &[100, 1000, 10_000] {
 			let db = setup_database_with_data(*entry_count, 16, *data_size);
 			let mut rng = StdRng::seed_from_u64(SEED);
 
@@ -153,7 +153,7 @@ fn bench_get_operations(c: &mut Criterion) {
 
 			group.throughput(Throughput::Elements(lookup_keys.len() as u64));
 			group.bench_with_input(
-				BenchmarkId::new("get", format!("{}b_{}entries", data_size, entry_count)),
+				BenchmarkId::new("get", format!("{data_size}b_{entry_count}entries")),
 				&lookup_keys,
 				|b, keys| {
 					b.iter(|| {
@@ -162,7 +162,7 @@ fn bench_get_operations(c: &mut Criterion) {
 							black_box(tx.get(key.clone()).unwrap());
 						}
 						tx.cancel().unwrap();
-					})
+					});
 				},
 			);
 		}
@@ -173,7 +173,7 @@ fn bench_get_operations(c: &mut Criterion) {
 fn bench_exists_operations(c: &mut Criterion) {
 	let mut group = c.benchmark_group("exists_operations");
 
-	for entry_count in [100, 1000, 10_000].iter() {
+	for entry_count in &[100, 1000, 10_000] {
 		let db = setup_database_with_data(*entry_count, 16, 100);
 		let mut rng = StdRng::seed_from_u64(SEED);
 
@@ -182,7 +182,7 @@ fn bench_exists_operations(c: &mut Criterion) {
 
 		group.throughput(Throughput::Elements(lookup_keys.len() as u64));
 		group.bench_with_input(
-			BenchmarkId::new("exists", format!("{}entries", entry_count)),
+			BenchmarkId::new("exists", format!("{entry_count}entries")),
 			&lookup_keys,
 			|b, keys| {
 				b.iter(|| {
@@ -191,7 +191,7 @@ fn bench_exists_operations(c: &mut Criterion) {
 						black_box(tx.exists(key.clone()).unwrap());
 					}
 					tx.cancel().unwrap();
-				})
+				});
 			},
 		);
 	}
@@ -201,7 +201,7 @@ fn bench_exists_operations(c: &mut Criterion) {
 fn bench_delete_operations(c: &mut Criterion) {
 	let mut group = c.benchmark_group("delete_operations");
 
-	for entry_count in [100, 1000, 10_000].iter() {
+	for entry_count in &[100, 1000, 10_000] {
 		let mut rng = StdRng::seed_from_u64(SEED);
 
 		// Pre-generate keys for deletion
@@ -211,7 +211,7 @@ fn bench_delete_operations(c: &mut Criterion) {
 
 		group.throughput(Throughput::Elements(delete_keys.len() as u64));
 		group.bench_with_input(
-			BenchmarkId::new("del", format!("{}entries", entry_count)),
+			BenchmarkId::new("del", format!("{entry_count}entries")),
 			&delete_keys,
 			|b, keys| {
 				b.iter_batched(
@@ -224,7 +224,7 @@ fn bench_delete_operations(c: &mut Criterion) {
 						tx.commit().unwrap();
 					},
 					criterion::BatchSize::LargeInput,
-				)
+				);
 			},
 		);
 	}
@@ -235,15 +235,15 @@ fn bench_delete_operations(c: &mut Criterion) {
 fn bench_scan_operations(c: &mut Criterion) {
 	let mut group = c.benchmark_group("scan_operations");
 
-	for entry_count in [1000, 10_000, 100_000].iter() {
+	for entry_count in &[1000, 10_000, 100_000] {
 		let db = setup_database_with_sequential_data(*entry_count, 100);
 
-		for scan_limit in [10, 100, 1000].iter() {
+		for scan_limit in &[10, 100, 1000] {
 			let limit = std::cmp::min(*scan_limit, *entry_count);
 
 			group.throughput(Throughput::Elements(limit as u64));
 			group.bench_with_input(
-				BenchmarkId::new("scan", format!("{}entries_limit{}", entry_count, limit)),
+				BenchmarkId::new("scan", format!("{entry_count}entries_limit{limit}")),
 				&limit,
 				|b, &limit| {
 					b.iter(|| {
@@ -253,7 +253,7 @@ fn bench_scan_operations(c: &mut Criterion) {
 						let result = tx.scan(start_key..end_key, None, Some(limit)).unwrap();
 						black_box(result);
 						tx.cancel().unwrap();
-					})
+					});
 				},
 			);
 		}
@@ -264,15 +264,15 @@ fn bench_scan_operations(c: &mut Criterion) {
 fn bench_keys_operations(c: &mut Criterion) {
 	let mut group = c.benchmark_group("keys_operations");
 
-	for entry_count in [1000, 10_000, 100_000].iter() {
+	for entry_count in &[1000, 10_000, 100_000] {
 		let db = setup_database_with_sequential_data(*entry_count, 100);
 
-		for scan_limit in [10, 100, 1000].iter() {
+		for scan_limit in &[10, 100, 1000] {
 			let limit = std::cmp::min(*scan_limit, *entry_count);
 
 			group.throughput(Throughput::Elements(limit as u64));
 			group.bench_with_input(
-				BenchmarkId::new("keys", format!("{}entries_limit{}", entry_count, limit)),
+				BenchmarkId::new("keys", format!("{entry_count}entries_limit{limit}")),
 				&limit,
 				|b, &limit| {
 					b.iter(|| {
@@ -282,7 +282,7 @@ fn bench_keys_operations(c: &mut Criterion) {
 						let result = tx.keys(start_key..end_key, None, Some(limit)).unwrap();
 						black_box(result);
 						tx.cancel().unwrap();
-					})
+					});
 				},
 			);
 		}
@@ -293,11 +293,11 @@ fn bench_keys_operations(c: &mut Criterion) {
 fn bench_total_operations(c: &mut Criterion) {
 	let mut group = c.benchmark_group("total_operations");
 
-	for entry_count in [1000, 10_000, 100_000].iter() {
+	for entry_count in &[1000, 10_000, 100_000] {
 		let db = setup_database_with_sequential_data(*entry_count, 100);
 
 		group.bench_with_input(
-			BenchmarkId::new("total", format!("{}entries", entry_count)),
+			BenchmarkId::new("total", format!("{entry_count}entries")),
 			entry_count,
 			|b, _| {
 				b.iter(|| {
@@ -307,7 +307,7 @@ fn bench_total_operations(c: &mut Criterion) {
 					let result = tx.total(start_key..end_key, None, None).unwrap();
 					black_box(result);
 					tx.cancel().unwrap();
-				})
+				});
 			},
 		);
 	}
@@ -319,16 +319,16 @@ fn bench_total_operations(c: &mut Criterion) {
 fn bench_cursor_scan(c: &mut Criterion) {
 	let mut group = c.benchmark_group("cursor_scan");
 
-	for entry_count in [1000, 10_000, 100_000].iter() {
+	for entry_count in &[1000, 10_000, 100_000] {
 		let db = setup_database_with_sequential_data(*entry_count, 100);
 
-		for scan_limit in [10, 100, 1000].iter() {
+		for scan_limit in &[10, 100, 1000] {
 			let limit = std::cmp::min(*scan_limit, *entry_count);
 
 			group.throughput(Throughput::Elements(limit as u64));
 
 			group.bench_with_input(
-				BenchmarkId::new("cursor_fwd", format!("{}entries_limit{}", entry_count, limit)),
+				BenchmarkId::new("cursor_fwd", format!("{entry_count}entries_limit{limit}")),
 				&limit,
 				|b, &limit| {
 					b.iter(|| {
@@ -351,7 +351,7 @@ fn bench_cursor_scan(c: &mut Criterion) {
 						}
 
 						black_box(count);
-					})
+					});
 				},
 			);
 		}
@@ -364,16 +364,16 @@ fn bench_cursor_scan(c: &mut Criterion) {
 fn bench_scan_iter(c: &mut Criterion) {
 	let mut group = c.benchmark_group("scan_iter_ops");
 
-	for entry_count in [1000, 10_000, 100_000].iter() {
+	for entry_count in &[1000, 10_000, 100_000] {
 		let db = setup_database_with_sequential_data(*entry_count, 100);
 
-		for scan_limit in [10, 100, 1000].iter() {
+		for scan_limit in &[10, 100, 1000] {
 			let limit = std::cmp::min(*scan_limit, *entry_count);
 
 			group.throughput(Throughput::Elements(limit as u64));
 
 			group.bench_with_input(
-				BenchmarkId::new("scan_iter", format!("{}entries_limit{}", entry_count, limit)),
+				BenchmarkId::new("scan_iter", format!("{entry_count}entries_limit{limit}")),
 				&limit,
 				|b, &limit| {
 					b.iter(|| {
@@ -387,7 +387,7 @@ fn bench_scan_iter(c: &mut Criterion) {
 						let result: Vec<_> = iter.take(limit).collect();
 
 						black_box(result);
-					})
+					});
 				},
 			);
 		}
@@ -400,16 +400,16 @@ fn bench_scan_iter(c: &mut Criterion) {
 fn bench_keys_iter(c: &mut Criterion) {
 	let mut group = c.benchmark_group("keys_iter_ops");
 
-	for entry_count in [1000, 10_000, 100_000].iter() {
+	for entry_count in &[1000, 10_000, 100_000] {
 		let db = setup_database_with_sequential_data(*entry_count, 100);
 
-		for scan_limit in [10, 100, 1000].iter() {
+		for scan_limit in &[10, 100, 1000] {
 			let limit = std::cmp::min(*scan_limit, *entry_count);
 
 			group.throughput(Throughput::Elements(limit as u64));
 
 			group.bench_with_input(
-				BenchmarkId::new("keys_iter", format!("{}entries_limit{}", entry_count, limit)),
+				BenchmarkId::new("keys_iter", format!("{entry_count}entries_limit{limit}")),
 				&limit,
 				|b, &limit| {
 					b.iter(|| {
@@ -423,7 +423,7 @@ fn bench_keys_iter(c: &mut Criterion) {
 						let result: Vec<_> = iter.take(limit).collect();
 
 						black_box(result);
-					})
+					});
 				},
 			);
 		}
@@ -437,10 +437,10 @@ fn bench_concurrent_readers(c: &mut Criterion) {
 	let mut group = c.benchmark_group("concurrent_readers");
 
 	// Test with different thread counts: 1, 4, and CPU cores
-	let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+	let cpu_cores = std::thread::available_parallelism().map_or(8, std::num::NonZero::get);
 	let thread_counts = [1, 4, cpu_cores];
 
-	for entry_count in [1000, 10_000].iter() {
+	for entry_count in &[1000, 10_000] {
 		let db = Arc::new(setup_database_with_sequential_data(*entry_count, 100));
 		let mut rng = StdRng::seed_from_u64(SEED);
 
@@ -449,12 +449,12 @@ fn bench_concurrent_readers(c: &mut Criterion) {
 		let lookup_keys: Vec<Bytes> =
 			(0..200).map(|_| generate_sequential_key(rng.random_range(0..*entry_count))).collect();
 
-		for &thread_count in thread_counts.iter() {
+		for &thread_count in &thread_counts {
 			group.throughput(Throughput::Elements((lookup_keys.len() * thread_count) as u64));
 			group.bench_with_input(
 				BenchmarkId::new(
 					"concurrent_read",
-					format!("{}entries_{}threads", entry_count, thread_count),
+					format!("{entry_count}entries_{thread_count}threads"),
 				),
 				&(lookup_keys.clone(), thread_count),
 				|b, (keys, num_threads)| {
@@ -478,7 +478,7 @@ fn bench_concurrent_readers(c: &mut Criterion) {
 						let results: Vec<_> =
 							handles.into_iter().map(|h| h.join().unwrap()).collect();
 						black_box(results);
-					})
+					});
 				},
 			);
 		}
@@ -491,18 +491,18 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 	let mut group = c.benchmark_group("concurrent_writers");
 
 	// Test with different thread counts: 1, 4, and CPU cores
-	let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+	let cpu_cores = std::thread::available_parallelism().map_or(8, std::num::NonZero::get);
 	let thread_counts = [1, 4, cpu_cores];
 
-	for entry_count in [1000, 10_000].iter() {
-		for &thread_count in thread_counts.iter() {
+	for entry_count in &[1000, 10_000] {
+		for &thread_count in &thread_counts {
 			let operations_per_thread = 50; // Each thread performs 50 operations
 
 			group.throughput(Throughput::Elements((operations_per_thread * thread_count) as u64));
 			group.bench_with_input(
 				BenchmarkId::new(
 					"concurrent_inserts",
-					format!("{}entries_{}threads", entry_count, thread_count),
+					format!("{entry_count}entries_{thread_count}threads"),
 				),
 				&(entry_count, thread_count, operations_per_thread),
 				|b, &(entry_count, num_threads, ops_per_thread)| {
@@ -526,8 +526,7 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 										0 => {
 											// Insert new key
 											let key = Bytes::from(
-												format!("new_key_{}_{}", thread_id, op_id)
-													.into_bytes(),
+												format!("new_key_{thread_id}_{op_id}").into_bytes(),
 											);
 											let value = generate_value(&mut rng, 100);
 											thread_ops.push(("insert", key, value));
@@ -545,7 +544,7 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 												generate_sequential_key(base_key_id % *entry_count) // Existing key
 											} else {
 												Bytes::from(
-													format!("upsert_key_{}_{}", thread_id, op_id)
+													format!("upsert_key_{thread_id}_{op_id}")
 														.into_bytes(),
 												) // New key
 											};
@@ -603,7 +602,7 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 							black_box(results);
 						},
 						criterion::BatchSize::LargeInput,
-					)
+					);
 				},
 			);
 		}
@@ -616,11 +615,11 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 	let mut group = c.benchmark_group("concurrent_mixed");
 
 	// Test with different thread configurations
-	let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+	let cpu_cores = std::thread::available_parallelism().map_or(8, std::num::NonZero::get);
 	let half_cores = (cpu_cores / 2).max(1);
-	let cpu_config_name = format!("{}r_{}w", half_cores, half_cores);
+	let cpu_config_name = format!("{half_cores}r_{half_cores}w");
 
-	for entry_count in [1000, 10_000].iter() {
+	for entry_count in &[1000, 10_000] {
 		let configurations = vec![
 			("2r_2w", 2, 2),
 			("4r_4w", 4, 4),
@@ -633,7 +632,7 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 
 			group.throughput(Throughput::Elements(total_ops as u64));
 			group.bench_with_input(
-				BenchmarkId::new("mixed", format!("{}entries_{}", entry_count, config_name)),
+				BenchmarkId::new("mixed", format!("{entry_count}entries_{config_name}")),
 				&(entry_count, reader_threads, writer_threads, operations_per_thread),
 				|b, &(entry_count, num_readers, num_writers, ops_per_thread)| {
 					b.iter_batched(
@@ -651,8 +650,7 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 							// Generate write operations
 							let write_ops: Vec<(Bytes, Bytes)> = (0..ops_per_thread)
 								.map(|i| {
-									let key =
-										Bytes::from(format!("mixed_write_{}", i).into_bytes());
+									let key = Bytes::from(format!("mixed_write_{i}").into_bytes());
 									let value = generate_value(&mut rng, 100);
 									(key, value)
 								})
@@ -711,7 +709,7 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 							black_box(results);
 						},
 						criterion::BatchSize::LargeInput,
-					)
+					);
 				},
 			);
 		}
@@ -723,7 +721,7 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 fn bench_mixed_workload(c: &mut Criterion) {
 	let mut group = c.benchmark_group("mixed_workload");
 
-	for entry_count in [1000, 10_000].iter() {
+	for entry_count in &[1000, 10_000] {
 		let mut rng = StdRng::seed_from_u64(SEED);
 
 		// Generate operations mix: 70% reads, 20% writes, 10% deletes
@@ -741,7 +739,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
 
 		group.throughput(Throughput::Elements(operations.len() as u64));
 		group.bench_with_input(
-			BenchmarkId::new("mixed_70r_20w_10d", format!("{}entries", entry_count)),
+			BenchmarkId::new("mixed_70r_20w_10d", format!("{entry_count}entries")),
 			&operations,
 			|b, ops| {
 				b.iter_batched(
@@ -767,7 +765,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
 						tx.commit().unwrap();
 					},
 					criterion::BatchSize::LargeInput,
-				)
+				);
 			},
 		);
 	}
@@ -821,13 +819,13 @@ fn bench_database_options(c: &mut Criterion) {
 					|| Database::new_with_options(options.clone()),
 					|db: Database| {
 						let mut tx = db.transaction(true);
-						for (key, value) in data.iter() {
+						for (key, value) in data {
 							tx.put(key.clone(), value.clone()).unwrap();
 						}
 						tx.commit().unwrap();
 					},
 					criterion::BatchSize::LargeInput,
-				)
+				);
 			},
 		);
 	}
@@ -838,16 +836,16 @@ fn bench_database_options(c: &mut Criterion) {
 fn bench_scan_for_each(c: &mut Criterion) {
 	let mut group = c.benchmark_group("scan_for_each_vs_vec");
 
-	for entry_count in [1000, 10_000, 100_000].iter() {
+	for entry_count in &[1000, 10_000, 100_000] {
 		let db = setup_database_with_sequential_data(*entry_count, 100);
 		let mut seen_limits = std::collections::HashSet::new();
 
-		for scan_limit in [100, 1000, 10_000].iter() {
+		for scan_limit in &[100, 1000, 10_000] {
 			let limit = std::cmp::min(*scan_limit, *entry_count);
 			if !seen_limits.insert(limit) {
 				continue;
 			}
-			let id = format!("{}entries_limit{}", entry_count, limit);
+			let id = format!("{entry_count}entries_limit{limit}");
 
 			group.throughput(Throughput::Elements(limit as u64));
 
@@ -859,7 +857,7 @@ fn bench_scan_for_each(c: &mut Criterion) {
 					let result = tx.scan(start_key..end_key, None, Some(limit)).unwrap();
 					black_box(result);
 					tx.cancel().unwrap();
-				})
+				});
 			});
 
 			group.bench_with_input(BenchmarkId::new("scan_for_each", &id), &limit, |b, &limit| {
@@ -875,7 +873,7 @@ fn bench_scan_for_each(c: &mut Criterion) {
 					})
 					.unwrap();
 					black_box(count);
-				})
+				});
 			});
 
 			group.bench_with_input(
@@ -889,7 +887,7 @@ fn bench_scan_for_each(c: &mut Criterion) {
 						let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
 						tx.scan_into(start_key..end_key, None, Some(limit), &mut buf).unwrap();
 						black_box(buf.len());
-					})
+					});
 				},
 			);
 		}
@@ -901,16 +899,16 @@ fn bench_scan_for_each(c: &mut Criterion) {
 fn bench_keys_for_each(c: &mut Criterion) {
 	let mut group = c.benchmark_group("keys_for_each_vs_vec");
 
-	for entry_count in [1000, 10_000, 100_000].iter() {
+	for entry_count in &[1000, 10_000, 100_000] {
 		let db = setup_database_with_sequential_data(*entry_count, 100);
 		let mut seen_limits = std::collections::HashSet::new();
 
-		for scan_limit in [100, 1000, 10_000].iter() {
+		for scan_limit in &[100, 1000, 10_000] {
 			let limit = std::cmp::min(*scan_limit, *entry_count);
 			if !seen_limits.insert(limit) {
 				continue;
 			}
-			let id = format!("{}entries_limit{}", entry_count, limit);
+			let id = format!("{entry_count}entries_limit{limit}");
 
 			group.throughput(Throughput::Elements(limit as u64));
 
@@ -922,7 +920,7 @@ fn bench_keys_for_each(c: &mut Criterion) {
 					let result = tx.keys(start_key..end_key, None, Some(limit)).unwrap();
 					black_box(result);
 					tx.cancel().unwrap();
-				})
+				});
 			});
 
 			group.bench_with_input(BenchmarkId::new("keys_for_each", &id), &limit, |b, &limit| {
@@ -938,7 +936,7 @@ fn bench_keys_for_each(c: &mut Criterion) {
 					})
 					.unwrap();
 					black_box(count);
-				})
+				});
 			});
 
 			group.bench_with_input(
@@ -952,7 +950,7 @@ fn bench_keys_for_each(c: &mut Criterion) {
 						let end_key = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec();
 						tx.keys_into(start_key..end_key, None, Some(limit), &mut buf).unwrap();
 						black_box(buf.len());
-					})
+					});
 				},
 			);
 		}
@@ -972,7 +970,7 @@ fn bench_gc_full_scan(c: &mut Criterion) {
 	// Fixed number of keys carrying stale versions
 	let stale_count = 100;
 
-	for total_keys in [1_000, 10_000, 100_000].iter() {
+	for total_keys in &[1_000, 10_000, 100_000] {
 		// Setup helper: create datastore, then overwrite a small subset
 		// while a reader pins the old versions, then drop the reader —
 		// exactly the garbage shape only a background sweep can reclaim.
@@ -995,7 +993,7 @@ fn bench_gc_full_scan(c: &mut Criterion) {
 				let mut tx = db.transaction(true);
 				for i in 0..stale_count {
 					let key = generate_sequential_key(i);
-					let value = Bytes::from(format!("updated_{:08}", i).into_bytes());
+					let value = Bytes::from(format!("updated_{i:08}").into_bytes());
 					tx.set(key, value).unwrap();
 				}
 				tx.commit().unwrap();
@@ -1008,7 +1006,7 @@ fn bench_gc_full_scan(c: &mut Criterion) {
 		// returned from the routine so its O(n) teardown is dropped
 		// outside the timed region rather than polluting the measurement.
 		group.bench_function(
-			BenchmarkId::new("full_gc", format!("{}total_{}stale", total_keys, stale_count)),
+			BenchmarkId::new("full_gc", format!("{total_keys}total_{stale_count}stale")),
 			|b| {
 				b.iter_batched(
 					setup,
@@ -1017,14 +1015,14 @@ fn bench_gc_full_scan(c: &mut Criterion) {
 						db
 					},
 					criterion::BatchSize::LargeInput,
-				)
+				);
 			},
 		);
 
 		// Tracked sweep: visits only the keys commits tracked as holding
 		// garbage, so cost scales with the stale count, not total keys
 		group.bench_function(
-			BenchmarkId::new("tracked_gc", format!("{}total_{}stale", total_keys, stale_count)),
+			BenchmarkId::new("tracked_gc", format!("{total_keys}total_{stale_count}stale")),
 			|b| {
 				b.iter_batched(
 					setup,
@@ -1033,7 +1031,7 @@ fn bench_gc_full_scan(c: &mut Criterion) {
 						db
 					},
 					criterion::BatchSize::LargeInput,
-				)
+				);
 			},
 		);
 	}
@@ -1056,7 +1054,7 @@ fn bench_commit_inline_gc(c: &mut Criterion) {
 			let mut tx = db.transaction(true);
 			tx.set(key.clone(), value.clone()).unwrap();
 			tx.commit().unwrap();
-		})
+		});
 	});
 
 	// Wide writeset: one commit overwriting many keys
@@ -1066,11 +1064,11 @@ fn bench_commit_inline_gc(c: &mut Criterion) {
 		let value = generate_sequential_value(0, 100);
 		b.iter(|| {
 			let mut tx = db.transaction(true);
-			for key in keys.iter() {
+			for key in &keys {
 				tx.set(key.clone(), value.clone()).unwrap();
 			}
 			tx.commit().unwrap();
-		})
+		});
 	});
 
 	group.finish();
@@ -1082,10 +1080,10 @@ fn bench_commit_inline_gc(c: &mut Criterion) {
 // growth and every other commit cost.
 fn bench_watermark_scan(c: &mut Criterion) {
 	let mut group = c.benchmark_group("watermark_scan");
-	for num_readers in [0usize, 10, 100, 1_000, 10_000].iter() {
+	for num_readers in &[0usize, 10, 100, 1_000, 10_000] {
 		let scenario = WatermarkScanScenario::new(*num_readers);
 		group.bench_function(BenchmarkId::new("live_readers", num_readers), |b| {
-			b.iter(|| scenario.scan())
+			b.iter(|| scenario.scan());
 		});
 	}
 	group.finish();
@@ -1100,7 +1098,7 @@ fn bench_watermark_scan(c: &mut Criterion) {
 fn bench_readset_bloom_impact(c: &mut Criterion) {
 	let mut group = c.benchmark_group("readset_bloom_impact");
 
-	for readset_size in [100, 1_000, 10_000].iter() {
+	for readset_size in &[100, 1_000, 10_000] {
 		// Committed transaction wrote 10 keys in the high range
 		let writeset_keys: Vec<Bytes> = (90_000..90_010).map(generate_sequential_key).collect();
 		// Current transaction read keys in the low range (no overlap)
@@ -1109,22 +1107,19 @@ fn bench_readset_bloom_impact(c: &mut Criterion) {
 		let scenario = ReadsetConflictScenario::new(&writeset_keys, &readset_keys);
 
 		// With bloom filter pre-check
-		group.bench_function(
-			BenchmarkId::new("with_bloom", format!("{}reads", readset_size)),
-			|b| {
-				b.iter(|| {
-					black_box(scenario.check_with_bloom());
-				})
-			},
-		);
+		group.bench_function(BenchmarkId::new("with_bloom", format!("{readset_size}reads")), |b| {
+			b.iter(|| {
+				black_box(scenario.check_with_bloom());
+			});
+		});
 
 		// Without bloom filter (exact HashSet intersection)
 		group.bench_function(
-			BenchmarkId::new("without_bloom", format!("{}reads", readset_size)),
+			BenchmarkId::new("without_bloom", format!("{readset_size}reads")),
 			|b| {
 				b.iter(|| {
 					black_box(scenario.check_without_bloom());
-				})
+				});
 			},
 		);
 	}
@@ -1136,7 +1131,7 @@ fn bench_readset_bloom_impact(c: &mut Criterion) {
 fn bench_readset_bloom_conflict_path(c: &mut Criterion) {
 	let mut group = c.benchmark_group("readset_bloom_conflict_path");
 
-	for readset_size in [100, 1_000, 10_000].iter() {
+	for readset_size in &[100, 1_000, 10_000] {
 		// Committed transaction wrote 10 keys that overlap the readset
 		let writeset_keys: Vec<Bytes> = (0..10).map(generate_sequential_key).collect();
 		// Current transaction read keys 0..readset_size (overlap on 0..10)
@@ -1145,22 +1140,19 @@ fn bench_readset_bloom_conflict_path(c: &mut Criterion) {
 		let scenario = ReadsetConflictScenario::new(&writeset_keys, &readset_keys);
 
 		// With bloom (bloom says "maybe", falls through)
-		group.bench_function(
-			BenchmarkId::new("with_bloom", format!("{}reads", readset_size)),
-			|b| {
-				b.iter(|| {
-					black_box(scenario.check_with_bloom());
-				})
-			},
-		);
+		group.bench_function(BenchmarkId::new("with_bloom", format!("{readset_size}reads")), |b| {
+			b.iter(|| {
+				black_box(scenario.check_with_bloom());
+			});
+		});
 
 		// Without bloom (exact check directly)
 		group.bench_function(
-			BenchmarkId::new("without_bloom", format!("{}reads", readset_size)),
+			BenchmarkId::new("without_bloom", format!("{readset_size}reads")),
 			|b| {
 				b.iter(|| {
 					black_box(scenario.check_without_bloom());
-				})
+				});
 			},
 		);
 	}
@@ -1172,7 +1164,7 @@ fn bench_readset_bloom_conflict_path(c: &mut Criterion) {
 fn bench_writeset_bloom_impact(c: &mut Criterion) {
 	let mut group = c.benchmark_group("writeset_bloom_impact");
 
-	for writeset_size in [10, 100, 1_000].iter() {
+	for writeset_size in &[10, 100, 1_000] {
 		// Committed transaction wrote keys in the high range
 		let committed_keys: Vec<Bytes> =
 			(90_000..(90_000 + *writeset_size)).map(generate_sequential_key).collect();
@@ -1183,21 +1175,21 @@ fn bench_writeset_bloom_impact(c: &mut Criterion) {
 
 		// With bloom filter + min/max pre-check
 		group.bench_function(
-			BenchmarkId::new("with_bloom", format!("{}writes", writeset_size)),
+			BenchmarkId::new("with_bloom", format!("{writeset_size}writes")),
 			|b| {
 				b.iter(|| {
 					black_box(scenario.check_with_bloom());
-				})
+				});
 			},
 		);
 
 		// Without bloom (sorted merge only)
 		group.bench_function(
-			BenchmarkId::new("without_bloom", format!("{}writes", writeset_size)),
+			BenchmarkId::new("without_bloom", format!("{writeset_size}writes")),
 			|b| {
 				b.iter(|| {
 					black_box(scenario.check_without_bloom());
-				})
+				});
 			},
 		);
 	}
@@ -1208,7 +1200,7 @@ fn bench_writeset_bloom_impact(c: &mut Criterion) {
 fn bench_writeset_bloom_conflict_path(c: &mut Criterion) {
 	let mut group = c.benchmark_group("writeset_bloom_conflict_path");
 
-	for writeset_size in [10, 100, 1_000].iter() {
+	for writeset_size in &[10, 100, 1_000] {
 		// Both write to overlapping ranges
 		let committed_keys: Vec<Bytes> = (0..10).map(generate_sequential_key).collect();
 		let current_keys: Vec<Bytes> = (0..*writeset_size).map(generate_sequential_key).collect();
@@ -1217,21 +1209,21 @@ fn bench_writeset_bloom_conflict_path(c: &mut Criterion) {
 
 		// With bloom (bloom says "maybe", falls through to sorted merge)
 		group.bench_function(
-			BenchmarkId::new("with_bloom", format!("{}writes", writeset_size)),
+			BenchmarkId::new("with_bloom", format!("{writeset_size}writes")),
 			|b| {
 				b.iter(|| {
 					black_box(scenario.check_with_bloom());
-				})
+				});
 			},
 		);
 
 		// Without bloom (sorted merge only)
 		group.bench_function(
-			BenchmarkId::new("without_bloom", format!("{}writes", writeset_size)),
+			BenchmarkId::new("without_bloom", format!("{writeset_size}writes")),
 			|b| {
 				b.iter(|| {
 					black_box(scenario.check_without_bloom());
-				})
+				});
 			},
 		);
 	}
@@ -1245,10 +1237,10 @@ fn bench_writeset_bloom_conflict_path(c: &mut Criterion) {
 fn bench_bloom_concurrent_throughput(c: &mut Criterion) {
 	let mut group = c.benchmark_group("bloom_concurrent_throughput");
 	// Use a reasonable thread count
-	let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+	let cpu_cores = std::thread::available_parallelism().map_or(8, std::num::NonZero::get);
 	let thread_counts = [2, 4, cpu_cores.min(8)];
 
-	for &thread_count in thread_counts.iter() {
+	for &thread_count in &thread_counts {
 		// Each thread gets a disjoint key range of 1000 keys
 		let keys_per_thread = 1000;
 		let total_keys = thread_count * keys_per_thread;
@@ -1256,7 +1248,7 @@ fn bench_bloom_concurrent_throughput(c: &mut Criterion) {
 
 		// SSI mode
 		group.throughput(Throughput::Elements(thread_count as u64));
-		group.bench_function(BenchmarkId::new("ssi", format!("{}threads", thread_count)), |b| {
+		group.bench_function(BenchmarkId::new("ssi", format!("{thread_count}threads")), |b| {
 			b.iter(|| {
 				let handles: Vec<_> = (0..thread_count)
 					.map(|t| {
@@ -1284,12 +1276,12 @@ fn bench_bloom_concurrent_throughput(c: &mut Criterion) {
 				for h in handles {
 					h.join().unwrap();
 				}
-			})
+			});
 		});
 
 		// SI baseline for comparison
 		group.bench_function(
-			BenchmarkId::new("si_baseline", format!("{}threads", thread_count)),
+			BenchmarkId::new("si_baseline", format!("{thread_count}threads")),
 			|b| {
 				b.iter(|| {
 					let handles: Vec<_> = (0..thread_count)
@@ -1317,7 +1309,7 @@ fn bench_bloom_concurrent_throughput(c: &mut Criterion) {
 					for h in handles {
 						h.join().unwrap();
 					}
-				})
+				});
 			},
 		);
 	}
@@ -1338,27 +1330,24 @@ fn bench_merge_queue_iter(c: &mut Criterion) {
 	let total_keys = 10_000;
 	let keys_per_source = 50;
 
-	for num_sources in [1, 4, 16, 64].iter() {
+	for num_sources in &[1, 4, 16, 64] {
 		let scenario = MergeQueueScenario::new(*num_sources, keys_per_source, total_keys);
 
 		// Full drain: scales with merge-queue depth × keys per source.
-		group.bench_function(BenchmarkId::new("drain", format!("{}sources", num_sources)), |b| {
+		group.bench_function(BenchmarkId::new("drain", format!("{num_sources}sources")), |b| {
 			b.iter(|| {
 				black_box(scenario.iter_forward_count());
-			})
+			});
 		});
 
 		// Early termination at 100 entries: highlights the lazy iterator's
 		// advantage over the previous eager BTreeMap materialisation, which
 		// always paid the full merge cost up front.
-		group.bench_function(
-			BenchmarkId::new("take_100", format!("{}sources", num_sources)),
-			|b| {
-				b.iter(|| {
-					black_box(scenario.iter_forward_take(100));
-				})
-			},
-		);
+		group.bench_function(BenchmarkId::new("take_100", format!("{num_sources}sources")), |b| {
+			b.iter(|| {
+				black_box(scenario.iter_forward_take(100));
+			});
+		});
 	}
 	group.finish();
 }
@@ -1373,10 +1362,10 @@ fn bench_cursor_pagination(c: &mut Criterion) {
 	let entry_count = 10_000;
 	let db = setup_database_with_sequential_data(entry_count, 100);
 
-	for page_size in [10, 100, 1000].iter() {
+	for page_size in &[10, 100, 1000] {
 		group.throughput(Throughput::Elements(*page_size as u64));
 		group.bench_with_input(
-			BenchmarkId::new("first_n", format!("page{}", page_size)),
+			BenchmarkId::new("first_n", format!("page{page_size}")),
 			page_size,
 			|b, &page| {
 				b.iter(|| {
@@ -1395,7 +1384,7 @@ fn bench_cursor_pagination(c: &mut Criterion) {
 						cursor.next();
 					}
 					black_box(count);
-				})
+				});
 			},
 		);
 	}

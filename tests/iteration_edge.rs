@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Iteration edge case tests for SurrealMX.
+//! Iteration edge case tests for `SurrealMX`.
 //!
 //! Tests iterator and cursor behavior under edge conditions including
 //! modifications during iteration, transaction lifecycle, and concurrent
@@ -206,7 +206,7 @@ fn concurrent_iteration_same_range() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..20 {
-			tx.set(format!("data_{:02}", i), format!("value_{}", i)).unwrap();
+			tx.set(format!("data_{i:02}"), format!("value_{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 	}
@@ -233,6 +233,6 @@ fn concurrent_iteration_same_range() {
 
 	// All threads should see the same count
 	for (thread_id, count) in &results {
-		assert_eq!(*count, 20, "Thread {} should see all 20 items, got {}", thread_id, count);
+		assert_eq!(*count, 20, "Thread {thread_id} should see all 20 items, got {count}");
 	}
 }

@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Concurrency tests for SurrealMX.
+//! Concurrency tests for `SurrealMX`.
 //!
 //! Tests concurrent operations, GC with active readers, and multi-writer
 //! scenarios.
@@ -51,7 +51,7 @@ fn gc_does_not_remove_versions_needed_by_active_readers() {
 	// Update the key multiple times
 	for i in 2..10 {
 		let mut tx = db.transaction(true);
-		tx.set("key", format!("v{}", i)).unwrap();
+		tx.set("key", format!("v{i}")).unwrap();
 		tx.commit().unwrap();
 	}
 
@@ -92,7 +92,7 @@ fn gc_cleans_up_after_readers_complete() {
 	// Update multiple times
 	for i in 2..20 {
 		let mut tx = db.transaction(true);
-		tx.set("key", format!("v{}", i)).unwrap();
+		tx.set("key", format!("v{i}")).unwrap();
 		tx.commit().unwrap();
 	}
 
@@ -126,8 +126,8 @@ fn multiple_writers_disjoint_keys() {
 				barrier.wait();
 
 				for op_id in 0..ops_per_writer {
-					let key = format!("writer_{}_key_{}", writer_id, op_id);
-					let value = format!("value_{}_{}", writer_id, op_id);
+					let key = format!("writer_{writer_id}_key_{op_id}");
+					let value = format!("value_{writer_id}_{op_id}");
 
 					let mut tx = db.transaction(true);
 					tx.set(key, value).unwrap();
@@ -145,10 +145,10 @@ fn multiple_writers_disjoint_keys() {
 	let mut tx = db.transaction(false);
 	for writer_id in 0..num_writers {
 		for op_id in 0..ops_per_writer {
-			let key = format!("writer_{}_key_{}", writer_id, op_id);
-			let expected = format!("value_{}_{}", writer_id, op_id);
+			let key = format!("writer_{writer_id}_key_{op_id}");
+			let expected = format!("value_{writer_id}_{op_id}");
 			let actual = tx.get(&key).unwrap();
-			assert_eq!(actual, Some(Bytes::from(expected)), "Key {} missing", key);
+			assert_eq!(actual, Some(Bytes::from(expected)), "Key {key} missing");
 		}
 	}
 	tx.cancel().unwrap();
@@ -173,7 +173,7 @@ fn multiple_writers_overlapping_keys_conflict() {
 				let mut tx = db.transaction(true).with_serializable_snapshot_isolation();
 				// Read first to establish dependency
 				let _ = tx.get("shared_key");
-				tx.set("shared_key", format!("writer_{}", writer_id)).unwrap();
+				tx.set("shared_key", format!("writer_{writer_id}")).unwrap();
 				tx.commit()
 			})
 		})
@@ -207,7 +207,7 @@ fn concurrent_readers_and_writers() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..100 {
-			tx.set(format!("key_{:04}", i), format!("initial_{}", i)).unwrap();
+			tx.set(format!("key_{i:04}"), format!("initial_{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 	}
@@ -248,7 +248,7 @@ fn concurrent_readers_and_writers() {
 				barrier.wait();
 
 				for op in 0..20 {
-					let key = format!("writer_{}_op_{}", writer_id, op);
+					let key = format!("writer_{writer_id}_op_{op}");
 					let mut tx = db.transaction(true);
 					tx.set(key, "written").unwrap();
 					let _ = tx.commit();
@@ -269,9 +269,9 @@ fn concurrent_readers_and_writers() {
 	// Verify original data still intact
 	let mut tx = db.transaction(false);
 	for i in 0..100 {
-		let val = tx.get(format!("key_{:04}", i)).unwrap();
+		let val = tx.get(format!("key_{i:04}")).unwrap();
 		// Value should either be initial or have been updated
-		assert!(val.is_some(), "Key {} should exist", i);
+		assert!(val.is_some(), "Key {i} should exist");
 	}
 	tx.cancel().unwrap();
 }
@@ -320,7 +320,7 @@ fn transaction_pool_recycling() {
 		let mut tx = db.transaction(i % 2 == 0);
 
 		if i % 2 == 0 {
-			tx.set(format!("key_{}", i), "value").unwrap();
+			tx.set(format!("key_{i}"), "value").unwrap();
 			let _ = tx.commit();
 		} else {
 			let _ = tx.get("any_key");
@@ -332,7 +332,7 @@ fn transaction_pool_recycling() {
 	let mut tx = db.transaction(false);
 	// Only even numbered keys should exist
 	for i in (0..1000).step_by(2) {
-		assert!(tx.exists(format!("key_{}", i)).unwrap());
+		assert!(tx.exists(format!("key_{i}")).unwrap());
 	}
 	tx.cancel().unwrap();
 }
@@ -360,7 +360,7 @@ fn concurrent_writes_during_snapshot() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..100 {
-			tx.set(format!("key_{}", i), "initial").unwrap();
+			tx.set(format!("key_{i}"), "initial").unwrap();
 		}
 		tx.commit().unwrap();
 	}
@@ -388,7 +388,7 @@ fn concurrent_writes_during_snapshot() {
 
 				for op in 0..50 {
 					let mut tx = db.transaction(true);
-					tx.set(format!("concurrent_{}_{}", writer_id, op), "value").unwrap();
+					tx.set(format!("concurrent_{writer_id}_{op}"), "value").unwrap();
 					let _ = tx.commit();
 				}
 			})
@@ -403,7 +403,7 @@ fn concurrent_writes_during_snapshot() {
 	// Verify data integrity
 	let mut tx = db.transaction(false);
 	for i in 0..100 {
-		assert!(tx.get(format!("key_{}", i)).unwrap().is_some());
+		assert!(tx.get(format!("key_{i}")).unwrap().is_some());
 	}
 	tx.cancel().unwrap();
 }
@@ -480,7 +480,7 @@ fn high_contention_counter() {
 	// The maximum possible value is num_threads * increments_per_thread
 	let max_possible = num_threads * increments_per_thread;
 	assert!(
-		final_val <= max_possible as i32,
+		final_val <= i32::try_from(max_possible).unwrap(),
 		"Counter should not exceed maximum possible increments"
 	);
 }
@@ -493,7 +493,7 @@ fn concurrent_scan_operations() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..1000 {
-			tx.set(format!("key_{:06}", i), format!("value_{}", i)).unwrap();
+			tx.set(format!("key_{i:06}"), format!("value_{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 	}

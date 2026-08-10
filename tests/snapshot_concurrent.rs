@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Concurrent snapshot operation tests for SurrealMX.
+//! Concurrent snapshot operation tests for `SurrealMX`.
 //!
 //! Tests snapshot behavior under concurrent access including writes during
 //! snapshot, multiple concurrent snapshots, and reads during snapshot.
@@ -44,7 +44,7 @@ fn snapshot_during_writes() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..50 {
-			tx.set(format!("initial_{:03}", i), format!("value_{}", i)).unwrap();
+			tx.set(format!("initial_{i:03}"), format!("value_{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 	}
@@ -70,7 +70,7 @@ fn snapshot_during_writes() {
 		barrier2.wait();
 		for i in 0..50 {
 			let mut tx = db2.transaction(true);
-			tx.set(format!("concurrent_{:03}", i), format!("value_{}", i)).unwrap();
+			tx.set(format!("concurrent_{i:03}"), format!("value_{i}")).unwrap();
 			tx.commit().unwrap();
 		}
 	});
@@ -111,7 +111,7 @@ fn multiple_concurrent_snapshots() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..100 {
-			tx.set(format!("key_{:04}", i), format!("value_{}", i)).unwrap();
+			tx.set(format!("key_{i:04}"), format!("value_{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 	}
@@ -167,7 +167,7 @@ fn read_during_snapshot() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..100 {
-			tx.set(format!("read_key_{:04}", i), format!("value_{}", i)).unwrap();
+			tx.set(format!("read_key_{i:04}"), format!("value_{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 	}
@@ -194,7 +194,7 @@ fn read_during_snapshot() {
 		let mut read_count = 0;
 		for i in 0..100 {
 			let tx = db2.transaction(false);
-			let key = format!("read_key_{:04}", i);
+			let key = format!("read_key_{i:04}");
 			if tx.get(&key).unwrap().is_some() {
 				read_count += 1;
 			}
@@ -233,7 +233,7 @@ fn recovery_from_concurrent_snapshot() {
 		{
 			let mut tx = db.transaction(true);
 			for i in 0..50 {
-				tx.set(format!("before_snap_{:03}", i), "before").unwrap();
+				tx.set(format!("before_snap_{i:03}"), "before").unwrap();
 			}
 			tx.commit().unwrap();
 		}
@@ -247,7 +247,7 @@ fn recovery_from_concurrent_snapshot() {
 		{
 			let mut tx = db.transaction(true);
 			for i in 0..50 {
-				tx.set(format!("after_snap_{:03}", i), "after").unwrap();
+				tx.set(format!("after_snap_{i:03}"), "after").unwrap();
 			}
 			tx.commit().unwrap();
 		}

@@ -4,7 +4,7 @@
 //!
 //! Symptom (in the parent project): a range scan against
 //! `[/*0*0*aaa+ix!dc\0 , /*0*0*aaa+ix!dc\xff*40)` would occasionally
-//! return keys with a *different* IndexId (different bytes inside the
+//! return keys with a *different* `IndexId` (different bytes inside the
 //! shared prefix) and a *different* category byte (`!tt`, `!dl`, …).
 //! The decode of the value as `DocLengthAndCount` then failed with
 //! either "Invalid revision 0" (8-byte u64 doc-length value) or
@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use surrealmx::Database;
 
-/// Build a key shaped like SurrealDB's index keys:
+/// Build a key shaped like `SurrealDB`'s index keys:
 ///   `/ * 00 00 00 00 * 00 00 00 00 * aaa \0 + <ix:4 BE> ! <kind:2> <doc:8 BE> <nid:16> <uid:16>`
 /// `nid`/`uid` are filled with a counter so writers don't collide on the same
 /// key — every put is a fresh delta-style key, like the full-text index does.
@@ -72,14 +72,13 @@ fn make_range(ix: u32, kind: [u8; 2]) -> (Vec<u8>, Vec<u8>) {
 fn run_once(budget: Duration) -> (usize, usize, usize) {
 	const N_INDEXES: u32 = 5;
 	const SCAN_IX: u32 = 3;
-	const SCAN_KIND: [u8; 2] = [b'd', b'c'];
+	const SCAN_KIND: [u8; 2] = *b"dc";
 
 	// All the (ix, kind) combinations that the writers will hit. The mix
 	// matters: full-text writes `!dc`, `!dl`, `!td`, `!tt`, `!ii`, `!tv`,
 	// etc., spread over `N_INDEXES` indexes. We just pick the same letter
 	// pairs from the real code.
-	const KINDS: &[[u8; 2]] =
-		&[[b'd', b'c'], [b'd', b'l'], [b't', b'd'], [b't', b't'], [b'i', b'i'], [b't', b'v']];
+	const KINDS: &[[u8; 2]] = &[*b"dc", *b"dl", *b"td", *b"tt", *b"ii", *b"tv"];
 
 	let db = Arc::new(Database::new());
 	let stop = Arc::new(AtomicBool::new(false));
@@ -96,7 +95,7 @@ fn run_once(budget: Duration) -> (usize, usize, usize) {
 		let stop = Arc::clone(&stop);
 		let writes_done = Arc::clone(&writes_done);
 		writers.push(thread::spawn(move || {
-			let mut counter: u128 = (ix as u128 + 1) << 96;
+			let mut counter: u128 = (u128::from(ix) + 1) << 96;
 			let mut doc: u64 = 0;
 			while !stop.load(Ordering::Relaxed) {
 				for &kind in KINDS {
@@ -106,10 +105,10 @@ fn run_once(budget: Duration) -> (usize, usize, usize) {
 					let key = make_key(ix, kind, doc, counter);
 					counter = counter.wrapping_add(1);
 					doc = doc.wrapping_add(1);
-					let value: Vec<u8> = if kind == [b'd', b'l'] {
+					let value: Vec<u8> = if kind == *b"dl" {
 						// DocLength-style value: 8 bytes, starts with zero.
 						doc.to_be_bytes().to_vec()
-					} else if kind == [b't', b't'] {
+					} else if kind == *b"tt" {
 						// Tt-style value: empty.
 						Vec::new()
 					} else {
@@ -147,9 +146,8 @@ fn run_once(budget: Duration) -> (usize, usize, usize) {
 				let tx = db.transaction(false).with_snapshot_isolation();
 				let beg_b = Bytes::copy_from_slice(&beg);
 				let end_b = Bytes::copy_from_slice(&end);
-				let res = match tx.scan(beg_b..end_b, None, None) {
-					Ok(r) => r,
-					Err(_) => continue,
+				let Ok(res) = tx.scan(beg_b..end_b, None, None) else {
+					continue;
 				};
 				scans_done.fetch_add(1, Ordering::Relaxed);
 				for (k, v) in res {
@@ -194,9 +192,10 @@ fn run_once(budget: Duration) -> (usize, usize, usize) {
 }
 
 fn hex(b: &[u8]) -> String {
+	use std::fmt::Write as _;
 	let mut s = String::with_capacity(b.len() * 2);
 	for c in b {
-		s.push_str(&format!("{:02x}", c));
+		let _ = write!(s, "{c:02x}");
 	}
 	s
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Savepoint functionality tests for SurrealMX.
+//! Savepoint functionality tests for `SurrealMX`.
 //!
 //! Tests `set_savepoint()` and `rollback_to_savepoint()` behavior
 //! including nested savepoints and edge cases.
@@ -399,12 +399,12 @@ fn savepoint_stress_many_savepoints() {
 	// Create many nested savepoints
 	for i in 0..num_savepoints {
 		tx.set_savepoint().unwrap();
-		tx.set(format!("key_{}", i), format!("value_{}", i)).unwrap();
+		tx.set(format!("key_{i}"), format!("value_{i}")).unwrap();
 	}
 
 	// Verify all keys exist
 	for i in 0..num_savepoints {
-		assert!(tx.get(format!("key_{}", i)).unwrap().is_some());
+		assert!(tx.get(format!("key_{i}")).unwrap().is_some());
 	}
 
 	// Rollback half of them
@@ -414,12 +414,12 @@ fn savepoint_stress_many_savepoints() {
 
 	// First half should still exist
 	for i in 0..(num_savepoints / 2) {
-		assert!(tx.get(format!("key_{}", i)).unwrap().is_some(), "key_{} should exist", i);
+		assert!(tx.get(format!("key_{i}")).unwrap().is_some(), "key_{i} should exist");
 	}
 
 	// Second half should not exist
 	for i in (num_savepoints / 2)..num_savepoints {
-		assert!(tx.get(format!("key_{}", i)).unwrap().is_none(), "key_{} should not exist", i);
+		assert!(tx.get(format!("key_{i}")).unwrap().is_none(), "key_{i} should not exist");
 	}
 
 	tx.commit().unwrap();

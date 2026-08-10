@@ -89,7 +89,7 @@ impl<'a> Cursor<'a> {
 			.transaction_merge_queue
 			.range(..=version)
 			.rev()
-			.map(|e| e.value().clone())
+			.map(|e| Arc::clone(e.value()))
 			.collect();
 
 		Cursor {
@@ -108,7 +108,7 @@ impl<'a> Cursor<'a> {
 
 	/// Check if the cursor is positioned at a valid entry.
 	#[inline]
-	pub fn valid(&self) -> bool {
+	pub const fn valid(&self) -> bool {
 		self.current.is_some()
 	}
 
@@ -128,7 +128,7 @@ impl<'a> Cursor<'a> {
 	/// Check if the current entry exists (is not deleted).
 	#[inline]
 	pub fn exists(&self) -> bool {
-		self.current.as_ref().map(|(_, v)| v.is_some()).unwrap_or(false)
+		self.current.as_ref().is_some_and(|(_, v)| v.is_some())
 	}
 
 	/// Move the cursor to the first entry in the range.
@@ -335,7 +335,7 @@ impl<'a> KeyIterator<'a> {
 	}
 }
 
-impl<'a> Iterator for KeyIterator<'a> {
+impl Iterator for KeyIterator<'_> {
 	type Item = Bytes;
 
 	fn next(&mut self) -> Option<Self::Item> {
@@ -360,7 +360,7 @@ impl<'a> Iterator for KeyIterator<'a> {
 	}
 }
 
-impl<'a> DoubleEndedIterator for KeyIterator<'a> {
+impl DoubleEndedIterator for KeyIterator<'_> {
 	fn next_back(&mut self) -> Option<Self::Item> {
 		// When iterating from the back, we go in the opposite direction
 		let was_reverse = self.reverse;
@@ -432,7 +432,7 @@ impl<'a> ScanIterator<'a> {
 	}
 }
 
-impl<'a> Iterator for ScanIterator<'a> {
+impl Iterator for ScanIterator<'_> {
 	type Item = (Bytes, Bytes);
 
 	fn next(&mut self) -> Option<Self::Item> {
@@ -458,7 +458,7 @@ impl<'a> Iterator for ScanIterator<'a> {
 	}
 }
 
-impl<'a> DoubleEndedIterator for ScanIterator<'a> {
+impl DoubleEndedIterator for ScanIterator<'_> {
 	fn next_back(&mut self) -> Option<Self::Item> {
 		// When iterating from the back, we go in the opposite direction
 		let was_reverse = self.reverse;

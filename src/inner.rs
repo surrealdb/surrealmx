@@ -56,15 +56,15 @@ pub(crate) const COMMIT_ABORTED: u64 = u64::MAX;
 /// transaction and is exclusively owned by it, so state transitions are
 /// plain stores — no CAS protocol is required.
 pub(crate) struct Slot {
-	/// The owner's snapshot merge version, or SLOT_PINNING
+	/// The owner's snapshot merge version, or `SLOT_PINNING`
 	pub(crate) version: AtomicU64,
-	/// The owner's snapshot commit id, or SLOT_PINNING
+	/// The owner's snapshot commit id, or `SLOT_PINNING`
 	pub(crate) commit: AtomicU64,
 }
 
 impl Slot {
 	/// Create a new slot in the pinning state
-	pub(crate) fn pinning() -> Self {
+	pub(crate) const fn pinning() -> Self {
 		Self {
 			version: AtomicU64::new(SLOT_PINNING),
 			commit: AtomicU64::new(SLOT_PINNING),
@@ -218,7 +218,7 @@ impl Inner {
 	/// loaded BEFORE the fence-and-scan over the slots. This ordering is
 	/// load-bearing: a transaction missed by the scan pinned its slot
 	/// after the scan, so its subsequent commit-snapshot load is ordered
-	/// after our bound load in the SeqCst total order and (the watermark
+	/// after our bound load in the `SeqCst` total order and (the watermark
 	/// being monotonic) returns at least our bound — its conflict window
 	/// `snapshot + 1 ..` sits strictly above everything we trim. A
 	/// transaction seen by the scan bounds the trim directly, and a slot
@@ -335,9 +335,9 @@ impl Inner {
 			// past us, so reload and continue from the fresh bound. Back
 			// off on contention: a caller of this function (e.g. a
 			// cleanup sweep with no delay between iterations) can end up
-			// calling it far more often than intended, and an
-			// unconditional `continue` here would otherwise hammer this
-			// cache line against every other thread doing the same.
+			// calling it far more often than intended, and retrying here
+			// without a delay would otherwise hammer this cache line
+			// against every other thread doing the same.
 			if self
 				.transaction_commit_id
 				.compare_exchange_weak(cur, next, Ordering::SeqCst, Ordering::SeqCst)
@@ -345,7 +345,6 @@ impl Inner {
 			{
 				crate::tx::backoff(spins);
 				spins += 1;
-				continue;
 			}
 		}
 	}
@@ -380,7 +379,6 @@ impl Inner {
 			{
 				crate::tx::backoff(spins);
 				spins += 1;
-				continue;
 			}
 		}
 	}
@@ -499,6 +497,10 @@ impl Inner {
 	/// the trimmed chain still holds reclaimable versions (a reader
 	/// watermark is pinning them), the key is re-tracked for the next
 	/// sweep.
+	#[expect(
+		clippy::significant_drop_tightening,
+		reason = "the version write guard must cover entry.remove() so a committer blocked on it observes is_removed() and re-inserts"
+	)]
 	pub(crate) fn run_gc_tracked(&self, cleanup_ts: u64) {
 		// A single map guard serves the whole sweep: guard churn per
 		// candidate costs more than holding one across the pass, and the
@@ -523,7 +525,10 @@ impl Inner {
 			let Some(entry) = self.datastore.get(&key) else {
 				continue;
 			};
-			// Get a mutable reference to the versions list
+			// Get a mutable reference to the versions list. The write guard is
+			// deliberately held across `entry.remove()` below: a committer
+			// blocked on this lock must observe `is_removed()` and re-insert,
+			// rather than writing into a node we are about to unlink.
 			let mut versions = entry.value().write();
 			// A sweep or commit-time collapse unlinked this node between
 			// lookup and lock; any recreation re-tracks the key itself
@@ -553,9 +558,13 @@ impl Inner {
 	/// every key, it supersedes the candidate set: callers clear the set
 	/// before scanning (commits racing with the scan re-track their keys
 	/// as usual).
+	#[expect(
+		clippy::significant_drop_tightening,
+		reason = "the version write guard must cover entry.remove() so a committer blocked on it observes is_removed() and re-inserts"
+	)]
 	pub(crate) fn run_gc_full(&self, cleanup_ts: u64) {
 		// Iterate over the entire datastore
-		for entry in self.datastore.iter() {
+		for entry in &self.datastore {
 			// Get a mutable reference to the versions list
 			let mut versions = entry.value().write();
 			// Clean up unnecessary older versions
@@ -583,7 +592,7 @@ impl Inner {
 /// holds [`SLOT_PINNING`] in that dimension.
 ///
 /// The fence pairs with the fence in the pin-then-read registration
-/// protocol: a transaction whose pin-fence precedes ours in the SeqCst
+/// protocol: a transaction whose pin-fence precedes ours in the `SeqCst`
 /// total order is visible to this scan (as a value or as the sentinel);
 /// a transaction whose pin-fence follows ours performs its snapshot
 /// loads after the caller's bound load, so its snapshot is at least the
@@ -599,7 +608,7 @@ pub(crate) fn earliest_pinned(
 ) -> Option<u64> {
 	fence(Ordering::SeqCst);
 	let mut min = fallback;
-	for entry in map.iter() {
+	for entry in map {
 		if Some(*entry.key()) == exclude {
 			continue;
 		}

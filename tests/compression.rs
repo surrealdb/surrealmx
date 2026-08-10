@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Compression tests for SurrealMX.
+//! Compression tests for `SurrealMX`.
 //!
 //! Tests LZ4 compression for snapshots and compression round-trips.
 
@@ -44,7 +44,7 @@ fn lz4_snapshot_round_trip() {
 
 		let mut tx = db.transaction(true);
 		for i in 0..100 {
-			tx.set(format!("key_{:04}", i), format!("value_{}", i)).unwrap();
+			tx.set(format!("key_{i:04}"), format!("value_{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 
@@ -69,9 +69,9 @@ fn lz4_snapshot_round_trip() {
 
 		let mut tx = db.transaction(false);
 		for i in 0..100 {
-			let expected = Bytes::from(format!("value_{}", i));
-			let actual = tx.get(format!("key_{:04}", i)).unwrap();
-			assert_eq!(actual, Some(expected), "Key {} should be recovered", i);
+			let expected = Bytes::from(format!("value_{i}"));
+			let actual = tx.get(format!("key_{i:04}")).unwrap();
+			assert_eq!(actual, Some(expected), "Key {i} should be recovered");
 		}
 		tx.cancel().unwrap();
 	}
@@ -94,7 +94,7 @@ fn uncompressed_snapshot_round_trip() {
 
 		let mut tx = db.transaction(true);
 		for i in 0..100 {
-			tx.set(format!("key_{:04}", i), format!("value_{}", i)).unwrap();
+			tx.set(format!("key_{i:04}"), format!("value_{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 
@@ -121,8 +121,8 @@ fn uncompressed_snapshot_round_trip() {
 
 		let mut tx = db.transaction(false);
 		for i in 0..100 {
-			let expected = Bytes::from(format!("value_{}", i));
-			let actual = tx.get(format!("key_{:04}", i)).unwrap();
+			let expected = Bytes::from(format!("value_{i}"));
+			let actual = tx.get(format!("key_{i:04}")).unwrap();
 			assert_eq!(actual, Some(expected));
 		}
 		tx.cancel().unwrap();
@@ -153,7 +153,7 @@ fn lz4_compression_with_large_values() {
 
 		let mut tx = db.transaction(true);
 		for i in 0..50 {
-			tx.set(format!("key_{}", i), large_value.clone()).unwrap();
+			tx.set(format!("key_{i}"), large_value.clone()).unwrap();
 		}
 		tx.commit().unwrap();
 
@@ -168,11 +168,10 @@ fn lz4_compression_with_large_values() {
 
 	// Uncompressed would be at least 50 * 10000 = 500,000 bytes
 	// LZ4 should compress repeated data significantly
-	println!("Snapshot size with LZ4: {} bytes", snapshot_size);
+	println!("Snapshot size with LZ4: {snapshot_size} bytes");
 	assert!(
 		snapshot_size < 300_000,
-		"LZ4 should compress repeated data well, got {} bytes",
-		snapshot_size
+		"LZ4 should compress repeated data well, got {snapshot_size} bytes"
 	);
 
 	// Verify recovery
@@ -181,7 +180,7 @@ fn lz4_compression_with_large_values() {
 
 		let mut tx = db.transaction(false);
 		for i in 0..50 {
-			let actual = tx.get(format!("key_{}", i)).unwrap();
+			let actual = tx.get(format!("key_{i}")).unwrap();
 			assert_eq!(actual, Some(Bytes::from(large_value.clone())));
 		}
 		tx.cancel().unwrap();
@@ -212,7 +211,7 @@ fn lz4_compression_with_random_data() {
 			let mut val = random_value.clone();
 			val[0] = (i % 256) as u8;
 			val[1] = ((i / 256) % 256) as u8;
-			tx.set(format!("key_{:04}", i), val).unwrap();
+			tx.set(format!("key_{i:04}"), val).unwrap();
 		}
 		tx.commit().unwrap();
 
@@ -231,7 +230,7 @@ fn lz4_compression_with_random_data() {
 			expected[0] = (i % 256) as u8;
 			expected[1] = ((i / 256) % 256) as u8;
 
-			let actual = tx.get(format!("key_{:04}", i)).unwrap();
+			let actual = tx.get(format!("key_{i:04}")).unwrap();
 			assert_eq!(actual, Some(Bytes::from(expected)));
 		}
 		tx.cancel().unwrap();
@@ -256,8 +255,7 @@ fn auto_detect_lz4_compressed_snapshot() {
 		.with_compression(CompressionMode::Lz4);
 
 	{
-		let db =
-			Database::new_with_persistence(db_opts.clone(), persistence_opts_lz4.clone()).unwrap();
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts_lz4).unwrap();
 
 		let mut tx = db.transaction(true);
 		tx.set("key", "compressed_value").unwrap();
@@ -303,8 +301,7 @@ fn auto_detect_uncompressed_snapshot() {
 		.with_compression(CompressionMode::None);
 
 	{
-		let db =
-			Database::new_with_persistence(db_opts.clone(), persistence_opts_none.clone()).unwrap();
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts_none).unwrap();
 
 		let mut tx = db.transaction(true);
 		tx.set("key", "uncompressed_value").unwrap();

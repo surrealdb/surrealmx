@@ -25,6 +25,7 @@ use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::versions::Versions;
+#[cfg(debug_assertions)]
 use crate::LOG_TARGET_CONFLICTS;
 use arc_swap::ArcSwap;
 use bytes::Bytes;
@@ -36,12 +37,17 @@ use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(debug_assertions)]
 use tracing::debug;
 
 /// The isolation level of a database transaction
 #[derive(PartialEq, PartialOrd)]
 pub enum IsolationLevel {
+	/// Reads see a consistent snapshot, and commits conflict only on
+	/// write-write overlap
 	SnapshotIsolation,
+	/// As snapshot isolation, and additionally tracks the read set so that
+	/// read-write conflicts are detected at commit time
 	SerializableSnapshotIsolation,
 }
 
@@ -57,10 +63,18 @@ pub struct Transaction {
 	pub(crate) inner: Option<TransactionInner>,
 }
 
+/// Panic message for the `Transaction::inner` accessors below.
+///
+/// `inner` is only an `Option` so that `Drop` can move the inner transaction
+/// out and return it to the pool. It is `Some` for the entire lifetime of a
+/// `Transaction`, and the only `take` is in `Drop`, so no method on a live
+/// `Transaction` can observe `None`.
+const INNER_TAKEN: &str = "Transaction::inner is only taken in Drop";
+
 // Transaction must be Send + Sync so downstream callers can place it
 // behind shared locks like `tokio::sync::RwLock<Transaction>`.
 const _: fn() = || {
-	fn assert_send_sync<T: Send + Sync>() {}
+	const fn assert_send_sync<T: Send + Sync>() {}
 	assert_send_sync::<Transaction>();
 };
 
@@ -81,15 +95,16 @@ impl Drop for Transaction {
 
 impl Transaction {
 	/// Ensure this transaction is committed with snapshot isolation guarantees
-	pub fn with_snapshot_isolation(mut self) -> Self {
-		self.inner.as_mut().unwrap().mode = IsolationLevel::SnapshotIsolation;
+	pub const fn with_snapshot_isolation(mut self) -> Self {
+		self.inner.as_mut().expect(INNER_TAKEN).mode = IsolationLevel::SnapshotIsolation;
 		self
 	}
 
 	/// Ensure this transaction is committed with serializable snapshot
 	/// isolation guarantees
-	pub fn with_serializable_snapshot_isolation(mut self) -> Self {
-		self.inner.as_mut().unwrap().mode = IsolationLevel::SerializableSnapshotIsolation;
+	pub const fn with_serializable_snapshot_isolation(mut self) -> Self {
+		self.inner.as_mut().expect(INNER_TAKEN).mode =
+			IsolationLevel::SerializableSnapshotIsolation;
 		self
 	}
 
@@ -97,7 +112,7 @@ impl Transaction {
 	/// This method is stackable and can be called multiple times with
 	/// corresponding calls to `rollback_to_savepoint`
 	pub fn set_savepoint(&mut self) -> Result<(), Error> {
-		self.inner.as_mut().unwrap().set_savepoint()
+		self.inner.as_mut().expect(INNER_TAKEN).set_savepoint()
 	}
 
 	/// Rollback the transaction to the most recently set savepoint
@@ -105,27 +120,27 @@ impl Transaction {
 	/// transaction can be rolled back by calling `rollback_to_savepoint`
 	/// again if there are more savepoints in the stack
 	pub fn rollback_to_savepoint(&mut self) -> Result<(), Error> {
-		self.inner.as_mut().unwrap().rollback_to_savepoint()
+		self.inner.as_mut().expect(INNER_TAKEN).rollback_to_savepoint()
 	}
 
 	/// Get the starting sequence number of this transaction
-	pub fn version(&self) -> u64 {
-		self.inner.as_ref().unwrap().version()
+	pub const fn version(&self) -> u64 {
+		self.inner.as_ref().expect(INNER_TAKEN).version()
 	}
 
 	/// Check if the transaction is closed
-	pub fn closed(&self) -> bool {
-		self.inner.as_ref().unwrap().closed()
+	pub const fn closed(&self) -> bool {
+		self.inner.as_ref().expect(INNER_TAKEN).closed()
 	}
 
 	/// Cancel the transaction and rollback any changes
 	pub fn cancel(&mut self) -> Result<(), Error> {
-		self.inner.as_mut().unwrap().cancel()
+		self.inner.as_mut().expect(INNER_TAKEN).cancel()
 	}
 
 	/// Commit the transaction and store all changes
 	pub fn commit(&mut self) -> Result<(), Error> {
-		self.inner.as_mut().unwrap().commit()
+		self.inner.as_mut().expect(INNER_TAKEN).commit()
 	}
 
 	/// Check if a key exists in the database
@@ -133,7 +148,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().exists(key)
+		self.inner.as_ref().expect(INNER_TAKEN).exists(key)
 	}
 
 	/// Fetch a key from the database
@@ -141,7 +156,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().get(key)
+		self.inner.as_ref().expect(INNER_TAKEN).get(key)
 	}
 
 	/// Fetch multiple keys from the database
@@ -149,7 +164,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().getm(keys)
+		self.inner.as_ref().expect(INNER_TAKEN).getm(keys)
 	}
 
 	/// Insert or update a key in the database
@@ -158,7 +173,7 @@ impl Transaction {
 		K: IntoBytes,
 		V: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().set(key, val)
+		self.inner.as_mut().expect(INNER_TAKEN).set(key, val)
 	}
 
 	/// Insert a key if it doesn't exist in the database
@@ -167,7 +182,7 @@ impl Transaction {
 		K: IntoBytes,
 		V: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().put(key, val)
+		self.inner.as_mut().expect(INNER_TAKEN).put(key, val)
 	}
 
 	/// Insert a key if it matches a value
@@ -177,7 +192,7 @@ impl Transaction {
 		V: IntoBytes,
 		C: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().putc(key, val, chk)
+		self.inner.as_mut().expect(INNER_TAKEN).putc(key, val, chk)
 	}
 
 	/// Delete a key from the database
@@ -185,7 +200,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().del(key)
+		self.inner.as_mut().expect(INNER_TAKEN).del(key)
 	}
 
 	/// Delete a key if it matches a value
@@ -194,7 +209,7 @@ impl Transaction {
 		K: IntoBytes,
 		C: IntoBytes,
 	{
-		self.inner.as_mut().unwrap().delc(key, chk)
+		self.inner.as_mut().expect(INNER_TAKEN).delc(key, chk)
 	}
 
 	/// Retrieve a count of keys from the database
@@ -207,7 +222,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().total(rng, skip, limit)
+		self.inner.as_ref().expect(INNER_TAKEN).total(rng, skip, limit)
 	}
 
 	/// Retrieve a range of keys from the database
@@ -220,7 +235,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().keys(rng, skip, limit)
+		self.inner.as_ref().expect(INNER_TAKEN).keys(rng, skip, limit)
 	}
 
 	/// Retrieve a range of keys from the database, in reverse order
@@ -233,7 +248,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().keys_reverse(rng, skip, limit)
+		self.inner.as_ref().expect(INNER_TAKEN).keys_reverse(rng, skip, limit)
 	}
 
 	/// Retrieve a range of keys and values from the database
@@ -246,7 +261,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().scan(rng, skip, limit)
+		self.inner.as_ref().expect(INNER_TAKEN).scan(rng, skip, limit)
 	}
 
 	/// Retrieve a range of keys and values from the database in reverse order
@@ -259,7 +274,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().scan_reverse(rng, skip, limit)
+		self.inner.as_ref().expect(INNER_TAKEN).scan_reverse(rng, skip, limit)
 	}
 
 	// --------------------------------------------------
@@ -279,7 +294,7 @@ impl Transaction {
 		K: IntoBytes,
 		F: FnMut(&Bytes, &Bytes) -> bool,
 	{
-		self.inner.as_ref().unwrap().scan_for_each(rng, skip, limit, f)
+		self.inner.as_ref().expect(INNER_TAKEN).scan_for_each(rng, skip, limit, f)
 	}
 
 	/// Call a closure for each key in a range, avoiding intermediate Vec
@@ -295,7 +310,7 @@ impl Transaction {
 		K: IntoBytes,
 		F: FnMut(&Bytes) -> bool,
 	{
-		self.inner.as_ref().unwrap().keys_for_each(rng, skip, limit, f)
+		self.inner.as_ref().expect(INNER_TAKEN).keys_for_each(rng, skip, limit, f)
 	}
 
 	/// Scan key-value pairs into a caller-provided Vec, reusing its capacity.
@@ -309,7 +324,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().scan_into(rng, skip, limit, buf)
+		self.inner.as_ref().expect(INNER_TAKEN).scan_into(rng, skip, limit, buf)
 	}
 
 	/// Scan keys into a caller-provided Vec, reusing its capacity.
@@ -323,7 +338,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().keys_into(rng, skip, limit, buf)
+		self.inner.as_ref().expect(INNER_TAKEN).keys_into(rng, skip, limit, buf)
 	}
 
 	// --------------------------------------------------
@@ -350,7 +365,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().cursor(rng)
+		self.inner.as_ref().expect(INNER_TAKEN).cursor(rng)
 	}
 
 	/// Iterate over keys in a range.
@@ -369,7 +384,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().keys_iter(rng)
+		self.inner.as_ref().expect(INNER_TAKEN).keys_iter(rng)
 	}
 
 	/// Iterate over keys in a range, in reverse order.
@@ -377,7 +392,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().keys_iter_reverse(rng)
+		self.inner.as_ref().expect(INNER_TAKEN).keys_iter_reverse(rng)
 	}
 
 	/// Iterate over key-value pairs in a range.
@@ -396,7 +411,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().scan_iter(rng)
+		self.inner.as_ref().expect(INNER_TAKEN).scan_iter(rng)
 	}
 
 	/// Iterate over key-value pairs in a range, in reverse order.
@@ -404,7 +419,7 @@ impl Transaction {
 	where
 		K: IntoBytes,
 	{
-		self.inner.as_ref().unwrap().scan_iter_reverse(rng)
+		self.inner.as_ref().expect(INNER_TAKEN).scan_iter_reverse(rng)
 	}
 }
 
@@ -465,7 +480,7 @@ pub(crate) struct TransactionInner {
 /// after our insert either sees the pinning sentinel (and skips
 /// reclamation for that pass) or sees our final snapshot values (and is
 /// bounded by them). A scan computed before our insert loaded its
-/// bounds before our snapshot loads in the SeqCst total order, so our
+/// bounds before our snapshot loads in the `SeqCst` total order, so our
 /// snapshot is at or above every bound it used — and reclamation always
 /// retains the entry visible at its watermark. This closes the historic
 /// load-then-register race structurally, with no validate/rollback
@@ -488,7 +503,7 @@ fn pin_slot(db: &Inner, slot: &Arc<Slot>) -> (u64, u64, u64) {
 	slot.commit.store(SLOT_PINNING, Ordering::SeqCst);
 	// Insert the slot into the readers map under a fresh id
 	let slot_id = db.reader_slot_id.fetch_add(1, Ordering::Relaxed) + 1;
-	db.readers.insert(slot_id, slot.clone());
+	db.readers.insert(slot_id, Arc::clone(slot));
 	// Pair with the fence in every watermark scan
 	fence(Ordering::SeqCst);
 	// Load the commit snapshot, then the version snapshot
@@ -547,10 +562,11 @@ impl TransactionInner {
 		// Clear the readset bloom filter
 		self.readset_bloom.lock().clear();
 		// Clear or completely reset the allocated writeset
-		match self.writeset.len() > threshold {
-			true => self.writeset = BTreeMap::new(),
-			false => self.writeset.clear(),
-		};
+		if self.writeset.len() > threshold {
+			self.writeset = BTreeMap::new();
+		} else {
+			self.writeset.clear();
+		}
 		// Clear or completely reset the allocated savepoints
 		if self.savepoint_stack.len() > threshold {
 			self.savepoint_stack = Vec::new();
@@ -564,19 +580,19 @@ impl TransactionInner {
 	}
 
 	/// Get the starting sequence number of this transaction
-	pub fn version(&self) -> u64 {
+	pub const fn version(&self) -> u64 {
 		self.version
 	}
 
 	/// Check if the transaction is closed
-	pub fn closed(&self) -> bool {
+	pub const fn closed(&self) -> bool {
 		self.done
 	}
 
 	/// Cancel the transaction and rollback any changes
 	pub fn cancel(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Mark this transaction as done
@@ -598,11 +614,11 @@ impl TransactionInner {
 	/// This method is stackable and can be called multiple times
 	pub fn set_savepoint(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Create a new readset for the savepoint
@@ -612,14 +628,14 @@ impl TransactionInner {
 			// Pin the readset for access
 			let pin = readset.pin();
 			// Clone the readset for the savepoint
-			for key in self.readset.pin().iter() {
+			for key in &self.readset.pin() {
 				pin.insert(key.clone());
 			}
 		};
 		// Create a new scanset for the savepoint
 		let scanset = SkipMap::new();
 		// Clone the scanset for the savepoint
-		for entry in self.scanset.iter() {
+		for entry in &self.scanset {
 			// Load the Arc from ArcSwap and clone it for the new savepoint
 			let value = Arc::clone(&entry.value().load());
 			scanset.insert(entry.key().clone(), ArcSwap::new(value));
@@ -638,11 +654,11 @@ impl TransactionInner {
 	/// Pops the latest savepoint from the stack and restores transaction state
 	pub fn rollback_to_savepoint(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Pop the most recent savepoint from the stack
@@ -652,13 +668,13 @@ impl TransactionInner {
 		// Clear the readset
 		readset.clear();
 		// Clone the readset from the savepoint
-		for key in savepoint.readset.pin().iter() {
+		for key in &savepoint.readset.pin() {
 			readset.insert(key.clone());
 		}
 		// Restore the scanset to the savepoint
 		self.scanset.clear();
 		// Clone the scanset from the savepoint
-		for entry in savepoint.scanset.iter() {
+		for entry in &savepoint.scanset {
 			// Load the Arc from ArcSwap and clone it for the restored scanset
 			let value = Arc::clone(&entry.value().load());
 			self.scanset.insert(entry.key().clone(), ArcSwap::new(value));
@@ -672,7 +688,7 @@ impl TransactionInner {
 	/// Commit the transaction and store all changes
 	pub fn commit(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Mark this transaction as done
@@ -717,8 +733,8 @@ impl TransactionInner {
 		let mut commit_guard = OnUnwind {
 			armed: true,
 			action: {
-				let database = self.database.clone();
-				let entry = commit_entry.clone();
+				let database = Arc::clone(&self.database);
+				let entry = Arc::clone(&commit_entry);
 				move || {
 					entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
 					database.advance_commit_watermark();
@@ -855,8 +871,8 @@ impl TransactionInner {
 		let mut merge_guard = OnUnwind {
 			armed: true,
 			action: {
-				let database = self.database.clone();
-				let entry = entry.clone();
+				let database = Arc::clone(&self.database);
+				let entry = Arc::clone(&entry);
 				move || {
 					entry.applied.store(true, Ordering::SeqCst);
 					database.advance_merge_retirement();
@@ -956,9 +972,13 @@ impl TransactionInner {
 				candidates.insert(key);
 			}
 		}
-		// Append the transaction to the persistence layer
+		// Append the transaction to the persistence layer. Clone the `Arc` out
+		// first so the `persistence` read guard is not held across `append`,
+		// which performs file I/O and may fsync.
 		#[cfg(not(target_arch = "wasm32"))]
-		if let Some(p) = self.database.persistence.read().clone() {
+		let persistence = self.database.persistence.read().clone();
+		#[cfg(not(target_arch = "wasm32"))]
+		if let Some(p) = persistence {
 			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
 				// Do NOT remove the entry here: the merge clock's
 				// insertion-order advance is opportunistic (see
@@ -1015,30 +1035,28 @@ impl TransactionInner {
 		// Get the key reference
 		let lookup = key.as_slice();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check the transaction type
-		let res = match self.write {
-			// This is a writeable transaction
-			true => match self.writeset.get(lookup) {
-				// The key exists in the writeset
-				Some(_) => true,
+		let res = if self.write {
+			// The key exists in the writeset
+			if self.writeset.contains_key(lookup) {
+				true
+			} else {
 				// Check for the key in the tree
-				None => {
-					// Fetch for the key from the datastore
-					let res = self.exists_in_datastore(lookup, self.version);
-					// Check whether we should track key reads
-					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-						self.readset_bloom.lock().insert(lookup);
-						self.readset.pin().insert(key.into_bytes());
-					}
-					// Return the result
-					res
+				// Fetch for the key from the datastore
+				let res = self.exists_in_datastore(lookup, self.version);
+				// Check whether we should track key reads
+				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+					self.readset_bloom.lock().insert(lookup);
+					self.readset.pin().insert(key.into_bytes());
 				}
-			},
-			// This is a readonly transaction
-			false => self.exists_in_datastore(lookup, self.version),
+				// Return the result
+				res
+			}
+		} else {
+			self.exists_in_datastore(lookup, self.version)
 		};
 		// Return result
 		Ok(res)
@@ -1052,33 +1070,31 @@ impl TransactionInner {
 		// Get the key reference
 		let lookup = key.as_slice();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check the transaction type
-		let res = match self.write {
-			// This is a writeable transaction
-			true => match self.writeset.get(lookup) {
-				// The key exists in the writeset
-				Some(v) => v.clone(),
+		let res = if self.write {
+			// The key exists in the writeset
+			if let Some(v) = self.writeset.get(lookup) {
+				v.clone()
+			} else {
 				// Check for the key in the tree
-				None => {
-					// Fetch for the key from the datastore
-					let res = self.fetch_in_datastore(lookup, self.version);
-					// Check whether we should track key reads
-					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-						let guard = self.readset.pin();
-						if !guard.contains(lookup) {
-							self.readset_bloom.lock().insert(lookup);
-							guard.insert(key.into_bytes());
-						}
+				// Fetch for the key from the datastore
+				let res = self.fetch_in_datastore(lookup, self.version);
+				// Check whether we should track key reads
+				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+					let guard = self.readset.pin();
+					if !guard.contains(lookup) {
+						self.readset_bloom.lock().insert(lookup);
+						guard.insert(key.into_bytes());
 					}
-					// Return the result
-					res
 				}
-			},
-			// This is a readonly transaction
-			false => self.fetch_in_datastore(lookup, self.version),
+				// Return the result
+				res
+			}
+		} else {
+			self.fetch_in_datastore(lookup, self.version)
 		};
 		// Return result
 		Ok(res)
@@ -1090,49 +1106,43 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector with the same capacity
 		let mut results = Vec::with_capacity(keys.len());
 		// Check the transaction type
-		match self.write {
-			// This is a writeable transaction
-			true => {
-				for key in keys {
-					// Get the key reference
-					let lookup = key.as_slice();
-					// Check the writeset first
-					let res = match self.writeset.get(lookup) {
-						// The key exists in the writeset
-						Some(v) => v.clone(),
-						// Check for the key in the tree
-						None => {
-							// Fetch for the key from the datastore
-							let res = self.fetch_in_datastore(lookup, self.version);
-							// Check whether we should track key reads
-							if self.mode >= IsolationLevel::SerializableSnapshotIsolation
-								&& !self.readset.pin().contains(lookup)
-							{
-								self.readset_bloom.lock().insert(lookup);
-								self.readset.pin().insert(key.into_bytes());
-							}
-							// Return the result
-							res
-						}
-					};
-					results.push(res);
-				}
-			}
-			// This is a readonly transaction
-			false => {
-				for key in keys {
-					// Get the key reference
-					let lookup = key.as_slice();
-					// Fetch from datastore
+		if self.write {
+			for key in keys {
+				// Get the key reference
+				let lookup = key.as_slice();
+				// Check the writeset first
+				// The key exists in the writeset
+				let res = if let Some(v) = self.writeset.get(lookup) {
+					v.clone()
+				} else {
+					// Check for the key in the tree
+					// Fetch for the key from the datastore
 					let res = self.fetch_in_datastore(lookup, self.version);
-					results.push(res);
-				}
+					// Check whether we should track key reads
+					if self.mode >= IsolationLevel::SerializableSnapshotIsolation
+						&& !self.readset.pin().contains(lookup)
+					{
+						self.readset_bloom.lock().insert(lookup);
+						self.readset.pin().insert(key.into_bytes());
+					}
+					// Return the result
+					res
+				};
+				results.push(res);
+			}
+		} else {
+			for key in keys {
+				// Get the key reference
+				let lookup = key.as_slice();
+				// Fetch from datastore
+				let res = self.fetch_in_datastore(lookup, self.version);
+				results.push(res);
 			}
 		}
 		// Return results
@@ -1146,11 +1156,11 @@ impl TransactionInner {
 		V: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
@@ -1168,25 +1178,19 @@ impl TransactionInner {
 		// Get the key reference
 		let lookup = key.as_slice();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
-		// Set the key
-		match self.writeset.get(lookup) {
-			// The key exists in the writeset
-			Some(_) => return Err(Error::KeyAlreadyExists),
-			// Check for the key in the tree
-			None => match self.exists_in_datastore(lookup, self.version) {
-				// The key does not exist in the datastore
-				false => self.writeset.insert(key.into_bytes(), Some(val.into_bytes())),
-				// The key exists in the datastore
-				true => return Err(Error::KeyAlreadyExists),
-			},
-		};
+		// Set the key. The key must not already exist, either in the
+		// writeset or in the tree.
+		if self.writeset.contains_key(lookup) || self.exists_in_datastore(lookup, self.version) {
+			return Err(Error::KeyAlreadyExists);
+		}
+		self.writeset.insert(key.into_bytes(), Some(val.into_bytes()));
 		// Return result
 		Ok(())
 	}
@@ -1201,11 +1205,11 @@ impl TransactionInner {
 		// Get the key reference
 		let lookup = key.as_slice();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Set the key
@@ -1221,15 +1225,14 @@ impl TransactionInner {
 			// The key exists in the writeset, but does not match
 			(_, Some(_)) => return Err(Error::ValNotExpectedValue),
 			// Check for the key in the tree
-			_ => match self.equals_in_datastore(lookup, chk, self.version) {
-				// The key does not exist in the datastore
-				true => {
+			_ => {
+				if self.equals_in_datastore(lookup, chk, self.version) {
 					self.writeset.insert(key.into_bytes(), Some(val.into_bytes()));
+				} else {
+					return Err(Error::ValNotExpectedValue);
 				}
-				// The key exists in the datastore
-				_ => return Err(Error::ValNotExpectedValue),
-			},
-		};
+			}
+		}
 		// Return result
 		Ok(())
 	}
@@ -1240,11 +1243,11 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Remove the key
@@ -1262,11 +1265,11 @@ impl TransactionInner {
 		// Get the key reference
 		let lookup = key.as_slice();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Check to see if transaction is writable
-		if self.write == false {
+		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
 		// Remove the key
@@ -1282,15 +1285,14 @@ impl TransactionInner {
 			// The key exists in the writeset, but does not match
 			(_, Some(_)) => return Err(Error::ValNotExpectedValue),
 			// Check for the key in the tree
-			_ => match self.equals_in_datastore(lookup, chk, self.version) {
-				// The key does not exist in the datastore
-				true => {
+			_ => {
+				if self.equals_in_datastore(lookup, chk, self.version) {
 					self.writeset.insert(key.into_bytes(), None);
+				} else {
+					return Err(Error::ValNotExpectedValue);
 				}
-				// The key exists in the datastore
-				_ => return Err(Error::ValNotExpectedValue),
-			},
-		};
+			}
+		}
 		// Return result
 		Ok(())
 	}
@@ -1373,7 +1375,7 @@ impl TransactionInner {
 		F: FnMut(&Bytes, &Bytes) -> bool,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Initialise the entry counter
@@ -1472,7 +1474,7 @@ impl TransactionInner {
 		F: FnMut(&Bytes) -> bool,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Initialise the entry counter
@@ -1571,7 +1573,7 @@ impl TransactionInner {
 		// Clear the output buffer, reusing its capacity
 		buf.clear();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Compute the range
@@ -1662,7 +1664,7 @@ impl TransactionInner {
 		// Clear the output buffer, reusing its capacity
 		buf.clear();
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Compute the range
@@ -1769,7 +1771,7 @@ impl TransactionInner {
 			.transaction_merge_queue
 			.range(..=version)
 			.rev()
-			.map(|e| e.value().clone())
+			.map(|e| Arc::clone(e.value()))
 			.collect()
 	}
 
@@ -1786,7 +1788,7 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result count
@@ -1888,7 +1890,7 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector
@@ -1992,7 +1994,7 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Prepare result vector
@@ -2095,7 +2097,7 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		// Check to see if transaction is closed
-		if self.done == true {
+		if self.done {
 			return Err(Error::TxClosed);
 		}
 		// Compute the range
@@ -2285,7 +2287,7 @@ impl TransactionInner {
 			// bound already having reached our slot as success.
 			let cur = self.database.transaction_commit_id.load(Ordering::SeqCst);
 			if cur >= slot {
-				return (slot, entry.value().clone());
+				return (slot, Arc::clone(entry.value()));
 			}
 			if cur == slot - 1
 				&& self
@@ -2294,7 +2296,7 @@ impl TransactionInner {
 					.compare_exchange_weak(cur, slot, Ordering::SeqCst, Ordering::Acquire)
 					.is_ok()
 			{
-				return (slot, entry.value().clone());
+				return (slot, Arc::clone(entry.value()));
 			}
 			// Ensure the thread backs off when under contention
 			backoff(spins);
@@ -2311,7 +2313,7 @@ impl TransactionInner {
 		// Store the commit in an Arc
 		let updates = Arc::new(updates);
 		// Get the database logical clock
-		let oracle = self.database.oracle.clone();
+		let oracle = Arc::clone(&self.database.oracle);
 		// Get the database transaction merge queue
 		let queue = &self.database.transaction_merge_queue;
 		// Claim a unique merge version from the allocation counter. See
@@ -2328,7 +2330,7 @@ impl TransactionInner {
 		loop {
 			let cur = oracle.timestamp.load(Ordering::SeqCst);
 			if cur >= version {
-				return (version, entry.value().clone());
+				return (version, Arc::clone(entry.value()));
 			}
 			if cur == version - 1
 				&& oracle
@@ -2336,7 +2338,7 @@ impl TransactionInner {
 					.compare_exchange_weak(cur, version, Ordering::SeqCst, Ordering::Acquire)
 					.is_ok()
 			{
-				return (version, entry.value().clone());
+				return (version, Arc::clone(entry.value()));
 			}
 			// Ensure the thread backs off when under contention
 			backoff(spins);
@@ -2386,6 +2388,10 @@ impl<F: FnMut()> Drop for OnUnwind<F> {
 }
 
 #[cfg(test)]
+#[allow(
+	clippy::significant_drop_tightening,
+	reason = "lock contention is irrelevant in single-threaded assertions"
+)]
 mod tests {
 
 	use crate::err::Error;
@@ -3464,22 +3470,19 @@ mod tests {
 
 				for i in 0..commits_per_thread {
 					let mut tx = db.transaction(true);
-					tx.set(format!("key_{}", i), format!("value_{}", i)).unwrap();
+					tx.set(format!("key_{i}"), format!("value_{i}")).unwrap();
 
 					// Force the commit to generate a transaction queue ID
-					match tx.commit() {
-						Ok(_) => {
-							// Successfully committed
-						}
-						Err(_) => {
-							// May fail due to conflicts, which is fine for this
-							// test
-						}
+					if let Ok(()) = tx.commit() {
+						// Successfully committed
+					} else {
+						// May fail due to conflicts, which is fine for this
+						// test
 					}
 
 					// Also test merge queue ID generation
 					let mut tx2 = db.transaction(true);
-					tx2.set(format!("merge_key_{}", i), format!("merge_value_{}", i)).unwrap();
+					tx2.set(format!("merge_key_{i}"), format!("merge_value_{i}")).unwrap();
 					let _ = tx2.commit();
 				}
 			});
@@ -3534,8 +3537,8 @@ mod tests {
 				// Each thread tries to commit multiple transactions
 				for i in 0..10 {
 					let mut tx = db.transaction(true);
-					let key = format!("thread_{}_key_{}", thread_id, i);
-					let value = format!("thread_{}_value_{}", thread_id, i);
+					let key = format!("thread_{thread_id}_key_{i}");
+					let value = format!("thread_{thread_id}_value_{i}");
 
 					tx.set(key.clone(), value.clone()).unwrap();
 
@@ -3561,7 +3564,7 @@ mod tests {
 		let tx = db.transaction(false);
 		let mut count = 0;
 		// Use a very wide range to scan all keys
-		for _ in tx.scan("".to_string().."~".to_string(), None, None).unwrap() {
+		for _ in tx.scan(String::new().."~".to_string(), None, None).unwrap() {
 			count += 1;
 		}
 
@@ -3707,7 +3710,7 @@ mod tests {
 
 		// Set multiple nested savepoints
 		for i in 0..3 {
-			let key = format!("key{}", i);
+			let key = format!("key{i}");
 			tx_stack.set(key, "value").unwrap();
 			tx_stack.set_savepoint().unwrap();
 		}
@@ -3755,8 +3758,7 @@ mod tests {
 		let result = tx2.rollback_to_savepoint();
 		assert!(
 			matches!(result, Err(Error::NoSavepoint)),
-			"Should get NoSavepoint error on fresh transaction, got: {:?}",
-			result
+			"Should get NoSavepoint error on fresh transaction, got: {result:?}"
 		);
 
 		tx2.cancel().unwrap();
@@ -3832,8 +3834,7 @@ mod tests {
 		let result = tx1.commit();
 		assert!(
 			matches!(result, Err(Error::KeyReadConflict)),
-			"Should detect scan conflict even with savepoint, got: {:?}",
-			result
+			"Should detect scan conflict even with savepoint, got: {result:?}"
 		);
 	}
 
@@ -3890,8 +3891,7 @@ mod tests {
 		let result = tx.commit();
 		assert!(
 			matches!(result, Err(Error::KeyReadConflict)),
-			"Should detect conflict from scan before savepoint, got: {:?}",
-			result
+			"Should detect conflict from scan before savepoint, got: {result:?}"
 		);
 	}
 
@@ -3904,8 +3904,8 @@ mod tests {
 
 		// Insert 10,000 keys one-by-one
 		for i in 0..10_000 {
-			let key = format!("key_{:08}", i).into_bytes();
-			let value = format!("value_{:08}", i).into_bytes();
+			let key = format!("key_{i:08}").into_bytes();
+			let value = format!("value_{i:08}").into_bytes();
 
 			let mut tx = db.transaction(true);
 			tx.put(key, value).unwrap();
@@ -3914,8 +3914,8 @@ mod tests {
 
 		// Read each key one-by-one
 		for i in 0..10_000 {
-			let key = format!("key_{:08}", i).into_bytes();
-			let expected_value = format!("value_{:08}", i).into_bytes();
+			let key = format!("key_{i:08}").into_bytes();
+			let expected_value = format!("value_{i:08}").into_bytes();
 
 			let mut tx = db.transaction(false);
 			let result = tx.get(key.clone());
@@ -3923,8 +3923,7 @@ mod tests {
 			let value = result.unwrap();
 			assert!(
 				value.is_some(),
-				"Key at index {} was not found (version was garbage collected too early)",
-				i
+				"Key at index {i} was not found (version was garbage collected too early)"
 			);
 			assert_eq!(value.unwrap(), expected_value, "Value mismatch at index {i}");
 			tx.cancel().unwrap();
@@ -3943,8 +3942,8 @@ mod tests {
 		{
 			let mut tx = db.transaction(true);
 			for i in 0..1000 {
-				let key = format!("key_{:08}", i).into_bytes();
-				let value = format!("value_{:08}", i).into_bytes();
+				let key = format!("key_{i:08}").into_bytes();
+				let value = format!("value_{i:08}").into_bytes();
 				tx.put(key, value).unwrap();
 			}
 			tx.commit().unwrap();
@@ -3960,7 +3959,7 @@ mod tests {
 			let handle = thread::spawn(move || {
 				// Each thread reads all keys
 				for i in 0..1000 {
-					let key = format!("key_{:08}", i).into_bytes();
+					let key = format!("key_{i:08}").into_bytes();
 					let mut tx = db.transaction(false);
 					let result = tx.get(key.clone());
 					assert!(
@@ -4062,8 +4061,8 @@ mod tests {
 
 		// Run multiple iterations to increase chance of hitting the race
 		for iteration in 0..100 {
-			let key = format!("race_test_key_{}", iteration).into_bytes();
-			let value = format!("race_test_value_{}", iteration).into_bytes();
+			let key = format!("race_test_key_{iteration}").into_bytes();
+			let value = format!("race_test_value_{iteration}").into_bytes();
 
 			let db_writer = Arc::clone(&db);
 			let key_writer = key.clone();
@@ -4112,14 +4111,12 @@ mod tests {
 			tx.cancel().unwrap();
 			assert!(
 				result.is_some(),
-				"Key must be visible after writer completes (iteration {})",
-				iteration
+				"Key must be visible after writer completes (iteration {iteration})"
 			);
 			assert_eq!(
 				result.unwrap(),
 				value,
-				"Value mismatch after writer completes (iteration {})",
-				iteration
+				"Value mismatch after writer completes (iteration {iteration})"
 			);
 		}
 	}
@@ -4132,7 +4129,7 @@ mod tests {
 		let db = Database::new();
 		let db = Arc::new(db);
 
-		let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+		let num_threads = std::thread::available_parallelism().map_or(8, std::num::NonZero::get);
 		let operations_per_thread = 50;
 
 		let mut handles = vec![];
@@ -4142,8 +4139,8 @@ mod tests {
 			let db = Arc::clone(&db);
 			let handle = thread::spawn(move || {
 				for op_id in 0..operations_per_thread {
-					let key = format!("thread_{}_key_{}", thread_id, op_id).into_bytes();
-					let value = format!("thread_{}_value_{}", thread_id, op_id).into_bytes();
+					let key = format!("thread_{thread_id}_key_{op_id}").into_bytes();
+					let value = format!("thread_{thread_id}_value_{op_id}").into_bytes();
 
 					let mut tx = db.transaction(true);
 					tx.set(key, value).unwrap();
@@ -4160,9 +4157,9 @@ mod tests {
 				// Read keys from different writers
 				for writer_id in 0..num_threads {
 					for op_id in 0..operations_per_thread {
-						let key = format!("thread_{}_key_{}", writer_id, op_id).into_bytes();
+						let key = format!("thread_{writer_id}_key_{op_id}").into_bytes();
 						let expected_value =
-							format!("thread_{}_value_{}", writer_id, op_id).into_bytes();
+							format!("thread_{writer_id}_value_{op_id}").into_bytes();
 
 						// Try reading multiple times
 						for _ in 0..5 {
@@ -4171,8 +4168,7 @@ mod tests {
 								// If we see a value, it must be correct
 								assert_eq!(
 									value, expected_value,
-									"Reader {} saw wrong value for writer {} op {}",
-									reader_id, writer_id, op_id
+									"Reader {reader_id} saw wrong value for writer {writer_id} op {op_id}"
 								);
 							}
 							tx.cancel().unwrap();
@@ -4192,8 +4188,8 @@ mod tests {
 		// Final verification: all keys must be visible
 		for thread_id in 0..num_threads {
 			for op_id in 0..operations_per_thread {
-				let key = format!("thread_{}_key_{}", thread_id, op_id).into_bytes();
-				let expected_value = format!("thread_{}_value_{}", thread_id, op_id).into_bytes();
+				let key = format!("thread_{thread_id}_key_{op_id}").into_bytes();
+				let expected_value = format!("thread_{thread_id}_value_{op_id}").into_bytes();
 
 				let mut tx = db.transaction(false);
 				let result = tx.get(key.clone()).unwrap();
@@ -4201,16 +4197,12 @@ mod tests {
 
 				assert!(
 					result.is_some(),
-					"Key from thread {} op {} not found after all threads complete",
-					thread_id,
-					op_id
+					"Key from thread {thread_id} op {op_id} not found after all threads complete"
 				);
 				assert_eq!(
 					result.unwrap(),
 					expected_value,
-					"Wrong value for thread {} op {} after all threads complete",
-					thread_id,
-					op_id
+					"Wrong value for thread {thread_id} op {op_id} after all threads complete"
 				);
 			}
 		}
@@ -4524,7 +4516,7 @@ mod tests {
 		// Set up initial data
 		let mut tx = db.transaction(true);
 		for i in 0..100 {
-			tx.set(format!("key{}", i), format!("value{}", i)).unwrap();
+			tx.set(format!("key{i}"), format!("value{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 
@@ -4534,17 +4526,15 @@ mod tests {
 			let db_clone = Arc::clone(&db);
 			let handle = thread::spawn(move || {
 				let tx = db_clone.transaction(false);
-				let keys: Vec<String> = (0..100).map(|i| format!("key{}", i)).collect();
+				let keys: Vec<String> = (0..100).map(|i| format!("key{i}")).collect();
 				let results = tx.getm(keys).unwrap();
 
 				// Verify all results
 				for (i, result) in results.iter().enumerate() {
 					assert_eq!(
 						result.as_deref(),
-						Some(format!("value{}", i).as_bytes()),
-						"Thread {} failed at index {}",
-						thread_id,
-						i
+						Some(format!("value{i}").as_bytes()),
+						"Thread {thread_id} failed at index {i}"
 					);
 				}
 			});
@@ -4693,9 +4683,9 @@ mod tests {
 			Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
 		let mut handles = Vec::new();
 		for tid in 0..THREADS {
-			let db = db.clone();
-			let barrier = barrier.clone();
-			let written = written.clone();
+			let db = Arc::clone(&db);
+			let barrier = Arc::clone(&barrier);
+			let written = Arc::clone(&written);
 			handles.push(thread::spawn(move || {
 				barrier.wait();
 				for i in 0..PER_THREAD {

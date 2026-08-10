@@ -130,7 +130,7 @@ impl IntoBytes for Box<[u8]> {
 	}
 }
 
-impl<'a> IntoBytes for Cow<'a, [u8]> {
+impl IntoBytes for Cow<'_, [u8]> {
 	fn as_slice(&self) -> &[u8] {
 		// Get the bytes reference
 		self.as_ref()

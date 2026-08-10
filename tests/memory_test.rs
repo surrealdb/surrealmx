@@ -18,24 +18,24 @@ fn test_version_cleanup_with_updates() {
 	let num_keys = 1000;
 	let num_updates = 10;
 
-	println!("Creating {} keys...", num_keys);
+	println!("Creating {num_keys} keys...");
 
 	// Create initial keys
 	for i in 0..num_keys {
 		let mut tx = db.transaction(true);
-		let key = format!("key_{:06}", i);
+		let key = format!("key_{i:06}");
 		let value = vec![0u8; 100];
 		tx.set(key, value).unwrap();
 		tx.commit().unwrap();
 	}
 
-	println!("Updating each key {} times...", num_updates);
+	println!("Updating each key {num_updates} times...");
 
 	// Update each key multiple times
 	for update_round in 0..num_updates {
 		for i in 0..num_keys {
 			let mut tx = db.transaction(true);
-			let key = format!("key_{:06}", i);
+			let key = format!("key_{i:06}");
 			let value = vec![update_round as u8; 100];
 			tx.set(key, value).unwrap();
 			tx.commit().unwrap();
@@ -53,9 +53,9 @@ fn test_version_cleanup_with_updates() {
 	// Verify all keys exist and have the latest value
 	let mut tx = db.transaction(false);
 	for i in 0..num_keys {
-		let key = format!("key_{:06}", i);
+		let key = format!("key_{i:06}");
 		let value = tx.get(key).unwrap();
-		assert!(value.is_some(), "Key {} should exist", i);
+		assert!(value.is_some(), "Key {i} should exist");
 		assert_eq!(value.unwrap(), Bytes::from(vec![(num_updates - 1) as u8; 100]));
 	}
 	tx.cancel().unwrap();
@@ -71,12 +71,12 @@ fn test_version_cleanup_with_deletes() {
 
 	let num_keys = 500;
 
-	println!("Creating {} keys...", num_keys);
+	println!("Creating {num_keys} keys...");
 
 	// Create keys
 	for i in 0..num_keys {
 		let mut tx = db.transaction(true);
-		let key = format!("key_{:06}", i);
+		let key = format!("key_{i:06}");
 		let value = vec![1u8; 100];
 		tx.set(key, value).unwrap();
 		tx.commit().unwrap();
@@ -87,7 +87,7 @@ fn test_version_cleanup_with_deletes() {
 	// Update all keys
 	for i in 0..num_keys {
 		let mut tx = db.transaction(true);
-		let key = format!("key_{:06}", i);
+		let key = format!("key_{i:06}");
 		let value = vec![2u8; 100];
 		tx.set(key, value).unwrap();
 		tx.commit().unwrap();
@@ -98,7 +98,7 @@ fn test_version_cleanup_with_deletes() {
 	// Delete all keys
 	for i in 0..num_keys {
 		let mut tx = db.transaction(true);
-		let key = format!("key_{:06}", i);
+		let key = format!("key_{i:06}");
 		tx.del(key).unwrap();
 		tx.commit().unwrap();
 	}
@@ -111,15 +111,15 @@ fn test_version_cleanup_with_deletes() {
 	// Verify all keys are gone
 	let mut tx = db.transaction(false);
 	for i in 0..num_keys {
-		let key = format!("key_{:06}", i);
+		let key = format!("key_{i:06}");
 		let value = tx.get(key).unwrap();
-		assert!(value.is_none(), "Key {} should be deleted", i);
+		assert!(value.is_none(), "Key {i} should be deleted");
 	}
 	tx.cancel().unwrap();
 
 	println!("Test passed! All keys are properly deleted.");
 	println!("\nNote: With the fix, delete operations should remove all old versions,");
-	println!("freeing memory for {} keys with their full version history.", num_keys);
+	println!("freeing memory for {num_keys} keys with their full version history.");
 }
 
 #[test]
@@ -131,13 +131,13 @@ fn test_memory_with_batch_operations() {
 	let num_batches = 10;
 	let batch_size = 100;
 
-	println!("Running {} batches of {} operations...", num_batches, batch_size);
+	println!("Running {num_batches} batches of {batch_size} operations...");
 
 	for batch_num in 0..num_batches {
 		// Create a batch
 		let mut tx = db.transaction(true);
 		for i in 0..batch_size {
-			let key = format!("batch_{}_{:04}", batch_num, i);
+			let key = format!("batch_{batch_num}_{i:04}");
 			let value = vec![batch_num as u8; 100];
 			tx.set(key, value).unwrap();
 		}
@@ -148,7 +148,7 @@ fn test_memory_with_batch_operations() {
 		// Update the same batch
 		let mut tx = db.transaction(true);
 		for i in 0..batch_size {
-			let key = format!("batch_{}_{:04}", batch_num, i);
+			let key = format!("batch_{batch_num}_{i:04}");
 			let value = vec![(batch_num + 100) as u8; 100];
 			tx.set(key, value).unwrap();
 		}
@@ -169,7 +169,7 @@ fn test_memory_with_batch_operations() {
 	let mut count = 0;
 	for batch_num in 0..num_batches {
 		for i in 0..batch_size {
-			let key = format!("batch_{}_{:04}", batch_num, i);
+			let key = format!("batch_{batch_num}_{i:04}");
 			let value = tx.get(&key).unwrap();
 			assert!(value.is_some());
 			assert_eq!(value.unwrap(), Bytes::from(vec![(batch_num + 100) as u8; 100]));
@@ -178,7 +178,7 @@ fn test_memory_with_batch_operations() {
 	}
 	tx.cancel().unwrap();
 
-	println!("Test passed! Verified {} entries.", count);
+	println!("Test passed! Verified {count} entries.");
 	println!(
 		"\nWith the fix, {} create + {} update operations should use",
 		num_batches * batch_size,

@@ -18,6 +18,194 @@ keywords = [
 categories = ["database-implementations", "data-structures", "embedded"]
 license = "Apache-2.0"
 
+[lints.rust]
+
+# This engine contains no `unsafe` at all: every lock-free primitive it uses
+# is encapsulated behind a safe API by `crossbeam-skiplist`, `papaya`, and
+# `arc-swap`. That is a property worth keeping deliberately rather than
+# accidentally, so it is forbidden (which, unlike `deny`, cannot be
+# re-enabled by an inner `#[allow]` further down the tree).
+unsafe_code = "forbid"
+
+# `missing_docs` is enforced on the library only, via the stricter `--lib`
+# clippy pass in CI. Applied crate-wide it would demand a `//!` header on
+# every integration test and benchmark crate too.
+
+[lints.clippy]
+
+# --- Guardrails ----------------------------------------------------------
+# All of these are at zero across every target today, so denying them costs
+# nothing now and stops the pattern from reappearing later.
+
+# Unfinished work must not reach a release.
+todo = "deny"
+unimplemented = "deny"
+
+# Debugging leftovers.
+dbg_macro = "deny"
+
+# `==` on floats. There is no float arithmetic in the engine; keep it that
+# way, and make it a conscious decision if that ever changes.
+float_cmp = "deny"
+
+# Leaking a value rather than dropping it hides resource lifetimes, which in
+# an engine that returns transactions to a pool would be a real bug.
+mem_forget = "deny"
+
+# The `pedantic` group, enabled wholesale. surrealdb/surrealdb hand-picks
+# individual lints instead, because `pedantic` over ~300k LOC is not
+# tractable; surrealmx is ~12k LOC of library code and can afford the whole
+# group. `priority = -1` lets the individual `allow` entries below override
+# the group rather than colliding with it.
+pedantic = { level = "warn", priority = -1 }
+
+# Documenting every `# Errors` and `# Panics` section is prose work, not
+# linting, and would gate this change on writing ~60 doc sections. Left as
+# a follow-up rather than silently unfulfilled.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# `#[must_use]` on every getter is noise, and adding it to public methods
+# that already return owned values changes the API surface for no benefit.
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+
+# `#[inline(always)]` in the hot read/commit paths is a deliberate choice
+# here, not an oversight.
+inline_always = "allow"
+
+# A transaction commit and a version-chain merge are genuinely long
+# functions; splitting them to satisfy a line count would obscure the
+# ordering arguments documented inline.
+too_many_lines = "allow"
+
+# Fires on natural plural/singular pairs — `keys` next to `key1`, a
+# `writes` counter next to a `writers` thread list. Both readings are
+# correct as written, and renaming to satisfy the lint makes the code
+# worse rather than better.
+similar_names = "allow"
+
+# Every site this fires on is a deliberate convention rather than an
+# oversight, so it costs more than it finds here. The datastore helpers are
+# generic over `K: IntoBytes` and take the key by value so that `K` may
+# itself be a reference type (`&[u8]`) without a double indirection, and
+# `Database::new_with_options` / `new_with_persistence` take their options
+# struct by value because that is the builder convention and because
+# narrowing a published constructor to `&DatabaseOptions` would be a
+# breaking change for dependents. surrealdb/surrealdb enables this lint;
+# its code does not have these two shapes.
+needless_pass_by_value = "allow"
+
+# Numeric casts are checked on the library only, via the stricter `--lib`
+# clippy pass in CI, along with `unwrap_used` and friends. Test and
+# benchmark code casts loop counters freely and correctly, and the noise
+# there would bury any real site in the engine. Cargo's `[lints]` table
+# cannot be scoped to a single target, hence the split.
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+
+# NOT enabled, in either pass. All 11 sites it flags are indices derived
+# internally and provably in bounds: a `buffer[0..4]` guarded by a
+# `len() >= 4` check directly above it, `heads[i]`/`sources[i]` indices
+# from `enumerate()` over those same vectors, and bloom-filter bits
+# already masked to the filter width. Rewriting them as
+# `.get(i).expect(..)` panics identically while reading worse, and the
+# lint would keep firing on every future internal index. Its value is for
+# indices that come from untrusted input, which this crate does not have.
+# https://rust-lang.github.io/rust-clippy/master/#indexing_slicing
+indexing_slicing = "allow"
+
+# It is fine to write `assert_eq!(val, true)` in tests, and often more
+# readable than `assert!(val)`. Matches surrealdb/surrealdb.
+# https://rust-lang.github.io/rust-clippy/master/#bool_assert_comparison
+bool_assert_comparison = "allow"
+
+# --- Parity with the surrealdb/surrealdb lint set -------------------------
+# These are the lints from that workspace's `[workspace.lints.clippy]` that
+# the `pedantic` group above does not already cover. `disallowed_methods`
+# is deliberately omitted: it is a no-op without a `clippy.toml` listing
+# methods to ban, which is why it currently does nothing in that repo
+# either.
+
+# `Arc::clone(&x)` over `x.clone()`, so pointer duplication is obvious
+# rather than looking like a deep copy. This engine is Arc-heavy enough
+# that the distinction matters when reading a hot path.
+# https://rust-lang.github.io/rust-clippy/master/#clone_on_ref_ptr
+clone_on_ref_ptr = "warn"
+
+# `clone_from` / `clone_into` can reuse an existing allocation.
+# https://rust-lang.github.io/rust-clippy/master/#assigning_clones
+assigning_clones = "warn"
+
+# Mutating inside `debug_assert!` behaves differently in release builds,
+# where the macro is compiled out entirely.
+# https://rust-lang.github.io/rust-clippy/master/#debug_assert_with_mut_call
+debug_assert_with_mut_call = "warn"
+
+# A `From` impl that can panic should be `TryFrom`.
+# https://rust-lang.github.io/rust-clippy/master/#fallible_impl_from
+fallible_impl_from = "warn"
+
+# `.get().unwrap()` should be `[]`.
+# https://rust-lang.github.io/rust-clippy/master/#get_unwrap
+get_unwrap = "warn"
+
+# Float literals that cannot be represented exactly in the target type.
+# https://rust-lang.github.io/rust-clippy/master/#lossy_float_literal
+lossy_float_literal = "warn"
+
+# `Mutex<bool>` / `Mutex<usize>` where an atomic would do.
+# https://rust-lang.github.io/rust-clippy/master/#mutex_atomic
+mutex_atomic = "warn"
+
+# `.contains()` then `.insert()` double-looks-up the set.
+# https://rust-lang.github.io/rust-clippy/master/#set_contains_or_insert
+set_contains_or_insert = "warn"
+
+# --- Nursery lints worth the risk here -----------------------------------
+# The nursery group as a whole is not stable enough to enable, but these
+# individually pay for themselves in a lock-free engine.
+
+# Checks for temporaries with a significant `Drop` in `if let`/`match`
+# scrutinees, which live until the end of the whole expression. For a
+# lock-free MVCC engine this is the difference between releasing a lock
+# before a blocking `join`/fsync and holding it across one.
+# https://rust-lang.github.io/rust-clippy/master/#significant_drop_in_scrutinee
+significant_drop_in_scrutinee = "warn"
+
+# Checks for lock guards held longer than their last use. Flags contention
+# that is invisible when reading the code. Some holds here are deliberate
+# and load-bearing; those carry an `#[expect]` with the invariant spelled
+# out rather than being "fixed".
+# https://rust-lang.github.io/rust-clippy/master/#significant_drop_tightening
+significant_drop_tightening = "warn"
+
+# Clones whose value is dropped without being read.
+# https://rust-lang.github.io/rust-clippy/master/#redundant_clone
+redundant_clone = "warn"
+
+# NOT enabled. Every site it fires on in this repo is the
+#
+#     let handles: Vec<_> = (0..N).map(|_| thread::spawn(..)).collect();
+#     let results: Vec<_> = handles.into_iter().map(|h| h.join()).collect();
+#
+# pattern in the concurrency tests, and the suggested fix is to fuse the two
+# chains. Because iterators are lazy that would spawn thread i, join it, then
+# spawn thread i+1 — serialising the threads and quietly destroying the
+# concurrency the test exists to exercise. Collecting the handles is what
+# makes all N threads run at once, so it is load-bearing, not needless.
+# https://rust-lang.github.io/rust-clippy/master/#needless_collect
+needless_collect = "allow"
+
+# Functions that could be `const fn`. Free at the call site and lets more
+# of the option//key plumbing be evaluated at compile time.
+# https://rust-lang.github.io/rust-clippy/master/#missing_const_for_fn
+missing_const_for_fn = "warn"
+
+# `Self` over repeating the type name in an impl block.
+# https://rust-lang.github.io/rust-clippy/master/#use_self
+use_self = "warn"
+
 [dependencies]
 arc-swap = "1.9.1"
 bincode = { version = "2.0.1", features = ["serde"] }

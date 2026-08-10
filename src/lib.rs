@@ -12,7 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(clippy::bool_comparison)]
+//! An embedded, in-memory, lock-free, transaction-based, key-value database
+//! engine.
+//!
+//! A [`Database`] holds versioned keys and hands out [`Transaction`] values
+//! from a pool. Transactions read a consistent snapshot and are committed
+//! under one of the [`IsolationLevel`] variants, with conflicting commits
+//! rejected rather than serialised. Reads and writes never block on a global
+//! lock: the datastore is a lock-free skip list, and version visibility is
+//! resolved against a logical clock.
+//!
+//! On non-wasm targets the engine can additionally be backed by persistence
+//! (an append-only log plus periodic snapshots); see [`PersistenceOptions`].
 
 /// Tracing target for transaction conflict diagnostics
 pub const LOG_TARGET_CONFLICTS: &str = "surrealmx::conflicts";

@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 /// Owned range bounds for the skip list range iterator.
 /// Using owned Bytes avoids lifetime coupling between range bounds
-/// and the MergeIterator, enabling persistent storage (e.g., in a Cursor).
+/// and the `MergeIterator`, enabling persistent storage (e.g., in a Cursor).
 pub(crate) type SkipBounds = (Bound<Bytes>, Bound<Bytes>);
 
 /// Lazy k-way merge iterator over committed merge-queue writesets.
@@ -40,7 +40,7 @@ pub(crate) type SkipBounds = (Bound<Bytes>, Bound<Bytes>);
 ///
 /// Holds an `Arc<Merge>` per source to keep the underlying `Arc<BTreeMap>`
 /// alive without storing any borrows from it; advancement re-seeks the
-/// BTreeMap each step (O(log n) per advance).
+/// `BTreeMap` each step (O(log n) per advance).
 pub(crate) struct MergeQueueIter {
 	sources: Vec<Arc<Merge>>,
 	heads: Vec<Option<(Bytes, Option<Bytes>)>>,
@@ -102,6 +102,18 @@ fn seek_in_writeset(
 	entry.map(|(k, v)| (k.clone(), v.clone()))
 }
 
+/// Panic message for the merge-queue head accessors.
+///
+/// `winner` is only ever assigned from an index whose head matched
+/// `Some((k, _))`, so re-reading that head cannot observe `None`.
+const WINNER_HEAD: &str = "winner index is only set for a Some head";
+
+/// Panic message for the three-way merge accessors below.
+///
+/// `next_source` is assigned only inside an `if let Some(..)` on the
+/// corresponding head, so the matching arm's head is always `Some`.
+const SELECTED_HEAD: &str = "next_source is only set when the matching head is Some";
+
 impl Iterator for MergeQueueIter {
 	type Item = (Bytes, Option<Bytes>);
 
@@ -117,7 +129,7 @@ impl Iterator for MergeQueueIter {
 			match winner {
 				None => winner = Some(i),
 				Some(wi) => {
-					let (wk, _) = self.heads[wi].as_ref().unwrap();
+					let (wk, _) = self.heads[wi].as_ref().expect(WINNER_HEAD);
 					let take = match self.direction {
 						Direction::Forward => k < wk,
 						Direction::Reverse => k > wk,
@@ -129,10 +141,10 @@ impl Iterator for MergeQueueIter {
 			}
 		}
 		let winner = winner?;
-		let (out_key, out_val) = self.heads[winner].take().unwrap();
+		let (out_key, out_val) = self.heads[winner].take().expect(WINNER_HEAD);
 		// Discard older duplicates at the same key, re-seeking past it.
 		for i in (winner + 1)..self.heads.len() {
-			let same = self.heads[i].as_ref().map(|(k, _)| k == &out_key).unwrap_or(false);
+			let same = self.heads[i].as_ref().is_some_and(|(k, _)| k == &out_key);
 			if same {
 				let new = seek_in_writeset(
 					&self.sources[i],
@@ -277,7 +289,7 @@ impl<'a> MergeIterator<'a> {
 			// Process the selected source
 			let exists = match next_source {
 				KeySource::Transaction => {
-					let (sk, sv) = self.self_next.unwrap();
+					let (sk, sv) = self.self_next.expect(SELECTED_HEAD);
 					let exists = sv.is_some();
 
 					// Advance self iterator
@@ -304,7 +316,7 @@ impl<'a> MergeIterator<'a> {
 					exists
 				}
 				KeySource::Committed => {
-					let exists = self.join_next.as_ref().unwrap().1.is_some();
+					let exists = self.join_next.as_ref().expect(SELECTED_HEAD).1.is_some();
 
 					// Check if we need to skip same key in tree before advancing join
 					let should_skip_tree = if let Some(t_entry) = &self.tree_next {
@@ -331,7 +343,7 @@ impl<'a> MergeIterator<'a> {
 					exists
 				}
 				KeySource::Datastore => {
-					let t_entry = self.tree_next.as_ref().unwrap();
+					let t_entry = self.tree_next.as_ref().expect(SELECTED_HEAD);
 					let tv = match t_entry.value().try_read() {
 						Some(guard) => guard,
 						None => t_entry.value().read(),
@@ -405,7 +417,7 @@ impl<'a> MergeIterator<'a> {
 			// Process the selected source - first determine if entry exists
 			match next_source {
 				KeySource::Transaction => {
-					let (sk, sv) = self.self_next.unwrap();
+					let (sk, sv) = self.self_next.expect(SELECTED_HEAD);
 					let exists = sv.is_some();
 
 					// Store key reference for later cloning if needed
@@ -442,7 +454,7 @@ impl<'a> MergeIterator<'a> {
 					return Some((key_ref.clone(), exists));
 				}
 				KeySource::Committed => {
-					let (jk, jv) = self.join_next.as_ref().unwrap();
+					let (jk, jv) = self.join_next.as_ref().expect(SELECTED_HEAD);
 
 					// Check if we should skip (only skip existing entries)
 					if jv.is_some() && self.skip_remaining > 0 {
@@ -488,7 +500,7 @@ impl<'a> MergeIterator<'a> {
 					return Some((key, exists));
 				}
 				KeySource::Datastore => {
-					let t_entry = self.tree_next.as_ref().unwrap();
+					let t_entry = self.tree_next.as_ref().expect(SELECTED_HEAD);
 					let tv = match t_entry.value().try_read() {
 						Some(guard) => guard,
 						None => t_entry.value().read(),
@@ -524,7 +536,7 @@ impl<'a> MergeIterator<'a> {
 	}
 }
 
-impl<'a> Iterator for MergeIterator<'a> {
+impl Iterator for MergeIterator<'_> {
 	type Item = (Bytes, Option<Bytes>);
 
 	fn next(&mut self) -> Option<Self::Item> {
@@ -571,7 +583,7 @@ impl<'a> Iterator for MergeIterator<'a> {
 			// Process the selected source
 			match next_source {
 				KeySource::Transaction => {
-					let (sk, sv) = self.self_next.unwrap();
+					let (sk, sv) = self.self_next.expect(SELECTED_HEAD);
 					let exists = sv.is_some();
 
 					// Store key reference for deferred cloning
@@ -608,7 +620,7 @@ impl<'a> Iterator for MergeIterator<'a> {
 					return Some((key_ref.clone(), sv.clone()));
 				}
 				KeySource::Committed => {
-					let (jk, jv) = self.join_next.as_ref().unwrap();
+					let (jk, jv) = self.join_next.as_ref().expect(SELECTED_HEAD);
 
 					// Check if we should skip (only skip existing entries)
 					if jv.is_some() && self.skip_remaining > 0 {
@@ -654,7 +666,7 @@ impl<'a> Iterator for MergeIterator<'a> {
 					return Some((key, value_opt));
 				}
 				KeySource::Datastore => {
-					let t_entry = self.tree_next.as_ref().unwrap();
+					let t_entry = self.tree_next.as_ref().expect(SELECTED_HEAD);
 					let tv = match t_entry.value().try_read() {
 						Some(guard) => guard,
 						None => t_entry.value().read(),

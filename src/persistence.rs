@@ -127,19 +127,19 @@ impl PersistenceOptions {
 	}
 
 	/// Set the AOL (append-only log) behavior mode
-	pub fn with_aol_mode(mut self, mode: AolMode) -> Self {
+	pub const fn with_aol_mode(mut self, mode: AolMode) -> Self {
 		self.aol_mode = mode;
 		self
 	}
 
 	/// Set the snapshot behavior mode
-	pub fn with_snapshot_mode(mut self, mode: SnapshotMode) -> Self {
+	pub const fn with_snapshot_mode(mut self, mode: SnapshotMode) -> Self {
 		self.snapshot_mode = mode;
 		self
 	}
 
 	/// Set the fsync mode
-	pub fn with_fsync_mode(mut self, mode: FsyncMode) -> Self {
+	pub const fn with_fsync_mode(mut self, mode: FsyncMode) -> Self {
 		self.fsync_mode = mode;
 		self
 	}
@@ -157,7 +157,7 @@ impl PersistenceOptions {
 	}
 
 	/// Set the compression mode for snapshots
-	pub fn with_compression(mut self, mode: CompressionMode) -> Self {
+	pub const fn with_compression(mut self, mode: CompressionMode) -> Self {
 		self.compression_mode = mode;
 		self
 	}
@@ -242,7 +242,9 @@ impl Persistence {
 			base_path.join("snapshot.bin")
 		};
 		// Initialize AOL components if enabled
-		let aol = if !matches!(options.aol_mode, AolMode::Never) {
+		let aol = if matches!(options.aol_mode, AolMode::Never) {
+			None
+		} else {
 			// Ensure parent directories exist for AOL path
 			if let Some(parent) = aol_path.parent() {
 				fs::create_dir_all(parent)?;
@@ -250,8 +252,6 @@ impl Persistence {
 			// Open the AOL file with append mode
 			let file = OpenOptions::new().create(true).append(true).read(true).open(&aol_path)?;
 			Some(Arc::new(Mutex::new(file)))
-		} else {
-			None
 		};
 		// Ensure parent directories exist for snapshot path
 		if let Some(parent) = snapshot_path.parent() {
@@ -314,14 +314,18 @@ impl Persistence {
 				0
 			};
 			// Stream write each key-value pair to reduce memory usage
-			for entry in self.inner.datastore.iter() {
+			for entry in &self.inner.datastore {
 				// Persist only the latest committed version of each key. Keys
 				// whose newest entry is a delete tombstone are omitted: on
 				// reload the key is simply absent, which is the same
 				// observable state. The encoded element type is unchanged, so
 				// snapshot files remain readable across releases in both
 				// directions.
-				if let Some((version, value)) = entry.value().read().latest() {
+				// `latest` returns owned values, so the per-key version read guard is
+				// released at the end of this statement rather than being held across
+				// the encode and write below.
+				let latest = entry.value().read().latest();
+				if let Some((version, value)) = latest {
 					// Serialize and write this single entry
 					bincode::serde::encode_into_std_write(
 						&(entry.key().clone(), vec![(version, Some(value))]),
@@ -342,7 +346,7 @@ impl Persistence {
 				final_file.sync_all()?;
 			}
 			// Truncate AOL only up to the cutoff position
-			Self::truncate(&self.aol, aol_cutoff_position, &self.pending_syncs)?;
+			Self::truncate(self.aol.as_ref(), aol_cutoff_position, &self.pending_syncs)?;
 			// All ok
 			Ok(())
 		})();
@@ -361,6 +365,9 @@ impl Persistence {
 	/// 1. Loads the latest snapshot if it exists
 	/// 2. Applies any changes from the append-only log
 	fn load(&self) -> Result<(), PersistenceError> {
+		// Decoded record shapes, one per file format
+		type SnapshotEntry = (Bytes, Vec<(u64, Option<Bytes>)>);
+		type AolEntry = (Bytes, u64, Option<Bytes>);
 		// Track the maximum version seen across EVERY decoded record —
 		// snapshot entries (including keys skipped as tombstone-topped)
 		// and every append-only log record (including deletes). The
@@ -389,10 +396,8 @@ impl Persistence {
 					count += 1;
 					// Trace the loading of the snapshot entry
 					tracing::trace!("Loading snapshot entry: {count}");
-					// Type alias for the entry
-					type Entry = (Bytes, Vec<(u64, Option<Bytes>)>);
 					// Attempt to decode the next entry, handling EOF gracefully
-					let result: Result<Entry, _> =
+					let result: Result<SnapshotEntry, _> =
 						bincode::serde::decode_from_std_read(&mut reader, config::standard());
 					// Detech any end of file errors
 					match result {
@@ -455,10 +460,8 @@ impl Persistence {
 					count += 1;
 					// Trace the loading of the append-only entry
 					tracing::trace!("Loading AOL entry: {count}");
-					// Type alias for the entry
-					type Entry = (Bytes, u64, Option<Bytes>);
 					// Explicitly type the result to help type inference
-					let result: Result<Entry, _> =
+					let result: Result<AolEntry, _> =
 						bincode::serde::decode_from_std_read(&mut reader, config::standard());
 					// Detech any end of file errors
 					match result {
@@ -538,14 +541,19 @@ impl Persistence {
 
 	/// Truncate the AOL file up to the specified position, preserving any data
 	/// after.
+	#[expect(
+		clippy::significant_drop_tightening,
+		reason = "the file guard must cover the pending_syncs store, or a concurrent append's increment is silently discarded along with its required fsync"
+	)]
 	fn truncate(
-		aol: &Option<Arc<Mutex<File>>>,
+		aol: Option<&Arc<Mutex<File>>>,
 		position: u64,
 		pending_syncs: &Arc<AtomicU64>,
 	) -> Result<(), PersistenceError> {
 		// Check that we have a AOL file handle
-		if let Some(ref aol) = aol {
-			// Lock the AOL file
+		if let Some(aol) = aol {
+			// Lock the AOL file. The mutex is deliberately held past its last
+			// file use so that it still covers the `pending_syncs` store below.
 			let mut file = aol.lock()?;
 			// Get the current file length
 			let file_len = file.metadata()?.len();
@@ -615,9 +623,9 @@ impl Persistence {
 			// Check if a background thread is already running
 			if self.fsync_handle.read().is_none() {
 				// Clone necessary fields for the worker thread
-				let aol = aol.clone();
-				let pending_syncs = self.pending_syncs.clone();
-				let enabled = self.background_threads_enabled.clone();
+				let aol = Arc::clone(aol);
+				let pending_syncs = Arc::clone(&self.pending_syncs);
+				let enabled = Arc::clone(&self.background_threads_enabled);
 				// Spawn the background worker thread
 				let handle = thread::spawn(move || {
 					// Check whether the persistence process is enabled
@@ -665,11 +673,11 @@ impl Persistence {
 		// Check if a background thread is already running
 		if self.snapshot_handle.read().is_none() {
 			// Clone necessary fields for the worker thread
-			let db = self.inner.clone();
+			let db = Arc::clone(&self.inner);
 			let aol = self.aol.clone();
 			let snapshot_path = self.snapshot_path.clone();
-			let pending_syncs = self.pending_syncs.clone();
-			let enabled = self.background_threads_enabled.clone();
+			let pending_syncs = Arc::clone(&self.pending_syncs);
+			let enabled = Arc::clone(&self.background_threads_enabled);
 			let compression = self.compression_mode;
 			// Spawn the background worker thread
 			let handle = thread::spawn(move || {
@@ -697,11 +705,15 @@ impl Persistence {
 							0
 						};
 						// Stream write each entry to reduce memory usage
-						for entry in db.datastore.iter() {
+						for entry in &db.datastore {
 							// Persist only the latest committed version of
 							// each key, omitting keys whose newest entry is
 							// a delete tombstone. See `snapshot()` above.
-							if let Some((version, value)) = entry.value().read().latest() {
+							// `latest` returns owned values, so the per-key version read guard is
+							// released at the end of this statement rather than being held across
+							// the encode and write below.
+							let latest = entry.value().read().latest();
+							if let Some((version, value)) = latest {
 								// Serialize and write this single entry
 								bincode::serde::encode_into_std_write(
 									&(entry.key().clone(), vec![(version, Some(value))]),
@@ -722,7 +734,7 @@ impl Persistence {
 							final_file.sync_all()?;
 						}
 						// Truncate AOL to the cutoff position
-						Self::truncate(&aol, aol_cutoff_position, &pending_syncs)?;
+						Self::truncate(aol.as_ref(), aol_cutoff_position, &pending_syncs)?;
 						// All ok
 						Ok(())
 					})();
@@ -752,12 +764,12 @@ impl Persistence {
 			// Check if a background thread is already running
 			if self.appender_handle.read().is_none() {
 				// Clone necessary fields for the worker thread
-				let injector = self.async_append_injector.clone();
-				let aol = aol.clone();
+				let injector = Arc::clone(&self.async_append_injector);
+				let aol = Arc::clone(aol);
 				let fsync_mode = self.fsync_mode;
-				let enabled = self.background_threads_enabled.clone();
-				let pending_syncs = self.pending_syncs.clone();
-				let last_fsync = self.last_fsync.clone();
+				let enabled = Arc::clone(&self.background_threads_enabled);
+				let pending_syncs = Arc::clone(&self.pending_syncs);
+				let last_fsync = Arc::clone(&self.last_fsync);
 				// Spawn the background worker thread
 				let handle = thread::spawn(move || {
 					// Set the batch size and timeout
@@ -782,7 +794,6 @@ impl Persistence {
 							match injector.steal() {
 								Steal::Retry => {
 									std::thread::yield_now();
-									continue;
 								}
 								Steal::Success(op) => {
 									batch.push(op);
@@ -890,6 +901,10 @@ impl Persistence {
 	///
 	/// # Returns
 	/// * `Result<(), PersistenceError>` - Success or an error
+	#[expect(
+		clippy::significant_drop_tightening,
+		reason = "the file guard must cover the pending_syncs store, or a concurrent append's increment is silently discarded along with its required fsync"
+	)]
 	pub(crate) fn append(
 		&self,
 		version: u64,
@@ -914,7 +929,9 @@ impl Persistence {
 				}
 			}
 			if self.aol_mode == AolMode::SynchronousOnCommit {
-				// Lock the AOL file for writing
+				// Lock the AOL file for writing. The mutex is deliberately held
+				// past its last file use so that it still covers the
+				// `pending_syncs` store below.
 				let mut file = aol.lock()?;
 				// Create a new buffer for the AOL file
 				let mut writer = BufWriter::new(&mut *file);
@@ -983,18 +1000,23 @@ impl Drop for Persistence {
 	fn drop(&mut self) {
 		// Signal shutdown to the worker threads
 		self.background_threads_enabled.store(false, Ordering::Release);
-		// Stop the fsync worker if it exists
-		if let Some(handle) = self.fsync_handle.write().take() {
+		// Stop the fsync worker if it exists. The `take` is hoisted into its
+		// own statement so the write guard is released before the blocking
+		// `join`, instead of being held across it.
+		let fsync = self.fsync_handle.write().take();
+		if let Some(handle) = fsync {
 			handle.thread().unpark();
 			let _ = handle.join();
 		}
 		// Stop the snapshot worker if it exists
-		if let Some(handle) = self.snapshot_handle.write().take() {
+		let snapshot = self.snapshot_handle.write().take();
+		if let Some(handle) = snapshot {
 			handle.thread().unpark();
 			let _ = handle.join();
 		}
 		// Stop the async append worker if it exists
-		if let Some(handle) = self.appender_handle.write().take() {
+		let appender = self.appender_handle.write().take();
+		if let Some(handle) = appender {
 			handle.thread().unpark();
 			let _ = handle.join();
 		}

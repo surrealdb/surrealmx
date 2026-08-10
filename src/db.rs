@@ -53,8 +53,8 @@ pub struct Database {
 impl Default for Database {
 	fn default() -> Self {
 		let inner = Arc::new(Inner::default());
-		let pool = Pool::new(inner.clone(), DEFAULT_POOL_SIZE);
-		Database {
+		let pool = Pool::new(Arc::clone(&inner), DEFAULT_POOL_SIZE);
+		Self {
 			inner,
 			pool,
 			#[cfg(not(target_arch = "wasm32"))]
@@ -92,9 +92,9 @@ impl Database {
 		//  Create a new inner database
 		let inner = Arc::new(Inner::new(&opts));
 		// Initialise a transaction pool
-		let pool = Pool::new(inner.clone(), opts.pool_size);
+		let pool = Pool::new(Arc::clone(&inner), opts.pool_size);
 		// Create the database
-		let db = Database {
+		let db = Self {
 			inner,
 			pool,
 			#[cfg(not(target_arch = "wasm32"))]
@@ -128,14 +128,14 @@ impl Database {
 		//  Create a new inner database
 		let inner = Arc::new(Inner::new(&opts));
 		// Initialise a transaction pool
-		let pool = Pool::new(inner.clone(), opts.pool_size);
+		let pool = Pool::new(Arc::clone(&inner), opts.pool_size);
 		// Create a new persistence layer with options
-		let persist = Persistence::new_with_options(persistence_opts, inner.clone())
+		let persist = Persistence::new_with_options(persistence_opts, Arc::clone(&inner))
 			.map_err(std::io::Error::other)?;
 		// Replace the persistence layer in the database
 		inner.persistence.write().replace(Arc::new(persist.clone()));
 		// Create the database
-		let db = Database {
+		let db = Self {
 			inner,
 			pool,
 			persistence: Some(persist),
@@ -160,7 +160,7 @@ impl Database {
 
 	/// Get a reference to the persistence layer if enabled
 	#[cfg(not(target_arch = "wasm32"))]
-	pub fn persistence(&self) -> Option<&Persistence> {
+	pub const fn persistence(&self) -> Option<&Persistence> {
 		self.persistence.as_ref()
 	}
 
@@ -233,16 +233,21 @@ impl Database {
 			if let Some(ref persistence) = self.persistence {
 				// Disable the persistence background workers
 				persistence.background_threads_enabled.store(false, Ordering::Release);
-				// Wait for persistence threads to exit
-				if let Some(handle) = persistence.fsync_handle.write().take() {
+				// Wait for persistence threads to exit. Each `take` is hoisted
+				// into its own statement so the write guard is released before
+				// the blocking `join`, instead of being held across it.
+				let fsync = persistence.fsync_handle.write().take();
+				if let Some(handle) = fsync {
 					handle.thread().unpark();
 					let _ = handle.join();
 				}
-				if let Some(handle) = persistence.snapshot_handle.write().take() {
+				let snapshot = persistence.snapshot_handle.write().take();
+				if let Some(handle) = snapshot {
 					handle.thread().unpark();
 					let _ = handle.join();
 				}
-				if let Some(handle) = persistence.appender_handle.write().take() {
+				let appender = persistence.appender_handle.write().take();
+				if let Some(handle) = appender {
 					handle.thread().unpark();
 					let _ = handle.join();
 				}
@@ -253,12 +258,14 @@ impl Database {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
 			// Wait for the transaction cleanup thread to exit
-			if let Some(handle) = self.transaction_cleanup_handle.write().take() {
+			let cleanup = self.transaction_cleanup_handle.write().take();
+			if let Some(handle) = cleanup {
 				handle.thread().unpark();
 				let _ = handle.join();
 			}
 			// Wait for the garbage collector thread to exit
-			if let Some(handle) = self.garbage_collection_handle.write().take() {
+			let gc = self.garbage_collection_handle.write().take();
+			if let Some(handle) = gc {
 				handle.thread().unpark();
 				let _ = handle.join();
 			}
@@ -270,7 +277,7 @@ impl Database {
 	#[cfg(not(target_arch = "wasm32"))]
 	fn initialise_cleanup_worker(&self) {
 		// Clone the underlying datastore inner
-		let db = self.inner.clone();
+		let db = Arc::clone(&self.inner);
 		// Check if a background thread is already running
 		if db.transaction_cleanup_handle.read().is_none() {
 			// Get the specified interval
@@ -298,7 +305,7 @@ impl Database {
 	#[cfg(not(target_arch = "wasm32"))]
 	fn initialise_garbage_worker(&self) {
 		// Clone the underlying datastore inner
-		let db = self.inner.clone();
+		let db = Arc::clone(&self.inner);
 		// Check if a background thread is already running
 		if db.garbage_collection_handle.read().is_none() {
 			// Get the specified interval
@@ -344,6 +351,10 @@ impl Database {
 }
 
 #[cfg(test)]
+#[allow(
+	clippy::significant_drop_tightening,
+	reason = "lock contention is irrelevant in single-threaded assertions"
+)]
 mod tests {
 
 	use super::*;

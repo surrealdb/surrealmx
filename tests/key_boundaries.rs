@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Key and value boundary tests for SurrealMX.
+//! Key and value boundary tests for `SurrealMX`.
 //!
 //! Tests boundary conditions including empty values, null bytes,
 //! byte boundaries, and key ordering.
@@ -154,7 +154,7 @@ fn single_byte_keys() {
 	// Single byte keys covering the byte range
 	for byte in [0x00u8, 0x01, 0x7F, 0x80, 0xFE, 0xFF] {
 		let key = vec![byte];
-		let value = format!("value_{:02X}", byte);
+		let value = format!("value_{byte:02X}");
 		tx.set(&key, value).unwrap();
 	}
 	tx.commit().unwrap();
@@ -163,12 +163,11 @@ fn single_byte_keys() {
 	let tx = db.transaction(false);
 	for byte in [0x00u8, 0x01, 0x7F, 0x80, 0xFE, 0xFF] {
 		let key = vec![byte];
-		let expected = format!("value_{:02X}", byte);
+		let expected = format!("value_{byte:02X}");
 		assert_eq!(
 			tx.get(&key).unwrap(),
 			Some(Bytes::from(expected)),
-			"Single byte key 0x{:02X}",
-			byte
+			"Single byte key 0x{byte:02X}"
 		);
 	}
 }
@@ -195,15 +194,15 @@ fn unicode_keys() {
 	];
 
 	for (i, key) in keys.iter().enumerate() {
-		tx.set(*key, format!("value_{}", i)).unwrap();
+		tx.set(*key, format!("value_{i}")).unwrap();
 	}
 	tx.commit().unwrap();
 
 	// Verify all Unicode keys
 	let tx = db.transaction(false);
 	for (i, key) in keys.iter().enumerate() {
-		let expected = format!("value_{}", i);
-		assert_eq!(tx.get(*key).unwrap(), Some(Bytes::from(expected)), "Unicode key: {}", key);
+		let expected = format!("value_{i}");
+		assert_eq!(tx.get(*key).unwrap(), Some(Bytes::from(expected)), "Unicode key: {key}");
 	}
 
 	// Verify we can retrieve all keys using a wide scan
@@ -253,9 +252,7 @@ fn binary_key_ordering() {
 		if let Some(p) = prev {
 			assert!(
 				key.as_ref() > p.as_ref(),
-				"Keys should be in ascending byte order: {:?} should be after {:?}",
-				key,
-				p
+				"Keys should be in ascending byte order: {key:?} should be after {p:?}"
 			);
 		}
 		prev = Some(key);

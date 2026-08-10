@@ -282,7 +282,7 @@ fn test_snapshot_only_persistence_basic() {
 	// Configure snapshot-only persistence (no AOL)
 	let persistence_opts = PersistenceOptions::new(temp_path)
 		.with_aol_mode(AolMode::Never)
-		.with_snapshot_mode(SnapshotMode::Interval(Duration::from_secs(60)));
+		.with_snapshot_mode(SnapshotMode::Interval(Duration::from_mins(1)));
 
 	// Create persistent database with snapshot-only mode
 	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
@@ -536,7 +536,7 @@ fn test_aol_snapshot_with_truncation() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..10 {
-			tx.set(format!("key_{}", i), format!("value_{}", i)).unwrap();
+			tx.set(format!("key_{i}"), format!("value_{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 	}
@@ -571,8 +571,8 @@ fn test_aol_snapshot_with_truncation() {
 		let mut tx = db.transaction(false);
 		for i in 0..10 {
 			assert_eq!(
-				tx.get(format!("key_{}", i)).unwrap(),
-				Some(Bytes::from(format!("value_{}", i)))
+				tx.get(format!("key_{i}")).unwrap(),
+				Some(Bytes::from(format!("value_{i}")))
 			);
 		}
 		assert_eq!(tx.get("post_snapshot_key").unwrap(), Some(Bytes::from("post_snapshot_value")));
@@ -876,6 +876,7 @@ fn test_loads_multiversion_snapshot_files() {
 	// tombstone. Loading must surface only the newest value of the first
 	// key, and treat the second as absent.
 	{
+		use std::io::Write as _;
 		let file = std::fs::File::create(temp_path.join("snapshot.bin")).unwrap();
 		let mut writer = std::io::BufWriter::new(file);
 		let multi: (Bytes, Vec<(u64, Option<Bytes>)>) = (
@@ -892,7 +893,6 @@ fn test_loads_multiversion_snapshot_files() {
 			.unwrap();
 		bincode::serde::encode_into_std_write(&gone, &mut writer, bincode::config::standard())
 			.unwrap();
-		use std::io::Write;
 		writer.flush().unwrap();
 	}
 

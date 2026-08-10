@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Iterator and cursor edge case tests for SurrealMX.
+//! Iterator and cursor edge case tests for `SurrealMX`.
 //!
-//! Tests cursor, KeyIterator, and ScanIterator behavior including
+//! Tests cursor, `KeyIterator`, and `ScanIterator` behavior including
 //! direction switching, empty ranges, and edge cases.
 
 use bytes::Bytes;
@@ -430,7 +430,7 @@ fn scan_with_skip_and_limit() {
 
 	let mut tx = db.transaction(true);
 	for i in 0..10 {
-		tx.set(format!("key_{:02}", i), format!("value_{}", i)).unwrap();
+		tx.set(format!("key_{i:02}"), format!("value_{i}")).unwrap();
 	}
 	tx.commit().unwrap();
 

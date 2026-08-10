@@ -68,7 +68,7 @@ fn sequential_inserts_with_shared_prefix() {
 #[test]
 fn random_order_insert_with_shared_prefix() {
 	// Deterministic shuffle so failures are reproducible
-	let mut rng = rand::rngs::StdRng::seed_from_u64(0xfeedface);
+	let mut rng = rand::rngs::StdRng::seed_from_u64(0xfeed_face);
 	let mut indices: Vec<usize> = (0..LARGE).collect();
 	indices.shuffle(&mut rng);
 

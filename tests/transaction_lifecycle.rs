@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Transaction lifecycle tests for SurrealMX.
+//! Transaction lifecycle tests for `SurrealMX`.
 //!
 //! Tests transaction management edge cases including long-lived transactions,
 //! transaction drop behavior, and high transaction counts.
@@ -51,7 +51,7 @@ fn long_lived_read_transaction() {
 	// Perform many updates while read transaction is open
 	for i in 2..20 {
 		let mut tx = db.transaction(true);
-		tx.set("key", format!("v{}", i)).unwrap();
+		tx.set("key", format!("v{i}")).unwrap();
 		tx.commit().unwrap();
 	}
 
@@ -124,7 +124,7 @@ fn many_concurrent_transactions() {
 
 			thread::spawn(move || {
 				for tx_num in 0..transactions_per_thread {
-					let key = format!("t{}_{}", thread_id, tx_num);
+					let key = format!("t{thread_id}_{tx_num}");
 
 					// Write transaction
 					{
@@ -137,7 +137,7 @@ fn many_concurrent_transactions() {
 					{
 						let tx = db.transaction(false);
 						let value = tx.get(&key).unwrap();
-						assert!(value.is_some(), "Key {} should exist", key);
+						assert!(value.is_some(), "Key {key} should exist");
 					}
 				}
 			})
@@ -182,7 +182,7 @@ fn transaction_after_gc() {
 	// Update multiple times to create versions
 	for i in 2..10 {
 		let mut tx = db.transaction(true);
-		tx.set("gc_test_key", format!("v{}", i)).unwrap();
+		tx.set("gc_test_key", format!("v{i}")).unwrap();
 		tx.commit().unwrap();
 	}
 
@@ -218,7 +218,7 @@ fn read_transaction_longevity() {
 	{
 		let mut tx = db.transaction(true);
 		for i in 0..100 {
-			tx.set(format!("longevity_{:03}", i), format!("v{}", i)).unwrap();
+			tx.set(format!("longevity_{i:03}"), format!("v{i}")).unwrap();
 		}
 		tx.commit().unwrap();
 	}
@@ -240,7 +240,7 @@ fn read_transaction_longevity() {
 				for i in 0..20 {
 					let mut tx = db.transaction(true);
 					let key = format!("longevity_{:03}", (thread_id * 20 + i) % 100);
-					tx.set(&key, format!("modified_by_{}", thread_id)).unwrap();
+					tx.set(&key, format!("modified_by_{thread_id}")).unwrap();
 					tx.commit().unwrap();
 				}
 			})

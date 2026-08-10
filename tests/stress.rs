@@ -25,9 +25,9 @@ fn concurrent_random_transactions() {
 	// Spin up a number of threads
 	for _ in 0..THREADS {
 		// Clone the database
-		let db = db.clone();
+		let db = Arc::clone(&db);
 		// Clone the expected modifications
-		let expected = expected.clone();
+		let expected = Arc::clone(&expected);
 		// Store the reference to the thread
 		handles.push(thread::spawn(move || {
 			let mut rng = rand::rng();
@@ -75,7 +75,7 @@ fn concurrent_random_transactions() {
 		let key = Bytes::from(key_num.to_be_bytes().to_vec());
 		let val = tx.get(&key).unwrap();
 		let expected_val = snapshot.get(&key).cloned().unwrap_or(None);
-		assert_eq!(val, expected_val, "mismatch for key {}", key_num);
+		assert_eq!(val, expected_val, "mismatch for key {key_num}");
 	}
 	tx.cancel().unwrap();
 }

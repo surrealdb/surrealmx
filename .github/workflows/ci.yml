@@ -86,6 +86,24 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # A second, stricter pass over the library only. These lints are
+      # valuable in the engine but pure noise in tests and benchmarks, which
+      # unwrap and cast freely and correctly. Cargo's `[lints]` table cannot
+      # be scoped per-target, so they are denied here instead of there. The
+      # library is currently clean on all of them, so this is a ratchet: it
+      # keeps new panicking paths and lossy casts out of the engine.
+      - name: Run clippy (library only, stricter)
+        run: |
+          cargo clippy --lib --all-features -- \
+            -D warnings \
+            -D missing_docs \
+            -D clippy::unwrap_used \
+            -D clippy::get_unwrap \
+            -D clippy::panic \
+            -D clippy::cast_possible_truncation \
+            -D clippy::cast_sign_loss \
+            -D clippy::cast_possible_wrap
+
   bench:
     name: Benchmark Compilation
     runs-on: ubuntu-latest

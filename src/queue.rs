@@ -15,12 +15,14 @@
 //! This module stores the transaction commit and merge queues.
 
 use crate::bloom::BloomFilter;
+#[cfg(debug_assertions)]
 use crate::LOG_TARGET_CONFLICTS;
 use bytes::Bytes;
 use papaya::HashSet;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
+#[cfg(debug_assertions)]
 use tracing::debug;
 
 /// A transaction entry in the transaction commit queue
@@ -111,7 +113,7 @@ impl Commit {
 			// Choose iteration direction based on size to minimize iterations
 			if other.len() < self.keys.len() {
 				// Check if any key in readset exists in the writeset
-				for key in other.iter() {
+				for key in &other {
 					if self.contains_key(key) {
 						// Log the error for debug purposes
 						#[cfg(debug_assertions)]
@@ -138,7 +140,7 @@ impl Commit {
 	/// Returns true if self has no elements in common with other.
 	/// Uses bloom filters and key bounds for fast pre-checks before the
 	/// exact sorted merge.
-	pub fn is_disjoint_writeset_bloom(&self, other: &Arc<Commit>) -> bool {
+	pub fn is_disjoint_writeset_bloom(&self, other: &Arc<Self>) -> bool {
 		// Fast path: check if the key ranges overlap at all
 		match (self.min_key(), self.max_key(), other.min_key(), other.max_key()) {
 			(Some(self_min), Some(self_max), Some(other_min), Some(other_max)) => {
@@ -178,7 +180,7 @@ impl Commit {
 	}
 
 	/// Returns true if self has no elements in common with other
-	pub fn is_disjoint_writeset(&self, other: &Arc<Commit>) -> bool {
+	pub fn is_disjoint_writeset(&self, other: &Arc<Self>) -> bool {
 		// Create a key iterator for each writeset
 		let mut a = self.keys.iter();
 		let mut b = other.keys.iter();

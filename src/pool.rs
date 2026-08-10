@@ -52,7 +52,7 @@ impl Pool {
 			tx.reset(write);
 			tx
 		} else {
-			TransactionInner::new(self.inner.clone(), write)
+			TransactionInner::new(Arc::clone(&self.inner), write)
 		};
 		// Return a new enclosing transaction
 		Transaction {

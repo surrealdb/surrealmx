@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Transaction isolation tests for SurrealMX.
+//! Transaction isolation tests for `SurrealMX`.
 //!
 //! Tests SSI (Serializable Snapshot Isolation) conflict detection
 //! and Snapshot Isolation behavior.
