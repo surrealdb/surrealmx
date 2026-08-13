@@ -110,7 +110,7 @@ impl Transaction {
 
 	/// Set a savepoint in the transaction for partial rollback
 	/// This method is stackable and can be called multiple times with
-	/// corresponding calls to `rollback_to_savepoint`
+	/// corresponding calls to `rollback_to_savepoint` or `release_savepoint`
 	pub fn set_savepoint(&mut self) -> Result<(), Error> {
 		self.inner.as_mut().expect(INNER_TAKEN).set_savepoint()
 	}
@@ -119,8 +119,23 @@ impl Transaction {
 	/// After calling this method, subsequent modifications within this
 	/// transaction can be rolled back by calling `rollback_to_savepoint`
 	/// again if there are more savepoints in the stack
+	/// Reads and scans made since the savepoint are deliberately retained, so
+	/// that conflict detection stays conservative for any write that survives
 	pub fn rollback_to_savepoint(&mut self) -> Result<(), Error> {
 		self.inner.as_mut().expect(INNER_TAKEN).rollback_to_savepoint()
+	}
+
+	/// Release the most recent savepoint, keeping everything done since it
+	/// Writes made after the savepoint stay in the transaction, and remain
+	/// undoable by the savepoint set before the released one, which is what
+	/// `rollback_to_savepoint` will target next
+	/// Savepoints are anonymous, so releasing more savepoints than were set
+	/// cannot be detected once the stack is non-empty again: a later
+	/// `rollback_to_savepoint` will silently unwind to an earlier savepoint
+	/// than intended. Pair every `set_savepoint` with exactly one release or
+	/// rollback
+	pub fn release_savepoint(&mut self) -> Result<(), Error> {
+		self.inner.as_mut().expect(INNER_TAKEN).release_savepoint()
 	}
 
 	/// Get the starting sequence number of this transaction
@@ -424,20 +439,6 @@ impl Transaction {
 }
 
 // --------------------------------------------------
-// SavepointState
-// --------------------------------------------------
-
-/// A savepoint state capturing transaction state at a specific point
-struct SavepointState {
-	/// The readset at the time of the savepoint
-	readset: HashSet<Bytes>,
-	/// The scanset at the time of the savepoint
-	scanset: SkipMap<Bytes, ArcSwap<Bytes>>,
-	/// The writeset at the time of the savepoint
-	writeset: BTreeMap<Bytes, Option<Bytes>>,
-}
-
-// --------------------------------------------------
 // TransactionInner
 // --------------------------------------------------
 
@@ -469,8 +470,11 @@ pub(crate) struct TransactionInner {
 	pub(crate) slot_id: u64,
 	/// Threshold after which transaction state is reset
 	reset_threshold: usize,
-	/// Stack of savepoint states for nested partial rollbacks
-	savepoint_stack: Vec<SavepointState>,
+	/// Stack of writeset snapshots for nested partial rollbacks. Only the
+	/// writeset is captured: reads and scans are tracked monotonically and
+	/// are never rewound by a rollback, so a surviving write can never
+	/// depend on a read the transaction has forgotten
+	savepoint_stack: Vec<BTreeMap<Bytes, Option<Bytes>>>,
 }
 
 /// Register a transaction in the readers map and choose its snapshot.
@@ -551,9 +555,7 @@ impl TransactionInner {
 		self.reset_threshold = self.database.reset_threshold;
 		// Re-pin the retained slot allocation under a fresh id
 		let (slot_id, commit, version) = pin_slot(&self.database, &self.slot);
-		// Clear savepoint stack
-		self.savepoint_stack.clear();
-		// Clear or completely reset the allocated readset
+		// Store the threshold for the allocated state resets
 		let threshold = self.reset_threshold;
 		// Clear the transaction scanset
 		self.scanset.clear();
@@ -570,6 +572,8 @@ impl TransactionInner {
 		// Clear or completely reset the allocated savepoints
 		if self.savepoint_stack.len() > threshold {
 			self.savepoint_stack = Vec::new();
+		} else {
+			self.savepoint_stack.clear();
 		}
 		// Reset the transaction
 		self.done = false;
@@ -621,37 +625,16 @@ impl TransactionInner {
 		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
-		// Create a new readset for the savepoint
-		let readset = HashSet::new();
-		// Store the readset for the savepoint
-		{
-			// Pin the readset for access
-			let pin = readset.pin();
-			// Clone the readset for the savepoint
-			for key in &self.readset.pin() {
-				pin.insert(key.clone());
-			}
-		};
-		// Create a new scanset for the savepoint
-		let scanset = SkipMap::new();
-		// Clone the scanset for the savepoint
-		for entry in &self.scanset {
-			// Load the Arc from ArcSwap and clone it for the new savepoint
-			let value = Arc::clone(&entry.value().load());
-			scanset.insert(entry.key().clone(), ArcSwap::new(value));
-		}
-		// Create the savepoint state
-		self.savepoint_stack.push(SavepointState {
-			readset,
-			scanset,
-			writeset: self.writeset.clone(),
-		});
+		// Snapshot the writeset for the savepoint
+		self.savepoint_stack.push(self.writeset.clone());
 		// Continue
 		Ok(())
 	}
 
 	/// Rollback the transaction to the most recently set savepoint
-	/// Pops the latest savepoint from the stack and restores transaction state
+	/// Pops the latest savepoint from the stack and restores the writeset
+	/// Reads and scans made since the savepoint are deliberately retained, so
+	/// that conflict detection stays conservative for any write that survives
 	pub fn rollback_to_savepoint(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
 		if self.done {
@@ -661,26 +644,27 @@ impl TransactionInner {
 		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
-		// Pop the most recent savepoint from the stack
-		let savepoint = self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
-		// Pin the readset for access
-		let readset = self.readset.pin();
-		// Clear the readset
-		readset.clear();
-		// Clone the readset from the savepoint
-		for key in &savepoint.readset.pin() {
-			readset.insert(key.clone());
+		// Pop the most recent savepoint and restore the writeset
+		self.writeset = self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
+		// Continue
+		Ok(())
+	}
+
+	/// Release the most recent savepoint, keeping everything done since it
+	/// Writes made after the savepoint stay in the transaction, and remain
+	/// undoable by the savepoint set before the released one, which is what
+	/// `rollback_to_savepoint` will target next
+	pub fn release_savepoint(&mut self) -> Result<(), Error> {
+		// Check to see if transaction is closed
+		if self.done {
+			return Err(Error::TxClosed);
 		}
-		// Restore the scanset to the savepoint
-		self.scanset.clear();
-		// Clone the scanset from the savepoint
-		for entry in &savepoint.scanset {
-			// Load the Arc from ArcSwap and clone it for the restored scanset
-			let value = Arc::clone(&entry.value().load());
-			self.scanset.insert(entry.key().clone(), ArcSwap::new(value));
+		// Check to see if transaction is writable
+		if !self.write {
+			return Err(Error::TxNotWritable);
 		}
-		// Restore the other transaction state
-		self.writeset = savepoint.writeset;
+		// Discard the most recent savepoint, keeping the current writeset
+		self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
 		// Continue
 		Ok(())
 	}
@@ -2396,6 +2380,7 @@ mod tests {
 
 	use crate::err::Error;
 	use crate::Database;
+	use crate::DatabaseOptions;
 	use std::sync::Arc;
 	use std::thread;
 
@@ -3692,17 +3677,20 @@ mod tests {
 		// Test error when no savepoint is set
 		let mut tx = db.transaction(true);
 		assert!(matches!(tx.rollback_to_savepoint(), Err(Error::NoSavepoint)));
+		assert!(matches!(tx.release_savepoint(), Err(Error::NoSavepoint)));
 
 		// Test error on read-only transaction
 		let mut tx_readonly = db.transaction(false);
 		assert!(matches!(tx_readonly.set_savepoint(), Err(Error::TxNotWritable)));
 		assert!(matches!(tx_readonly.rollback_to_savepoint(), Err(Error::TxNotWritable)));
+		assert!(matches!(tx_readonly.release_savepoint(), Err(Error::TxNotWritable)));
 
 		// Test error on closed transaction
 		let mut tx_closed = db.transaction(true);
 		tx_closed.cancel().unwrap();
 		assert!(matches!(tx_closed.set_savepoint(), Err(Error::TxClosed)));
 		assert!(matches!(tx_closed.rollback_to_savepoint(), Err(Error::TxClosed)));
+		assert!(matches!(tx_closed.release_savepoint(), Err(Error::TxClosed)));
 
 		// Test stack exhaustion - error when rolling back more savepoints than were set
 		let db_stack = Database::new();
@@ -3738,6 +3726,8 @@ mod tests {
 		tx1.set("key2", "value2").unwrap();
 		tx1.set_savepoint().unwrap();
 		tx1.set("key3", "value3").unwrap();
+		tx1.set_savepoint().unwrap();
+		tx1.release_savepoint().unwrap();
 
 		// Verify savepoints exist
 		assert!(!tx1.inner.as_ref().unwrap().savepoint_stack.is_empty());
@@ -3796,6 +3786,179 @@ mod tests {
 		);
 
 		tx4.cancel().unwrap();
+	}
+
+	#[test]
+	fn test_release_savepoint() {
+		// Verify that releasing a savepoint discards exactly one marker while
+		// keeping the writes made after it, and that a later rollback then
+		// targets the savepoint set before the released one.
+
+		let db = Database::new();
+
+		let mut tx = db.transaction(true);
+
+		// Build a stack three deep
+		tx.set_savepoint().unwrap();
+		tx.set_savepoint().unwrap();
+		tx.set_savepoint().unwrap();
+		assert_eq!(tx.inner.as_ref().unwrap().savepoint_stack.len(), 3);
+
+		// Releasing discards exactly one marker
+		tx.release_savepoint().unwrap();
+		assert_eq!(tx.inner.as_ref().unwrap().savepoint_stack.len(), 2);
+
+		tx.cancel().unwrap();
+
+		// Now the load bearing behaviour: a released scope's writes stay
+		// undoable by the enclosing savepoint
+		let mut tx = db.transaction(true);
+
+		// Outer savepoint, then a write
+		tx.set_savepoint().unwrap();
+		tx.set("outer", "value").unwrap();
+
+		// Inner savepoint, then a write
+		tx.set_savepoint().unwrap();
+		tx.set("inner", "value").unwrap();
+		assert_eq!(tx.inner.as_ref().unwrap().savepoint_stack.len(), 2);
+
+		// Releasing the inner savepoint keeps its write visible
+		tx.release_savepoint().unwrap();
+		assert_eq!(tx.inner.as_ref().unwrap().savepoint_stack.len(), 1);
+		assert_eq!(tx.get("inner").unwrap().as_deref(), Some(b"value" as &[u8]));
+		assert_eq!(tx.get("outer").unwrap().as_deref(), Some(b"value" as &[u8]));
+
+		// A single rollback now unwinds past the released savepoint to the
+		// enclosing one, taking both writes with it
+		tx.rollback_to_savepoint().unwrap();
+		assert_eq!(tx.inner.as_ref().unwrap().savepoint_stack.len(), 0);
+		assert_eq!(tx.get("inner").unwrap(), None, "released scope's write should be undone");
+		assert_eq!(tx.get("outer").unwrap(), None, "enclosing scope's write should be undone");
+
+		// The stack is now empty again
+		assert!(matches!(tx.rollback_to_savepoint(), Err(Error::NoSavepoint)));
+
+		tx.cancel().unwrap();
+	}
+
+	#[test]
+	fn test_release_savepoint_bounds_stack_depth() {
+		// Verify that a savepoint per unit of work, each one released, keeps the
+		// savepoint stack at a bounded depth rather than accumulating one
+		// retained writeset snapshot per savepoint. This is a structural
+		// assertion, not a performance test: the timing and allocation story
+		// belongs in the criterion benchmarks.
+
+		let db = Database::new();
+
+		// Released savepoints do not accumulate
+		let mut tx = db.transaction(true);
+		for i in 0..1000 {
+			tx.set_savepoint().unwrap();
+			tx.set(format!("key{i}"), "value").unwrap();
+			tx.release_savepoint().unwrap();
+		}
+		let inner = tx.inner.as_ref().unwrap();
+		assert_eq!(inner.savepoint_stack.len(), 0, "released savepoints should not accumulate");
+		assert!(
+			inner.savepoint_stack.capacity() <= 8,
+			"a stack that never exceeded depth one should not have grown, got: {}",
+			inner.savepoint_stack.capacity()
+		);
+		tx.cancel().unwrap();
+
+		// Control: without releasing, every savepoint is retained
+		let mut tx = db.transaction(true);
+		for i in 0..1000 {
+			tx.set_savepoint().unwrap();
+			tx.set(format!("key{i}"), "value").unwrap();
+		}
+		assert_eq!(
+			tx.inner.as_ref().unwrap().savepoint_stack.len(),
+			1000,
+			"unreleased savepoints should accumulate"
+		);
+		tx.cancel().unwrap();
+	}
+
+	#[test]
+	fn test_rollback_keeps_reads_tracked() {
+		// Verify that rolling back a savepoint does not forget reads made inside
+		// the rolled back scope. An application can read a value inside a scope,
+		// roll that scope back, and then make a surviving write that depends on
+		// the value it saw. Dropping those reads from the readset would admit an
+		// SSI anomaly where a concurrent write to the read key does not conflict.
+		// Reads are therefore tracked monotonically, matching the readset bloom
+		// filter, which is never restored either.
+
+		let db = Database::new();
+
+		// Setup initial data
+		let mut tx_setup = db.transaction(true);
+		tx_setup.set("read", "initial").unwrap();
+		tx_setup.set("other", "other").unwrap();
+		tx_setup.commit().unwrap();
+
+		let mut tx1 = db.transaction(true);
+
+		// Read a key inside a savepoint scope, then roll the scope back
+		tx1.set_savepoint().unwrap();
+		assert_eq!(tx1.get("read").unwrap().as_deref(), Some(b"initial" as &[u8]));
+		tx1.rollback_to_savepoint().unwrap();
+
+		// The read must remain tracked for conflict detection
+		assert!(
+			tx1.inner.as_ref().unwrap().readset.pin().contains("read".as_bytes()),
+			"Reads made inside a rolled back scope must remain tracked"
+		);
+
+		// Make a surviving write derived from the value that was read
+		tx1.set("other", "derived").unwrap();
+
+		// A concurrent transaction modifies the key that tx1 read
+		let mut tx2 = db.transaction(true);
+		tx2.set("read", "changed").unwrap();
+		tx2.commit().unwrap();
+
+		// tx1 must abort, because its surviving write depends on a value that
+		// has since changed underneath it
+		let result = tx1.commit();
+		assert!(
+			matches!(result, Err(Error::KeyReadConflict)),
+			"Should detect a read conflict on a key read inside a rolled back scope, got: {result:?}"
+		);
+	}
+
+	#[test]
+	fn test_reset_reclaims_savepoint_stack_capacity() {
+		// Verify that a transaction which grew a large savepoint stack does not
+		// retain that allocation once it has been returned to the pool and
+		// reused. Dropping a transaction without committing or cancelling
+		// returns it to the pool with its savepoint stack still populated, so
+		// `reset` is the only place the allocation can be reclaimed.
+
+		let db = Database::new_with_options(DatabaseOptions::new().with_reset_threshold(2));
+
+		// Build a savepoint stack deeper than the reset threshold
+		let mut tx1 = db.transaction(true);
+		for i in 0..5 {
+			tx1.set(format!("key{i}"), "value").unwrap();
+			tx1.set_savepoint().unwrap();
+		}
+		assert_eq!(tx1.inner.as_ref().unwrap().savepoint_stack.len(), 5);
+
+		// Drop without committing or cancelling, so the transaction returns to
+		// the pool with its savepoint stack intact
+		drop(tx1);
+
+		// The next transaction reuses the pooled allocation
+		let tx2 = db.transaction(true);
+		let capacity = tx2.inner.as_ref().unwrap().savepoint_stack.capacity();
+		assert!(
+			capacity < 5,
+			"Savepoint stack capacity should be reclaimed on reset when it exceeds the threshold, got: {capacity}"
+		);
 	}
 
 	#[test]
@@ -3872,11 +4035,12 @@ mod tests {
 		// Rollback to savepoint
 		tx.rollback_to_savepoint().unwrap();
 
-		// First scan should still be there (check length matches)
-		assert_eq!(
-			tx.inner.as_ref().unwrap().scanset.len(),
-			scanset_before_len,
-			"Scanset should be restored to state before savepoint"
+		// The first scan must still be tracked. Scans are tracked monotonically,
+		// so the scan made inside the rolled back scope is retained too, keeping
+		// conflict detection conservative for any write that survives
+		assert!(
+			tx.inner.as_ref().unwrap().scanset.len() >= scanset_before_len,
+			"Scans from before the savepoint should never be lost by a rollback"
 		);
 
 		// Add a write

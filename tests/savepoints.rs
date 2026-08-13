@@ -14,8 +14,9 @@
 
 //! Savepoint functionality tests for `SurrealMX`.
 //!
-//! Tests `set_savepoint()` and `rollback_to_savepoint()` behavior
-//! including nested savepoints and edge cases.
+//! Tests `set_savepoint()`, `rollback_to_savepoint()` and
+//! `release_savepoint()` behavior including nested savepoints, conflict
+//! detection and edge cases.
 
 use bytes::Bytes;
 use surrealmx::{Database, Error};
@@ -484,4 +485,317 @@ fn savepoint_with_conditional_operations() {
 	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("initial")));
 
 	tx.commit().unwrap();
+}
+
+// =============================================================================
+// Savepoint Release Tests
+// =============================================================================
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn savepoint_release_keeps_writes() {
+	let db = Database::new();
+
+	let mut tx = db.transaction(true);
+
+	tx.set("key1", "value1").unwrap();
+
+	// Set a savepoint, write, then release it
+	tx.set_savepoint().unwrap();
+	tx.set("key2", "value2").unwrap();
+	tx.release_savepoint().unwrap();
+
+	// Both writes should still be visible
+	assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
+	assert_eq!(
+		tx.get("key2").unwrap(),
+		Some(Bytes::from("value2")),
+		"a released scope's write should be kept"
+	);
+
+	tx.commit().unwrap();
+
+	// And both should be persisted
+	let mut verify_tx = db.transaction(false);
+	assert_eq!(verify_tx.get("key1").unwrap(), Some(Bytes::from("value1")));
+	assert_eq!(verify_tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+	verify_tx.cancel().unwrap();
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn savepoint_release_then_rollback_goes_to_enclosing_savepoint() {
+	let db = Database::new();
+
+	let mut tx = db.transaction(true);
+
+	// Outer savepoint and write
+	tx.set_savepoint().unwrap();
+	tx.set("outer", "value").unwrap();
+
+	// Inner savepoint and write
+	tx.set_savepoint().unwrap();
+	tx.set("inner", "value").unwrap();
+
+	// Releasing the inner savepoint keeps its write
+	tx.release_savepoint().unwrap();
+	assert_eq!(tx.get("inner").unwrap(), Some(Bytes::from("value")));
+
+	// A single rollback unwinds past the released savepoint to the enclosing
+	// one, so the released scope's write is undone along with the outer one
+	tx.rollback_to_savepoint().unwrap();
+	assert_eq!(
+		tx.get("inner").unwrap(),
+		None,
+		"a released scope's write must remain undoable by the enclosing savepoint"
+	);
+	assert_eq!(tx.get("outer").unwrap(), None, "the enclosing scope's write should be undone");
+
+	// The stack should now be empty
+	assert!(matches!(tx.rollback_to_savepoint(), Err(Error::NoSavepoint)));
+
+	tx.commit().unwrap();
+
+	let mut verify_tx = db.transaction(false);
+	assert_eq!(verify_tx.get("inner").unwrap(), None);
+	assert_eq!(verify_tx.get("outer").unwrap(), None);
+	verify_tx.cancel().unwrap();
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn savepoint_release_all_then_commit() {
+	let db = Database::new();
+
+	let mut tx = db.transaction(true);
+
+	tx.set_savepoint().unwrap();
+	tx.set("key1", "value1").unwrap();
+	tx.set_savepoint().unwrap();
+	tx.set("key2", "value2").unwrap();
+
+	// Release every savepoint
+	tx.release_savepoint().unwrap();
+	tx.release_savepoint().unwrap();
+	assert!(matches!(tx.release_savepoint(), Err(Error::NoSavepoint)));
+
+	tx.commit().unwrap();
+
+	// Everything should be persisted
+	let mut verify_tx = db.transaction(false);
+	assert_eq!(verify_tx.get("key1").unwrap(), Some(Bytes::from("value1")));
+	assert_eq!(verify_tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+	verify_tx.cancel().unwrap();
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn savepoint_release_and_rollback_interleaved() {
+	let db = Database::new();
+
+	let mut tx = db.transaction(true);
+
+	// Outer savepoint and write
+	tx.set_savepoint().unwrap();
+	tx.set("keep", "value").unwrap();
+
+	// Inner savepoint and write, rolled back
+	tx.set_savepoint().unwrap();
+	tx.set("discard", "value").unwrap();
+	tx.rollback_to_savepoint().unwrap();
+
+	// Releasing the outer savepoint keeps the surviving write
+	tx.release_savepoint().unwrap();
+
+	tx.commit().unwrap();
+
+	let mut verify_tx = db.transaction(false);
+	assert_eq!(verify_tx.get("keep").unwrap(), Some(Bytes::from("value")));
+	assert_eq!(verify_tx.get("discard").unwrap(), None);
+	verify_tx.cancel().unwrap();
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn savepoint_release_many_cycles() {
+	let db = Database::new();
+
+	let mut tx = db.transaction(true);
+
+	let num_cycles = 500;
+
+	// A savepoint per unit of work, each one released
+	for i in 0..num_cycles {
+		tx.set_savepoint().unwrap();
+		tx.set(format!("key_{i}"), format!("value_{i}")).unwrap();
+		tx.release_savepoint().unwrap();
+	}
+
+	tx.commit().unwrap();
+
+	// Every write should have survived
+	let mut verify_tx = db.transaction(false);
+	for i in 0..num_cycles {
+		assert_eq!(
+			verify_tx.get(format!("key_{i}")).unwrap(),
+			Some(Bytes::from(format!("value_{i}"))),
+			"key_{i} should be committed"
+		);
+	}
+	verify_tx.cancel().unwrap();
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn savepoint_release_deep_then_rollback() {
+	let db = Database::new();
+
+	let mut tx = db.transaction(true);
+
+	let num_savepoints = 100;
+
+	// Create many nested savepoints, each with a write
+	for i in 0..num_savepoints {
+		tx.set_savepoint().unwrap();
+		tx.set(format!("key_{i}"), "value").unwrap();
+	}
+
+	// Release the top half, keeping their writes
+	for _ in 0..(num_savepoints / 2) {
+		tx.release_savepoint().unwrap();
+	}
+
+	// All keys should still be present
+	for i in 0..num_savepoints {
+		assert!(tx.get(format!("key_{i}")).unwrap().is_some(), "key_{i} should exist");
+	}
+
+	// A single rollback unwinds to the deepest surviving savepoint, which is the
+	// one set before the first key of the released half
+	tx.rollback_to_savepoint().unwrap();
+
+	// The first half's writes remain, minus the one made in the scope we just
+	// rolled back into
+	for i in 0..(num_savepoints / 2 - 1) {
+		assert!(tx.get(format!("key_{i}")).unwrap().is_some(), "key_{i} should exist");
+	}
+
+	// Everything from the rolled back scope onwards is gone
+	for i in (num_savepoints / 2 - 1)..num_savepoints {
+		assert!(tx.get(format!("key_{i}")).unwrap().is_none(), "key_{i} should not exist");
+	}
+
+	tx.commit().unwrap();
+}
+
+// =============================================================================
+// Savepoint Conflict Detection Tests
+// =============================================================================
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn savepoint_release_still_detects_read_conflict() {
+	let db = Database::new();
+
+	// Setup
+	let mut tx_setup = db.transaction(true);
+	tx_setup.set("read", "initial").unwrap();
+	tx_setup.set("other", "other").unwrap();
+	tx_setup.commit().unwrap();
+
+	let mut tx1 = db.transaction(true);
+
+	// Read a key inside a savepoint scope, then release the scope
+	tx1.set_savepoint().unwrap();
+	assert_eq!(tx1.get("read").unwrap(), Some(Bytes::from("initial")));
+	tx1.release_savepoint().unwrap();
+
+	// Write elsewhere, based on what was read
+	tx1.set("other", "derived").unwrap();
+
+	// A concurrent transaction modifies the key that tx1 read
+	let mut tx2 = db.transaction(true);
+	tx2.set("read", "changed").unwrap();
+	tx2.commit().unwrap();
+
+	// tx1 must abort
+	let result = tx1.commit();
+	assert!(
+		matches!(result, Err(Error::KeyReadConflict)),
+		"Should detect a read conflict on a key read inside a released scope, got: {result:?}"
+	);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn savepoint_release_without_conflict_commits() {
+	// Negative control for `savepoint_release_still_detects_read_conflict`:
+	// without this, that test could pass for the wrong reason.
+
+	let db = Database::new();
+
+	// Setup
+	let mut tx_setup = db.transaction(true);
+	tx_setup.set("read", "initial").unwrap();
+	tx_setup.set("other", "other").unwrap();
+	tx_setup.commit().unwrap();
+
+	let mut tx1 = db.transaction(true);
+
+	// Read a key inside a savepoint scope, then release the scope
+	tx1.set_savepoint().unwrap();
+	assert_eq!(tx1.get("read").unwrap(), Some(Bytes::from("initial")));
+	tx1.release_savepoint().unwrap();
+
+	tx1.set("other", "derived").unwrap();
+
+	// A concurrent transaction modifies an unrelated key
+	let mut tx2 = db.transaction(true);
+	tx2.set("unrelated", "changed").unwrap();
+	tx2.commit().unwrap();
+
+	// tx1 should commit cleanly
+	tx1.commit().unwrap();
+
+	let mut verify_tx = db.transaction(false);
+	assert_eq!(verify_tx.get("other").unwrap(), Some(Bytes::from("derived")));
+	verify_tx.cancel().unwrap();
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn savepoint_rollback_still_detects_read_conflict_from_rolled_back_scope() {
+	// Reads are tracked monotonically, so a value read inside a scope that was
+	// rolled back still counts for conflict detection. The application may have
+	// based a surviving write on the value it saw.
+
+	let db = Database::new();
+
+	// Setup
+	let mut tx_setup = db.transaction(true);
+	tx_setup.set("read", "initial").unwrap();
+	tx_setup.set("other", "other").unwrap();
+	tx_setup.commit().unwrap();
+
+	let mut tx1 = db.transaction(true);
+
+	// Read a key inside a savepoint scope, then roll the scope back
+	tx1.set_savepoint().unwrap();
+	assert_eq!(tx1.get("read").unwrap(), Some(Bytes::from("initial")));
+	tx1.rollback_to_savepoint().unwrap();
+
+	// Write elsewhere, based on what was read
+	tx1.set("other", "derived").unwrap();
+
+	// A concurrent transaction modifies the key that tx1 read
+	let mut tx2 = db.transaction(true);
+	tx2.set("read", "changed").unwrap();
+	tx2.commit().unwrap();
+
+	// tx1 must abort
+	let result = tx1.commit();
+	assert!(
+		matches!(result, Err(Error::KeyReadConflict)),
+		"Should detect a read conflict on a key read inside a rolled back scope, got: {result:?}"
+	);
 }

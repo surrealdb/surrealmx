@@ -305,6 +305,81 @@ fn rollback_after_all_savepoints_consumed_fails() {
 	tx.cancel().unwrap();
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn release_without_savepoint_fails() {
+	let db = Database::new();
+
+	let mut tx = db.transaction(true);
+	tx.set("key", "value").unwrap();
+
+	let result = tx.release_savepoint();
+	assert!(matches!(result, Err(Error::NoSavepoint)), "release without savepoint should fail");
+
+	// Transaction should still be usable
+	tx.set("key2", "value2").unwrap();
+	tx.commit().unwrap();
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn release_after_all_savepoints_consumed_fails() {
+	let db = Database::new();
+
+	let mut tx = db.transaction(true);
+
+	// Set one savepoint
+	tx.set_savepoint().unwrap();
+	tx.set("key", "value").unwrap();
+
+	// Release once (consumes the savepoint)
+	tx.release_savepoint().unwrap();
+
+	// Second release should fail
+	let result = tx.release_savepoint();
+	assert!(matches!(result, Err(Error::NoSavepoint)), "second release should fail");
+	tx.cancel().unwrap();
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn release_savepoint_on_read_only_transaction_fails() {
+	let db = Database::new();
+
+	let mut tx = db.transaction(false);
+
+	let result = tx.release_savepoint();
+	assert!(
+		matches!(result, Err(Error::TxNotWritable)),
+		"release on a read-only transaction should fail"
+	);
+	tx.cancel().unwrap();
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn release_savepoint_on_closed_transaction_fails() {
+	let db = Database::new();
+
+	// After a commit
+	let mut tx = db.transaction(true);
+	tx.set_savepoint().unwrap();
+	tx.commit().unwrap();
+	assert!(
+		matches!(tx.release_savepoint(), Err(Error::TxClosed)),
+		"release after commit should fail"
+	);
+
+	// After a cancel
+	let mut tx = db.transaction(true);
+	tx.set_savepoint().unwrap();
+	tx.cancel().unwrap();
+	assert!(
+		matches!(tx.release_savepoint(), Err(Error::TxClosed)),
+		"release after cancel should fail"
+	);
+}
+
 // =============================================================================
 // Conflict Errors
 // =============================================================================
