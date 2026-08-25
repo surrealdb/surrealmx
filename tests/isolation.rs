@@ -610,3 +610,124 @@ fn locked_read_reads_snapshot_and_own_writes() {
 
 	tx1.commit().unwrap();
 }
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn ssi_locked_read_scopes_validation_to_the_locked_key() {
+	// The commit guarantee of a locked read is per-key: a transaction with
+	// an empty writeset validates only its locked keys, so a concurrent
+	// write to a key it merely read cannot abort it.
+
+	let db = Database::new();
+
+	// Create initial data
+	let mut tx = db.transaction(true);
+	tx.set("locked", "initial").unwrap();
+	tx.set("plain", "initial").unwrap();
+	tx.commit().unwrap();
+
+	// tx1 with SSI locks one key and plainly reads another, writing nothing
+	let mut tx1 = db.transaction(true).with_serializable_snapshot_isolation();
+	assert_eq!(tx1.get_for_update("locked").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get("plain").unwrap(), Some(Bytes::from("initial")));
+
+	// tx2 modifies only the plainly read key
+	let mut tx2 = db.transaction(true);
+	tx2.set("plain", "changed").unwrap();
+	assert!(tx2.commit().is_ok());
+
+	// tx1 must commit: no concurrent write touched the locked key
+	assert!(tx1.commit().is_ok(), "A locked read must be validated only against the locked key");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn ssi_locked_read_keeps_plain_read_validation_for_writers() {
+	// A writing SSI transaction still validates its plain reads: locking a
+	// key neither widens nor narrows the read validation of a transaction
+	// that publishes writes.
+
+	let db = Database::new();
+
+	// Create initial data
+	let mut tx = db.transaction(true);
+	tx.set("locked", "initial").unwrap();
+	tx.set("plain", "initial").unwrap();
+	tx.commit().unwrap();
+
+	// tx1 with SSI locks one key, plainly reads another, and writes
+	let mut tx1 = db.transaction(true).with_serializable_snapshot_isolation();
+	assert_eq!(tx1.get_for_update("locked").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get("plain").unwrap(), Some(Bytes::from("initial")));
+	tx1.set("other", "value").unwrap();
+
+	// tx2 modifies only the plainly read key
+	let mut tx2 = db.transaction(true);
+	tx2.set("plain", "changed").unwrap();
+	assert!(tx2.commit().is_ok());
+
+	// tx1 must abort under SSI, having written after a stale plain read
+	let result = tx1.commit();
+	assert!(
+		matches!(result, Err(Error::KeyReadConflict)),
+		"A writing SSI transaction should still validate plain reads, got: {result:?}"
+	);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn si_locked_read_does_not_track_plain_reads() {
+	// Under snapshot isolation plain reads are never validated: locking a
+	// key must not change that, even for a transaction that writes.
+
+	let db = Database::new();
+
+	// Create initial data
+	let mut tx = db.transaction(true);
+	tx.set("locked", "initial").unwrap();
+	tx.set("plain", "initial").unwrap();
+	tx.commit().unwrap();
+
+	// tx1 with SI locks one key, plainly reads another, and writes
+	let mut tx1 = db.transaction(true).with_snapshot_isolation();
+	assert_eq!(tx1.get_for_update("locked").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get("plain").unwrap(), Some(Bytes::from("initial")));
+	tx1.set("other", "value").unwrap();
+
+	// tx2 modifies only the plainly read key
+	let mut tx2 = db.transaction(true);
+	tx2.set("plain", "changed").unwrap();
+	assert!(tx2.commit().is_ok());
+
+	// tx1 must commit: SI does not validate plain reads
+	assert!(tx1.commit().is_ok(), "SI should not validate plain reads when a key is locked");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn ssi_locked_read_does_not_arm_scan_validation() {
+	// A locked-read-only transaction validates only its locked keys: a
+	// range it scanned is not validated when the writeset is empty,
+	// matching the behavior of every other read-only SSI transaction.
+
+	let db = Database::new();
+
+	// Create initial data
+	let mut tx = db.transaction(true);
+	tx.set("locked", "initial").unwrap();
+	tx.set("scan/a", "initial").unwrap();
+	tx.commit().unwrap();
+
+	// tx1 with SSI locks one key and scans a range, writing nothing
+	let mut tx1 = db.transaction(true).with_serializable_snapshot_isolation();
+	assert_eq!(tx1.get_for_update("locked").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.scan("scan/".."scan/z", None, None).unwrap().len(), 1);
+
+	// tx2 writes inside the scanned range
+	let mut tx2 = db.transaction(true);
+	tx2.set("scan/b", "changed").unwrap();
+	assert!(tx2.commit().is_ok());
+
+	// tx1 must commit: no concurrent write touched the locked key
+	assert!(tx1.commit().is_ok(), "A locked read must not arm scan validation without writes");
+}
