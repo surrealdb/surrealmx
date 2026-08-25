@@ -182,6 +182,21 @@ impl Transaction {
 		self.inner.as_ref().expect(INNER_TAKEN).getm(keys)
 	}
 
+	/// Fetch a key from the database, locking the key for update
+	/// The key is tracked for read-conflict validation in every isolation
+	/// mode, so a successful commit guarantees that no other transaction
+	/// committed a write to this key after this transaction's snapshot,
+	/// even when this transaction commits no writes of its own
+	/// A conflicting commit fails with [`Error::KeyReadConflict`], and
+	/// calling this method on a read-only transaction fails with
+	/// [`Error::TxNotWritable`]
+	pub fn get_for_update<K>(&mut self, key: K) -> Result<Option<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.as_mut().expect(INNER_TAKEN).get_for_update(key)
+	}
+
 	/// Insert or update a key in the database
 	pub fn set<K, V>(&mut self, key: K, val: V) -> Result<(), Error>
 	where
@@ -454,6 +469,10 @@ pub(crate) struct TransactionInner {
 	pub(crate) commit: u64,
 	/// The version at which this transaction started
 	pub(crate) version: u64,
+	/// Whether any key was read with `get_for_update`. Locked reads are
+	/// tracked in the readset in every isolation mode, and arm readset
+	/// conflict validation at commit even when the writeset is empty
+	pub(crate) locked: bool,
 	/// The local set of key reads
 	pub(crate) readset: HashSet<Bytes>,
 	/// Bloom filter over the readset for fast conflict pre-checks
@@ -535,6 +554,7 @@ impl TransactionInner {
 			write,
 			commit,
 			version,
+			locked: false,
 			readset: HashSet::new(),
 			readset_bloom: Mutex::new(BloomFilter::new()),
 			scanset: SkipMap::new(),
@@ -578,6 +598,7 @@ impl TransactionInner {
 		// Reset the transaction
 		self.done = false;
 		self.write = write;
+		self.locked = false;
 		self.commit = commit;
 		self.version = version;
 		self.slot_id = slot_id;
@@ -593,6 +614,13 @@ impl TransactionInner {
 		self.done
 	}
 
+	/// Check if this transaction tracks point reads in the readset
+	/// Every point read is tracked under serializable snapshot isolation,
+	/// and locked reads are tracked in every isolation mode
+	fn tracks_reads(&self) -> bool {
+		self.mode >= IsolationLevel::SerializableSnapshotIsolation || self.locked
+	}
+
 	/// Cancel the transaction and rollback any changes
 	pub fn cancel(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
@@ -602,7 +630,7 @@ impl TransactionInner {
 		// Mark this transaction as done
 		self.done = true;
 		// Clear the transaction state
-		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+		if self.tracks_reads() {
 			self.readset.pin().clear();
 			self.readset_bloom.lock().clear();
 		}
@@ -677,11 +705,13 @@ impl TransactionInner {
 		}
 		// Mark this transaction as done
 		self.done = true;
-		// Return immediately if no modifications
-		if self.writeset.is_empty() {
+		// Return immediately if there are no modifications and no locked
+		// reads: locked reads must be validated at commit even when the
+		// writeset is empty
+		if self.writeset.is_empty() && !self.locked {
 			// Clear the transaction state
 			self.scanset.clear();
-			if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			if self.tracks_reads() {
 				self.readset.pin().clear();
 				self.readset_bloom.lock().clear();
 			}
@@ -760,7 +790,7 @@ impl TransactionInner {
 					// once it is safely below every reader's visibility.
 					// Clear the transaction state
 					self.scanset.clear();
-					if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+					if self.tracks_reads() {
 						self.readset.pin().clear();
 						self.readset_bloom.lock().clear();
 					}
@@ -771,7 +801,7 @@ impl TransactionInner {
 					return Err(Error::KeyWriteConflict);
 				}
 				// Check if we should check for conflicting read keys
-				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+				if self.tracks_reads() {
 					// Check if a previous transaction conflicts against reads
 					if !tx
 						.value()
@@ -832,6 +862,24 @@ impl TransactionInner {
 					}
 				}
 			}
+		}
+		// A locked-read-only transaction publishes no writes: validation
+		// has already succeeded above, so mark the commit entry as never
+		// publishing a merge version — the completed watermark can pass it,
+		// and the conflict loops of other transactions skip it, exactly as
+		// they would any other commit with an empty writeset.
+		if writeset.is_empty() {
+			commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
+			commit_guard.armed = false;
+			self.database.advance_commit_watermark();
+			// Clear the transaction state
+			self.scanset.clear();
+			self.readset.pin().clear();
+			self.readset_bloom.lock().clear();
+			// Clear savepoint stack
+			self.savepoint_stack.clear();
+			// Continue
+			return Ok(());
 		}
 		// Insert this transaction into the merge queue
 		let (version, entry) = self.atomic_merge(Merge {
@@ -978,7 +1026,7 @@ impl TransactionInner {
 				// error path).
 				// Clear the transaction state
 				self.scanset.clear();
-				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+				if self.tracks_reads() {
 					self.readset.pin().clear();
 					self.readset_bloom.lock().clear();
 				}
@@ -1000,7 +1048,7 @@ impl TransactionInner {
 		self.database.advance_merge_retirement();
 		// Clear the transaction state
 		self.scanset.clear();
-		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+		if self.tracks_reads() {
 			self.readset.pin().clear();
 			self.readset_bloom.lock().clear();
 		}
@@ -1131,6 +1179,44 @@ impl TransactionInner {
 		}
 		// Return results
 		Ok(results)
+	}
+
+	/// Fetch a key from the database, locking the key for update
+	pub fn get_for_update<K>(&mut self, key: K) -> Result<Option<Bytes>, Error>
+	where
+		K: IntoBytes,
+	{
+		// Get the key reference
+		let lookup = key.as_slice();
+		// Check to see if transaction is closed
+		if self.done {
+			return Err(Error::TxClosed);
+		}
+		// Check to see if transaction is writable
+		if !self.write {
+			return Err(Error::TxNotWritable);
+		}
+		// Fetch the key from the writeset, falling back to the datastore
+		let res = if let Some(v) = self.writeset.get(lookup) {
+			v.clone()
+		} else {
+			self.fetch_in_datastore(lookup, self.version)
+		};
+		// Track the key read in every isolation mode, even when the key was
+		// answered from the writeset: a savepoint rollback can discard the
+		// write, and the registered key must stay armed for conflict
+		// detection regardless of which writes survive to commit
+		{
+			let guard = self.readset.pin();
+			if !guard.contains(lookup) {
+				self.readset_bloom.lock().insert(lookup);
+				guard.insert(key.into_bytes());
+			}
+		}
+		// Mark this transaction as holding locked reads
+		self.locked = true;
+		// Return result
+		Ok(res)
 	}
 
 	/// Insert or update a key in the database
@@ -2447,6 +2533,102 @@ mod tests {
 		assert!(tx2.get("key1").unwrap().is_none());
 		tx2.set("key2", "value2").unwrap();
 		assert!(tx2.commit().is_err());
+	}
+
+	#[test]
+	fn mvcc_si_locked_read_conflicting_write_should_error() {
+		let db = Database::new();
+		// ----------
+		let mut tx1 = db.transaction(true).with_snapshot_isolation();
+		let mut tx2 = db.transaction(true).with_snapshot_isolation();
+		// ----------
+		assert!(tx1.get_for_update("key1").unwrap().is_none());
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(tx2.get_for_update("key1").unwrap().is_none());
+		tx2.set("key2", "value2").unwrap();
+		assert!(matches!(tx2.commit(), Err(Error::KeyReadConflict)));
+	}
+
+	#[test]
+	fn mvcc_si_locked_read_unrelated_write_should_succeed() {
+		let db = Database::new();
+		// ----------
+		let mut tx1 = db.transaction(true).with_snapshot_isolation();
+		let mut tx2 = db.transaction(true).with_snapshot_isolation();
+		// ----------
+		assert!(tx1.get("key1").unwrap().is_none());
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(tx2.get_for_update("key2").unwrap().is_none());
+		tx2.set("key3", "value3").unwrap();
+		assert!(tx2.commit().is_ok());
+	}
+
+	#[test]
+	fn mvcc_si_locked_read_only_commit_should_error() {
+		let db = Database::new();
+		// ----------
+		let mut tx1 = db.transaction(true).with_snapshot_isolation();
+		let mut tx2 = db.transaction(true).with_snapshot_isolation();
+		// ----------
+		assert!(tx2.get_for_update("key1").unwrap().is_none());
+		// ----------
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(matches!(tx2.commit(), Err(Error::KeyReadConflict)));
+	}
+
+	#[test]
+	fn mvcc_si_locked_read_only_commit_should_succeed() {
+		let db = Database::new();
+		// ----------
+		let mut tx1 = db.transaction(true).with_snapshot_isolation();
+		let mut tx2 = db.transaction(true).with_snapshot_isolation();
+		// ----------
+		assert!(tx2.get_for_update("key1").unwrap().is_none());
+		// ----------
+		tx1.set("key2", "value2").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(tx2.commit().is_ok());
+		// ----------
+		let mut tx3 = db.transaction(true);
+		tx3.set("key3", "value3").unwrap();
+		assert!(tx3.commit().is_ok());
+	}
+
+	#[test]
+	fn mvcc_ssi_locked_read_only_commit_should_error() {
+		let db = Database::new();
+		// ----------
+		let mut tx1 = db.transaction(true).with_serializable_snapshot_isolation();
+		let mut tx2 = db.transaction(true).with_serializable_snapshot_isolation();
+		// ----------
+		assert!(tx2.get_for_update("key1").unwrap().is_none());
+		// ----------
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(matches!(tx2.commit(), Err(Error::KeyReadConflict)));
+	}
+
+	#[test]
+	fn mvcc_ssi_plain_read_only_commit_should_succeed() {
+		let db = Database::new();
+		// ----------
+		let mut tx1 = db.transaction(true).with_serializable_snapshot_isolation();
+		let mut tx2 = db.transaction(true).with_serializable_snapshot_isolation();
+		// ----------
+		assert!(tx2.get("key1").unwrap().is_none());
+		// ----------
+		tx1.set("key1", "value1").unwrap();
+		assert!(tx1.commit().is_ok());
+		// ----------
+		assert!(tx2.commit().is_ok());
 	}
 
 	#[test]

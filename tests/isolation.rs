@@ -18,7 +18,7 @@
 //! and Snapshot Isolation behavior.
 
 use bytes::Bytes;
-use surrealmx::Database;
+use surrealmx::{Database, Error};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -421,4 +421,192 @@ fn concurrent_counter_increment_conflict() {
 	let mut verify = db.transaction(false);
 	assert_eq!(verify.get("counter").unwrap(), Some(Bytes::from("1")));
 	verify.cancel().unwrap();
+}
+
+// =============================================================================
+// Locked Read Tests
+// =============================================================================
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn si_locked_read_detects_concurrent_write_conflict() {
+	let db = Database::new();
+
+	// Create initial data
+	let mut tx = db.transaction(true);
+	tx.set("key", "initial").unwrap();
+	tx.commit().unwrap();
+
+	// tx1 with SI locks the key for update
+	let mut tx1 = db.transaction(true).with_snapshot_isolation();
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+
+	// tx2 modifies the locked key
+	let mut tx2 = db.transaction(true);
+	tx2.set("key", "modified").unwrap();
+	assert!(tx2.commit().is_ok());
+
+	// tx1 writes to a different key
+	tx1.set("other", "value").unwrap();
+
+	// tx1 must abort, even under plain snapshot isolation
+	let result = tx1.commit();
+	assert!(
+		matches!(result, Err(Error::KeyReadConflict)),
+		"SI should detect a conflict on a locked read, got: {result:?}"
+	);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn si_locked_read_unrelated_write_commits() {
+	// Negative control for `si_locked_read_detects_concurrent_write_conflict`:
+	// without this, that test could pass for the wrong reason.
+
+	let db = Database::new();
+
+	// Create initial data
+	let mut tx = db.transaction(true);
+	tx.set("key", "initial").unwrap();
+	tx.commit().unwrap();
+
+	// tx1 with SI locks the key for update
+	let mut tx1 = db.transaction(true).with_snapshot_isolation();
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+
+	// tx2 modifies an unrelated key
+	let mut tx2 = db.transaction(true);
+	tx2.set("unrelated", "modified").unwrap();
+	assert!(tx2.commit().is_ok());
+
+	// tx1 writes to a different key
+	tx1.set("other", "value").unwrap();
+
+	// tx1 should commit cleanly
+	assert!(tx1.commit().is_ok(), "SI locked read should not conflict with unrelated writes");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn si_locked_read_without_writes_detects_conflict() {
+	let db = Database::new();
+
+	// Create initial data
+	let mut tx = db.transaction(true);
+	tx.set("key", "initial").unwrap();
+	tx.commit().unwrap();
+
+	// tx1 with SI locks the key for update, but writes nothing
+	let mut tx1 = db.transaction(true).with_snapshot_isolation();
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+
+	// tx2 modifies the locked key
+	let mut tx2 = db.transaction(true);
+	tx2.set("key", "modified").unwrap();
+	assert!(tx2.commit().is_ok());
+
+	// tx1 must abort, even though its writeset is empty
+	let result = tx1.commit();
+	assert!(
+		matches!(result, Err(Error::KeyReadConflict)),
+		"A locked read with no writes should still be validated, got: {result:?}"
+	);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn ssi_locked_read_without_writes_detects_conflict() {
+	let db = Database::new();
+
+	// Create initial data
+	let mut tx = db.transaction(true);
+	tx.set("key", "initial").unwrap();
+	tx.commit().unwrap();
+
+	// tx1 with SSI locks the key for update, but writes nothing
+	let mut tx1 = db.transaction(true).with_serializable_snapshot_isolation();
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+
+	// tx2 modifies the locked key
+	let mut tx2 = db.transaction(true);
+	tx2.set("key", "modified").unwrap();
+	assert!(tx2.commit().is_ok());
+
+	// tx1 must abort: a plain read with an empty writeset would commit
+	// cleanly under SSI, but a locked read is validated in every mode
+	let result = tx1.commit();
+	assert!(
+		matches!(result, Err(Error::KeyReadConflict)),
+		"A locked read with no writes should still be validated, got: {result:?}"
+	);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn locked_read_without_writes_commits_when_unchanged() {
+	let db = Database::new();
+
+	// Create initial data
+	let mut tx = db.transaction(true);
+	tx.set("key", "initial").unwrap();
+	tx.commit().unwrap();
+
+	// tx1 with SI locks the key for update, but writes nothing
+	let mut tx1 = db.transaction(true).with_snapshot_isolation();
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+
+	// tx2 modifies an unrelated key
+	let mut tx2 = db.transaction(true);
+	tx2.set("unrelated", "modified").unwrap();
+	assert!(tx2.commit().is_ok());
+
+	// tx1 should commit cleanly
+	assert!(tx1.commit().is_ok(), "An unchanged locked read should commit cleanly");
+
+	// Subsequent transactions should be unaffected
+	let mut tx3 = db.transaction(true);
+	tx3.set("after", "value").unwrap();
+	assert!(tx3.commit().is_ok());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn locked_read_on_read_only_transaction_errors() {
+	let db = Database::new();
+
+	// Create initial data
+	let mut tx = db.transaction(true);
+	tx.set("key", "initial").unwrap();
+	tx.commit().unwrap();
+
+	// A read-only transaction cannot lock a key for update
+	let mut read_tx = db.transaction(false);
+	let result = read_tx.get_for_update("key");
+	assert!(
+		matches!(result, Err(Error::TxNotWritable)),
+		"A locked read on a read-only transaction should error, got: {result:?}"
+	);
+	read_tx.cancel().unwrap();
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn locked_read_reads_snapshot_and_own_writes() {
+	let db = Database::new();
+
+	// Create initial data
+	let mut tx = db.transaction(true);
+	tx.set("key", "initial").unwrap();
+	tx.commit().unwrap();
+
+	let mut tx1 = db.transaction(true).with_snapshot_isolation();
+
+	// The locked read sees the snapshot value
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+
+	// The locked read sees this transaction's own writes
+	tx1.set("key", "updated").unwrap();
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("updated")));
+
+	tx1.commit().unwrap();
 }
