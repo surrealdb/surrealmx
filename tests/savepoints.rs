@@ -799,3 +799,75 @@ fn savepoint_rollback_still_detects_read_conflict_from_rolled_back_scope() {
 		"Should detect a read conflict on a key read inside a rolled back scope, got: {result:?}"
 	);
 }
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn savepoint_rollback_keeps_locked_read_armed() {
+	// Locked reads are tracked monotonically like every other read, so a key
+	// locked with `get_for_update` inside a rolled back scope stays armed for
+	// conflict detection — even under plain snapshot isolation, and even when
+	// the rollback leaves the transaction with no surviving writes.
+
+	let db = Database::new();
+
+	// Setup
+	let mut tx_setup = db.transaction(true);
+	tx_setup.set("read", "initial").unwrap();
+	tx_setup.commit().unwrap();
+
+	let mut tx1 = db.transaction(true).with_snapshot_isolation();
+
+	// Lock a key inside a savepoint scope, then roll the scope back
+	tx1.set_savepoint().unwrap();
+	assert_eq!(tx1.get_for_update("read").unwrap(), Some(Bytes::from("initial")));
+	tx1.set("other", "derived").unwrap();
+	tx1.rollback_to_savepoint().unwrap();
+
+	// A concurrent transaction modifies the key that tx1 locked
+	let mut tx2 = db.transaction(true);
+	tx2.set("read", "changed").unwrap();
+	tx2.commit().unwrap();
+
+	// tx1 must abort
+	let result = tx1.commit();
+	assert!(
+		matches!(result, Err(Error::KeyReadConflict)),
+		"Should detect a conflict on a key locked inside a rolled back scope, got: {result:?}"
+	);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn savepoint_rollback_keeps_locked_read_on_discarded_write() {
+	// A key locked with `get_for_update` while it sits in the writeset stays
+	// armed for conflict detection after a savepoint rollback discards the
+	// write, so the lock cannot be silently lost with the rolled back scope.
+
+	let db = Database::new();
+
+	// Setup
+	let mut tx_setup = db.transaction(true);
+	tx_setup.set("read", "initial").unwrap();
+	tx_setup.commit().unwrap();
+
+	let mut tx1 = db.transaction(true).with_snapshot_isolation();
+
+	// Write the key inside a savepoint scope, lock it while it is in the
+	// writeset, then roll the scope back
+	tx1.set_savepoint().unwrap();
+	tx1.set("read", "updated").unwrap();
+	assert_eq!(tx1.get_for_update("read").unwrap(), Some(Bytes::from("updated")));
+	tx1.rollback_to_savepoint().unwrap();
+
+	// A concurrent transaction modifies the key that tx1 locked
+	let mut tx2 = db.transaction(true);
+	tx2.set("read", "changed").unwrap();
+	tx2.commit().unwrap();
+
+	// tx1 must abort
+	let result = tx1.commit();
+	assert!(
+		matches!(result, Err(Error::KeyReadConflict)),
+		"Should detect a conflict on a locked key whose write was rolled back, got: {result:?}"
+	);
+}
