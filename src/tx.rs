@@ -476,8 +476,11 @@ pub(crate) struct TransactionInner {
 	pub(crate) locked: bool,
 	/// The local set of key reads
 	pub(crate) readset: HashSet<Bytes>,
-	/// Bloom filter over the readset for fast conflict pre-checks
-	pub(crate) readset_bloom: Mutex<BloomFilter>,
+	/// Bloom filter over the readset for fast conflict pre-checks. Boxed
+	/// so that the filter's bit array lives off the transaction struct:
+	/// pooled transactions are stored and returned by value, so every
+	/// byte here is copied on each pool checkout and release
+	pub(crate) readset_bloom: Mutex<Box<BloomFilter>>,
 	/// The local set of keys locked with `get_for_update`. Locked keys
 	/// are tracked separately from the readset so they can be validated
 	/// at commit in every isolation mode — even when the writeset is
@@ -485,8 +488,9 @@ pub(crate) struct TransactionInner {
 	/// validated: locking a key never widens the abort surface of the
 	/// transaction's other reads
 	pub(crate) lockset: HashSet<Bytes>,
-	/// Bloom filter over the lockset for fast conflict pre-checks
-	pub(crate) lockset_bloom: Mutex<BloomFilter>,
+	/// Bloom filter over the lockset for fast conflict pre-checks. Boxed
+	/// for the same reason as `readset_bloom`
+	pub(crate) lockset_bloom: Mutex<Box<BloomFilter>>,
 	/// The local set of key scans
 	pub(crate) scanset: SkipMap<Bytes, ArcSwap<Bytes>>,
 	/// The local set of updates and deletes
@@ -567,9 +571,9 @@ impl TransactionInner {
 			version,
 			locked: false,
 			readset: HashSet::new(),
-			readset_bloom: Mutex::new(BloomFilter::new()),
+			readset_bloom: Mutex::new(Box::new(BloomFilter::new())),
 			lockset: HashSet::new(),
-			lockset_bloom: Mutex::new(BloomFilter::new()),
+			lockset_bloom: Mutex::new(Box::new(BloomFilter::new())),
 			scanset: SkipMap::new(),
 			writeset: BTreeMap::new(),
 			database: db,
@@ -596,10 +600,14 @@ impl TransactionInner {
 		self.readset.pin().clear();
 		// Clear the readset bloom filter
 		self.readset_bloom.lock().clear();
-		// Clear the transaction lockset
-		self.lockset.pin().clear();
-		// Clear the lockset bloom filter
-		self.lockset_bloom.lock().clear();
+		// Clear the transaction lockset. `locked` still describes the
+		// previous use of this pooled transaction here, so the clear is
+		// skipped for the transactions that never locked a key and whose
+		// lockset is therefore already empty
+		if self.locked {
+			self.lockset.pin().clear();
+			self.lockset_bloom.lock().clear();
+		}
 		// Clear or completely reset the allocated writeset
 		if self.writeset.len() > threshold {
 			self.writeset = BTreeMap::new();
