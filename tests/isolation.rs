@@ -731,3 +731,43 @@ fn ssi_locked_read_does_not_arm_scan_validation() {
 	// tx1 must commit: no concurrent write touched the locked key
 	assert!(tx1.commit().is_ok(), "A locked read must not arm scan validation without writes");
 }
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[test]
+fn locked_read_does_not_leak_into_a_pooled_reuse() {
+	let db = Database::new();
+
+	// Create initial data
+	let mut tx = db.transaction(true);
+	tx.set("key", "initial").unwrap();
+	tx.commit().unwrap();
+
+	// Lock a key, then drop the transaction without committing or
+	// cancelling it, so it goes back to the pool with a populated lockset
+	{
+		let mut tx1 = db.transaction(true);
+		assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+	}
+
+	// Take that pooled transaction back out. Its snapshot is established
+	// here, before the concurrent write below
+	let mut tx3 = db.transaction(true);
+
+	// A concurrent transaction writes the previously locked key, and
+	// commits after tx3's snapshot
+	let mut tx2 = db.transaction(true);
+	tx2.set("key", "modified").unwrap();
+	assert!(tx2.commit().is_ok());
+
+	// tx3 locks a different key, arming lockset validation for itself
+	assert_eq!(tx3.get_for_update("other").unwrap(), None);
+
+	// tx3 must commit: it never locked "key", so the write to it is not a
+	// conflict. Only a lockset left behind by the previous use of this
+	// pooled transaction could make this abort
+	let result = tx3.commit();
+	assert!(
+		result.is_ok(),
+		"A reused transaction must not inherit a stale lockset, got: {result:?}"
+	);
+}
