@@ -1031,15 +1031,9 @@ impl TransactionInner {
 				}
 			},
 		};
-		// Compute the inline-GC watermark ONCE for this commit, after our
-		// merge version is published and before the apply loop. The
-		// pin-then-read slot protocol makes this safe where it once was
-		// not (the PR #77 race): every current transaction is visible in
-		// the slot scan or forces a skip, and every future transaction
-		// snapshots at or above the clock bound loaded inside — while our
-		// own excluded slot is pinned at our start version, so the
-		// watermark can never sit above the version we push.
-		let watermark = self.database.inline_gc_watermark(self.slot_id);
+		// Compute the inline-GC watermark lazily only if a key actually needs
+		// version reclamation, avoiding reader map scans when newly inserting keys.
+		let mut watermark: Option<Option<u64>> = None;
 		// Keys whose chains could not be trimmed to a single live value,
 		// collected here and tracked in one batch after the apply loop so
 		// no hash-set work happens inside a chain write-lock critical
@@ -1073,35 +1067,32 @@ impl TransactionInner {
 				if entry.is_removed() {
 					continue;
 				}
-				// A no-op when the node was just seeded with this version.
-				versions.push(Version {
-					version,
-					value,
-				});
-				// Reclaim versions no live or future transaction can see,
-				// under the write lock we already hold. When the chain
-				// collapses entirely — the entry visible at the watermark
-				// is a delete tombstone with nothing newer, e.g. our own
-				// delete with no readers below — unlink the node while
-				// still holding the lock, so a concurrent committer
-				// observes `is_removed()` and re-inserts. When the chain
-				// could NOT be trimmed to a single live value (a reader
-				// watermark pins older versions, our newest entry is a
-				// tombstone awaiting collapse, or the watermark scan was
-				// skipped mid-registration), collect the key for tracking
-				// so the background sweep revisits exactly this chain once
-				// the pin clears — the sweep never scans the datastore.
-				match watermark {
-					Some(w) => {
-						if versions.gc_older_versions(w) == 0 {
-							entry.remove();
-						} else if versions.needs_gc() {
-							tracked.push(key.clone());
+				// Check if the node was just seeded with this version
+				let is_new_insert = match *versions {
+					Versions::Single(ref v) if v.version == version => true,
+					_ => false,
+				};
+				if !is_new_insert {
+					// An update or insert into an existing chain
+					versions.push(Version {
+						version,
+						value,
+					});
+					// Compute the inline-GC watermark lazily on demand
+					let w = *watermark
+						.get_or_insert_with(|| self.database.inline_gc_watermark(self.slot_id));
+					match w {
+						Some(w) => {
+							if versions.gc_older_versions(w) == 0 {
+								entry.remove();
+							} else if versions.needs_gc() {
+								tracked.push(key.clone());
+							}
 						}
-					}
-					None => {
-						if versions.needs_gc() {
-							tracked.push(key.clone());
+						None => {
+							if versions.needs_gc() {
+								tracked.push(key.clone());
+							}
 						}
 					}
 				}
