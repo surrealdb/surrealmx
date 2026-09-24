@@ -30,7 +30,7 @@ use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::io::{BufReader, BufWriter, Seek, SeekFrom};
+use std::io::{BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -42,6 +42,121 @@ use web_time::{Duration, Instant};
 pub(crate) struct AsyncAppendOperation {
 	pub version: u64,
 	pub writeset: BTreeMap<ByteSlice, Option<ByteSlice>>,
+}
+
+/// A slot representing a synchronous commit request waiting in a group commit batch.
+struct SyncCommitSlot {
+	data: Vec<u8>,
+	done: AtomicBool,
+	thread: thread::Thread,
+	error: Mutex<Option<PersistenceError>>,
+}
+
+/// Coordinates group commits across concurrent threads for AOL synchronous persistence.
+pub(crate) struct GroupCommitter {
+	queue: Mutex<Vec<Arc<SyncCommitSlot>>>,
+	flushing: AtomicBool,
+	pending_syncs: Arc<AtomicU64>,
+}
+
+thread_local! {
+	static ENCODE_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl GroupCommitter {
+	pub const fn new(pending_syncs: Arc<AtomicU64>) -> Self {
+		Self {
+			queue: Mutex::new(Vec::new()),
+			flushing: AtomicBool::new(false),
+			pending_syncs,
+		}
+	}
+
+	pub fn commit(
+		&self,
+		aol: &Mutex<File>,
+		data: Vec<u8>,
+	) -> Result<(), PersistenceError> {
+		let current_slot = Arc::new(SyncCommitSlot {
+			data,
+			done: AtomicBool::new(false),
+			thread: thread::current(),
+			error: Mutex::new(None),
+		});
+
+		{
+			let mut q = self.queue.lock()?;
+			q.push(Arc::clone(&current_slot));
+		}
+
+		while !current_slot.done.load(Ordering::Acquire) {
+			if self
+				.flushing
+				.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+				.is_ok()
+			{
+				self.run_flusher(aol);
+				break;
+			}
+			if !current_slot.done.load(Ordering::Acquire) {
+				thread::park();
+			}
+		}
+
+		let err = current_slot.error.lock()?.take();
+		if let Some(err) = err {
+			return Err(err);
+		}
+
+		Ok(())
+	}
+
+	fn run_flusher(&self, aol: &Mutex<File>) {
+		loop {
+			let batch: Vec<Arc<SyncCommitSlot>> = {
+				let Ok(mut q) = self.queue.lock() else {
+					self.flushing.store(false, Ordering::Release);
+					break;
+				};
+				if q.is_empty() {
+					self.flushing.store(false, Ordering::Release);
+					break;
+				}
+				std::mem::take(&mut *q)
+			};
+
+			let flush_result = (|| -> Result<(), PersistenceError> {
+				let mut file = aol.lock()?;
+				for slot in &batch {
+					file.write_all(&slot.data)?;
+				}
+				file.flush()?;
+				file.sync_all()?;
+				drop(file);
+				self.pending_syncs.store(0, Ordering::Release);
+				Ok(())
+			})();
+
+			match flush_result {
+				Ok(()) => {
+					for slot in batch {
+						slot.done.store(true, Ordering::Release);
+						slot.thread.unpark();
+					}
+				}
+				Err(err) => {
+					let err_msg = err.to_string();
+					for slot in batch {
+						if let Ok(mut slot_err) = slot.error.lock() {
+							*slot_err = Some(PersistenceError::AppendFailed(err_msg.clone()));
+						}
+						slot.done.store(true, Ordering::Release);
+						slot.thread.unpark();
+					}
+				}
+			}
+		}
+	}
 }
 
 /// Configuration for AOL (Append-Only Log) behavior
@@ -201,6 +316,8 @@ pub struct Persistence {
 	pub(crate) pending_syncs: Arc<AtomicU64>,
 	/// Queue for asynchronous append operations
 	pub(crate) async_append_injector: Arc<Injector<AsyncAppendOperation>>,
+	/// Group commit coordinator for synchronous AOL appends
+	pub(crate) group_committer: Arc<GroupCommitter>,
 }
 
 impl Persistence {
@@ -257,6 +374,8 @@ impl Persistence {
 		if let Some(parent) = snapshot_path.parent() {
 			fs::create_dir_all(parent)?;
 		}
+		let pending_syncs = Arc::new(AtomicU64::new(0));
+		let group_committer = Arc::new(GroupCommitter::new(Arc::clone(&pending_syncs)));
 		// Create the persistence instance
 		let this = Self {
 			inner,
@@ -272,8 +391,9 @@ impl Persistence {
 			snapshot_handle: Arc::new(RwLock::new(None)),
 			appender_handle: Arc::new(RwLock::new(None)),
 			last_fsync: Arc::new(Mutex::new(Instant::now())),
-			pending_syncs: Arc::new(AtomicU64::new(0)),
+			pending_syncs,
 			async_append_injector: Arc::new(Injector::new()),
+			group_committer,
 		};
 		// Load existing data from disk
 		this.load()?;
@@ -772,11 +892,11 @@ impl Persistence {
 				let last_fsync = Arc::clone(&self.last_fsync);
 				// Spawn the background worker thread
 				let handle = thread::spawn(move || {
-					// Set the batch size and timeout
+					// Set the batch size
 					const BATCH_SIZE: usize = 100;
-					const TIMEOUT_MS: u64 = 10;
-					// Initialize the batch vector
+					// Initialize the batch vector and reusable scratch buffer
 					let mut batch = Vec::with_capacity(BATCH_SIZE);
+					let mut scratch = Vec::with_capacity(8192);
 					// Check whether the persistence process is enabled
 					while enabled.load(Ordering::Acquire) {
 						// Check shutdown flag again after waking
@@ -806,8 +926,8 @@ impl Persistence {
 									if !batch.is_empty() {
 										break;
 									}
-									// Park the thread to wait for work
-									thread::park_timeout(Duration::from_millis(TIMEOUT_MS));
+									// Park the thread to wait for work event notification
+									thread::park();
 								}
 							}
 						}
@@ -817,22 +937,20 @@ impl Persistence {
 							let result = (|| -> Result<(), PersistenceError> {
 								// Lock the AOL file for writing
 								if let Ok(mut file) = aol.lock() {
-									// Create a new buffer for the AOL file
-									let mut writer = BufWriter::new(&mut *file);
-									// Write all operations in the batch
+									scratch.clear();
+									// Write all operations in the batch into reusable scratch buffer
 									for op in &batch {
 										for (k, v) in &op.writeset {
 											bincode::serde::encode_into_std_write(
 												(k, op.version, v),
-												&mut writer,
+												&mut scratch,
 												config::standard(),
 											)?;
 										}
 									}
-									// Flush the buffer to the file on the operating system
-									writer.flush()?;
-									// Drop the writer to release the mutable borrow
-									drop(writer);
+									// Write encoded batch in a single operation
+									file.write_all(&scratch)?;
+									file.flush()?;
 									// Handle fsync based on mode
 									match fsync_mode {
 										// Let the operating system handle syncing to disk
@@ -840,7 +958,7 @@ impl Persistence {
 											// No fsync, just increment pending counter
 											pending_syncs.fetch_add(1, Ordering::Release);
 										}
-										// Sync immediately to diskafter every append
+										// Sync immediately to disk after every append
 										FsyncMode::EveryAppend => {
 											// Sync immediately
 											file.sync_all()?;
@@ -910,8 +1028,8 @@ impl Persistence {
 		version: u64,
 		writeset: &BTreeMap<ByteSlice, Option<ByteSlice>>,
 	) -> Result<(), PersistenceError> {
-		// Skip AOL writing if AOL is disabled
-		if self.aol_mode == AolMode::Never {
+		// Skip AOL writing if AOL is disabled or writeset is empty
+		if self.aol_mode == AolMode::Never || writeset.is_empty() {
 			return Ok(());
 		}
 		// AOL is enabled, proceed with append logic
@@ -927,26 +1045,34 @@ impl Persistence {
 				if let Some(handle) = self.appender_handle.read().as_ref() {
 					handle.thread().unpark();
 				}
+				return Ok(());
 			}
 			if self.aol_mode == AolMode::SynchronousOnCommit {
-				// Lock the AOL file for writing. The mutex is deliberately held
-				// past its last file use so that it still covers the
-				// `pending_syncs` store below.
-				let mut file = aol.lock()?;
-				// Create a new buffer for the AOL file
-				let mut writer = BufWriter::new(&mut *file);
-				// Serialize and write each change with version
-				for (k, v) in writeset {
-					bincode::serde::encode_into_std_write(
-						(k, version, v),
-						&mut writer,
-						config::standard(),
-					)?;
+				// Pre-encode the writeset into a reusable thread-local scratch buffer
+				let data = ENCODE_BUF.with(|buf| {
+					let mut b = buf.borrow_mut();
+					b.clear();
+					for (k, v) in writeset {
+						bincode::serde::encode_into_std_write(
+							(k, version, v),
+							&mut *b,
+							config::standard(),
+						)?;
+					}
+					Ok::<_, PersistenceError>(b.clone())
+				})?;
+
+				// If fsync mode is EveryAppend, use the GroupCommitter to coalesce concurrent commits
+				if self.fsync_mode == FsyncMode::EveryAppend {
+					self.group_committer.commit(aol, data)?;
+					return Ok(());
 				}
-				// Flush the buffer to the file on the operating system
-				writer.flush()?;
-				// Drop the writer to release the mutable borrow
-				drop(writer);
+
+				// Lock the AOL file for writing without group fsync
+				let mut file = aol.lock()?;
+				file.write_all(&data)?;
+				file.flush()?;
+
 				// Handle fsync based on mode
 				match self.fsync_mode {
 					// Let the operating system handle syncing to disk
@@ -954,11 +1080,7 @@ impl Persistence {
 						// No fsync, just increment pending counter
 						self.pending_syncs.fetch_add(1, Ordering::Release);
 					}
-					// Sync immediately to diskafter every append
-					FsyncMode::EveryAppend => {
-						// Sync immediately
-						file.sync_all()?;
-					}
+					FsyncMode::EveryAppend => unreachable!(),
 					// Force sync to disk at a specified interval
 					FsyncMode::Interval(duration) => {
 						// Check if we should sync based on time

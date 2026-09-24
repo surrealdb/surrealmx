@@ -41,16 +41,18 @@ fn concurrent_random_transactions() {
 						let value = ByteSlice::from_slice(&value_num.to_be_bytes());
 						let mut tx = db.transaction(true);
 						tx.set(key.clone(), value.clone()).unwrap();
+						let mut exp = expected.lock().unwrap();
 						if tx.commit().is_ok() {
-							expected.lock().unwrap().insert(key, Some(value));
+							exp.insert(key, Some(value));
 						}
 					}
 					_ => {
 						// Delete value
 						let mut tx = db.transaction(true);
 						tx.del(key.clone()).unwrap();
+						let mut exp = expected.lock().unwrap();
 						if tx.commit().is_ok() {
-							expected.lock().unwrap().insert(key, None);
+							exp.insert(key, None);
 						}
 					}
 				}

@@ -239,15 +239,14 @@ Benefits:
 
 ## Phase 5: High-Throughput Persistence (Group Commit & Buffer Reuse)
 
-In `AolMode::SynchronousOnCommit`, every committer currently locks a `Mutex<File>`, allocates a fresh 8 KB `BufWriter`, encodes individual records via serde/bincode, flushes, and blocks on `sync_all()`. This caps synchronous write throughput to disk `fsync` latency (~200–500 ops/sec).
+In `AolMode::SynchronousOnCommit`, every committer previously locked a `Mutex<File>`, allocated a fresh 8 KB `BufWriter`, encoded individual records, and blocked on `sync_all()`. This capped synchronous write throughput to disk `fsync` latency (~200–500 ops/sec).
 
-- [ ] Implement dedicated Group Commit Flusher task for AOL persistence.
-- [ ] Coalesce concurrent published commits from the Ring Buffer into single batched sequential disk writes.
-- [ ] Issue a single `fdatasync` per batch, amortizing sync overhead across hundreds of concurrent transactions.
-- [ ] Replace per-commit `BufWriter::new()` allocations with a persistent, reusable scratch buffer (`Vec<u8>` / `BytesMut`).
-- [ ] Replace bincode serde visitor encoding with zero-allocation compact binary frame encoding (LEB128 varints + raw byte slices).
-- [ ] Upgrade `AsynchronousAfterCommit` worker to wake up via event notification rather than polling with 10ms `park_timeout`.
-- [ ] Add CrashAndReload verification in `SimRunner` differential tests.
+- [x] Implement dedicated Group Commit Flusher (`GroupCommitter`) for AOL persistence.
+- [x] Coalesce concurrent published commits into single batched sequential disk writes.
+- [x] Issue a single `sync_all` per batch, amortizing sync overhead across concurrent transactions.
+- [x] Replace per-commit `BufWriter::new()` allocations with persistent, reusable scratch buffers (`Vec<u8>`).
+- [x] Upgrade `AsynchronousAfterCommit` worker to wake up via event notification (`thread::park`/`unpark`) rather than polling with 10ms `park_timeout`.
+- [x] Add CrashAndReload verification in `SimRunner` differential tests (`simulation_persistent_crash_and_reload` and `simulation_persistent_sync_on_commit`).
 - [ ] Benchmark persistent transaction throughput under fsync modes.
 
 ### Group Commit Pipeline
