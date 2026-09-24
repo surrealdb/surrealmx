@@ -52,6 +52,10 @@ pub struct Commit {
 pub struct Merge {
 	/// The local set of updates and deletes
 	pub(crate) writeset: Arc<BTreeMap<ByteSlice, Option<ByteSlice>>>,
+	/// The smallest key in the writeset (for O(1) point read filtering)
+	pub(crate) min_key: Option<ByteSlice>,
+	/// The largest key in the writeset (for O(1) point read filtering)
+	pub(crate) max_key: Option<ByteSlice>,
 	/// Whether this merge has been fully applied to the datastore.
 	/// Consumed by the in-order retirement advance: merge entries are
 	/// removed from the queue strictly in version order, over the
@@ -60,6 +64,29 @@ pub struct Merge {
 	/// at or below a reader's snapshot — the property that lets reads
 	/// resolve the queue overlay with priority over the chain.
 	pub(crate) applied: AtomicBool,
+}
+
+impl Merge {
+	/// Create a new merge queue entry with pre-computed key bounds
+	pub(crate) fn new(writeset: Arc<BTreeMap<ByteSlice, Option<ByteSlice>>>) -> Self {
+		let min_key = writeset.keys().next().cloned();
+		let max_key = writeset.keys().next_back().cloned();
+		Self {
+			writeset,
+			min_key,
+			max_key,
+			applied: AtomicBool::new(false),
+		}
+	}
+
+	/// Checks if a key may fall within the writeset bounds
+	#[inline(always)]
+	pub(crate) fn may_contain_key(&self, key: &[u8]) -> bool {
+		match (&self.min_key, &self.max_key) {
+			(Some(min), Some(max)) => key >= min.as_slice() && key <= max.as_slice(),
+			_ => false,
+		}
+	}
 }
 
 impl Commit {

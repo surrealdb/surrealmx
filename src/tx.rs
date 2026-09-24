@@ -35,7 +35,7 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::Range;
-use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(debug_assertions)]
 use tracing::debug;
@@ -938,10 +938,7 @@ impl TransactionInner {
 			return Ok(());
 		}
 		// Insert this transaction into the merge queue
-		let (version, entry) = self.atomic_merge(Merge {
-			writeset,
-			applied: AtomicBool::new(false),
-		});
+		let (version, entry) = self.atomic_merge(Merge::new(writeset));
 		// Our merge version is now published, so record it on the
 		// commit-queue entry, disarm the abort guard, and advance the
 		// contiguous completed watermark: readers snapshotting the
@@ -2296,15 +2293,17 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let key = key.as_slice();
-		// Fetch the transaction merge queue range
-		let iter = self.database.transaction_merge_queue.range(..=version);
-		// Check the current entry iteration
-		for entry in iter.rev() {
-			if !entry.is_removed() {
-				// Check for the key in the merge queue
-				if let Some(v) = entry.value().writeset.get(key) {
-					// Return the entry value
-					return v.clone();
+		// If snapshot version has already retired to the datastore,
+		// no in-flight entry <= version can exist in the merge queue.
+		if version > self.database.merge_retire_id.load(Ordering::Acquire)
+			&& !self.database.transaction_merge_queue.is_empty()
+		{
+			let iter = self.database.transaction_merge_queue.range(..=version);
+			for entry in iter.rev() {
+				if !entry.is_removed() && entry.value().may_contain_key(key) {
+					if let Some(v) = entry.value().writeset.get(key) {
+						return v.clone();
+					}
 				}
 			}
 		}
@@ -2323,15 +2322,17 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let key = key.as_slice();
-		// Fetch the transaction merge queue range
-		let iter = self.database.transaction_merge_queue.range(..=version);
-		// Check the current entry iteration
-		for entry in iter.rev() {
-			if !entry.is_removed() {
-				// Check for the key in the merge queue
-				if let Some(v) = entry.value().writeset.get(key) {
-					// Return whether the entry exists
-					return v.is_some();
+		// If snapshot version has already retired to the datastore,
+		// no in-flight entry <= version can exist in the merge queue.
+		if version > self.database.merge_retire_id.load(Ordering::Acquire)
+			&& !self.database.transaction_merge_queue.is_empty()
+		{
+			let iter = self.database.transaction_merge_queue.range(..=version);
+			for entry in iter.rev() {
+				if !entry.is_removed() && entry.value().may_contain_key(key) {
+					if let Some(v) = entry.value().writeset.get(key) {
+						return v.is_some();
+					}
 				}
 			}
 		}
@@ -2355,19 +2356,21 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let key = key.as_slice();
-		// Fetch the transaction merge queue range
-		let iter = self.database.transaction_merge_queue.range(..=version);
-		// Check the current entry iteration
-		for entry in iter.rev() {
-			if !entry.is_removed() {
-				// Check for the key in the merge queue
-				if let Some(v) = entry.value().writeset.get(key) {
-					// Return whether the entry matches
-					return match (chk.as_ref(), v.as_ref()) {
-						(Some(x), Some(y)) => x.as_slice() == y.as_slice(),
-						(None, None) => true,
-						_ => false,
-					};
+		// If snapshot version has already retired to the datastore,
+		// no in-flight entry <= version can exist in the merge queue.
+		if version > self.database.merge_retire_id.load(Ordering::Acquire)
+			&& !self.database.transaction_merge_queue.is_empty()
+		{
+			let iter = self.database.transaction_merge_queue.range(..=version);
+			for entry in iter.rev() {
+				if !entry.is_removed() && entry.value().may_contain_key(key) {
+					if let Some(v) = entry.value().writeset.get(key) {
+						return match (chk.as_ref(), v.as_ref()) {
+							(Some(x), Some(y)) => x.as_slice() == y.as_slice(),
+							(None, None) => true,
+							_ => false,
+						};
+					}
 				}
 			}
 		}

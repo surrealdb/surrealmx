@@ -152,12 +152,12 @@ Over 90% of non-equal key comparisons resolve immediately without dereferencing 
 
 In SurrealMX, `transaction_merge_queue` holds committed transactions whose writes are in the process of being applied to the `datastore`. Currently, point reads unconditionally search this queue.
 
-- [ ] Add watermark check in `fetch_in_datastore`, `exists_in_datastore`, and `equals_in_datastore` to skip `transaction_merge_queue` when `version <= merge_retire_id`.
-- [ ] Add fast-path check `if self.database.transaction_merge_queue.is_empty()` before creating `range(..=version)` iterators.
-- [ ] Add `min_key: Option<ByteSlice>` and `max_key: Option<ByteSlice>` bounds to `Merge`.
-- [ ] Skip individual merge entries in $O(1)$ when `key < min_key || key > max_key`.
-- [ ] Verify correctness with `SimRunner` under intense concurrent writer/reader load.
-- [ ] Benchmark single-key read latency under concurrent writes.
+- [x] Add watermark check in `fetch_in_datastore`, `exists_in_datastore`, and `equals_in_datastore` to skip `transaction_merge_queue` when `version <= merge_retire_id`.
+- [x] Add fast-path check `if self.database.transaction_merge_queue.is_empty()` before creating `range(..=version)` iterators.
+- [x] Add `min_key: Option<ByteSlice>` and `max_key: Option<ByteSlice>` bounds to `Merge`.
+- [x] Skip individual merge entries in $O(1)$ when `key < min_key || key > max_key`.
+- [x] Verify correctness with `SimRunner` under intense concurrent writer/reader load.
+- [x] Benchmark single-key read latency under concurrent writes.
 
 ### Watermark Bypass Logic
 `merge_retire_id` tracks the contiguous retired prefix of the merge queue: every version $\le \text{merge\_retire\_id}$ has been completely applied to the `datastore` and removed from the queue.

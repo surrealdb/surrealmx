@@ -22,7 +22,7 @@ use crate::queue::{Commit, Merge};
 use byteslice::ByteSlice;
 use papaya::HashSet;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 /// A prepared readset conflict scenario for benchmarking
@@ -150,10 +150,7 @@ impl MergeQueueScenario {
 				let key = ByteSlice::from(format!("key_{key_idx:08}"));
 				ws.insert(key, Some(ByteSlice::from("v")));
 			}
-			sources.push(Arc::new(Merge {
-				writeset: Arc::new(ws),
-				applied: AtomicBool::new(false),
-			}));
+			sources.push(Arc::new(Merge::new(Arc::new(ws))));
 		}
 		let beg = ByteSlice::from("key_00000000");
 		let end = ByteSlice::from(format!("key_{total_keys:08}"));
