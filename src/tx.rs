@@ -2412,10 +2412,10 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let key = key.as_slice();
-		// If snapshot version has already retired to the datastore,
+		// If the merge queue is empty or the snapshot version has already retired,
 		// no in-flight entry <= version can exist in the merge queue.
-		if version > self.database.merge_retire_id.load(Ordering::Acquire)
-			&& !self.database.transaction_merge_queue.is_empty()
+		if !self.database.transaction_merge_queue.is_empty()
+			&& version > self.database.merge_retire_id.load(Ordering::Acquire)
 		{
 			let iter = self.database.transaction_merge_queue.range(..=version);
 			for entry in iter.rev() {
@@ -2426,10 +2426,12 @@ impl TransactionInner {
 				}
 			}
 		}
-		// Check the key in the datastore
-		self.database.datastore.get(key).and_then(|e| match e.value().try_read() {
-			Some(guard) => guard.fetch_version(version),
-			None => e.value().read().fetch_version(version),
+		// Check the key in the datastore using ByteSlice::cmp with 4-byte prefix acceleration
+		ByteSlice::with_borrowed(key, |k| {
+			self.database.datastore.get(k).and_then(|e| match e.value().try_read() {
+				Some(guard) => guard.fetch_version(version),
+				None => e.value().read().fetch_version(version),
+			})
 		})
 	}
 
@@ -2441,10 +2443,10 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let key = key.as_slice();
-		// If snapshot version has already retired to the datastore,
+		// If the merge queue is empty or the snapshot version has already retired,
 		// no in-flight entry <= version can exist in the merge queue.
-		if version > self.database.merge_retire_id.load(Ordering::Acquire)
-			&& !self.database.transaction_merge_queue.is_empty()
+		if !self.database.transaction_merge_queue.is_empty()
+			&& version > self.database.merge_retire_id.load(Ordering::Acquire)
 		{
 			let iter = self.database.transaction_merge_queue.range(..=version);
 			for entry in iter.rev() {
@@ -2455,15 +2457,17 @@ impl TransactionInner {
 				}
 			}
 		}
-		// Check the key in the datastore
-		self.database
-			.datastore
-			.get(key)
-			.map(|e| match e.value().try_read() {
-				Some(guard) => guard.exists_version(version),
-				None => e.value().read().exists_version(version),
-			})
-			.is_some_and(|v| v)
+		// Check the key in the datastore using ByteSlice::cmp with 4-byte prefix acceleration
+		ByteSlice::with_borrowed(key, |k| {
+			self.database
+				.datastore
+				.get(k)
+				.map(|e| match e.value().try_read() {
+					Some(guard) => guard.exists_version(version),
+					None => e.value().read().exists_version(version),
+				})
+				.is_some_and(|v| v)
+		})
 	}
 
 	/// Check if a key equals a value in the datastore only
@@ -2475,10 +2479,10 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let key = key.as_slice();
-		// If snapshot version has already retired to the datastore,
+		// If the merge queue is empty or the snapshot version has already retired,
 		// no in-flight entry <= version can exist in the merge queue.
-		if version > self.database.merge_retire_id.load(Ordering::Acquire)
-			&& !self.database.transaction_merge_queue.is_empty()
+		if !self.database.transaction_merge_queue.is_empty()
+			&& version > self.database.merge_retire_id.load(Ordering::Acquire)
 		{
 			let iter = self.database.transaction_merge_queue.range(..=version);
 			for entry in iter.rev() {
@@ -2493,22 +2497,24 @@ impl TransactionInner {
 				}
 			}
 		}
-		// Check the key in the datastore
-		match (
-			chk.as_ref(),
-			self.database
-				.datastore
-				.get(key)
-				.and_then(|e| match e.value().try_read() {
-					Some(guard) => guard.fetch_version(version),
-					None => e.value().read().fetch_version(version),
-				})
-				.as_ref(),
-		) {
-			(Some(x), Some(y)) => x.as_slice() == y.as_slice(),
-			(None, None) => true,
-			_ => false,
-		}
+		// Check the key in the datastore using ByteSlice::cmp with 4-byte prefix acceleration
+		ByteSlice::with_borrowed(key, |k| {
+			match (
+				chk.as_ref(),
+				self.database
+					.datastore
+					.get(k)
+					.and_then(|e| match e.value().try_read() {
+						Some(guard) => guard.fetch_version(version),
+						None => e.value().read().fetch_version(version),
+					})
+					.as_ref(),
+			) {
+				(Some(x), Some(y)) => x.as_slice() == y.as_slice(),
+				(None, None) => true,
+				_ => false,
+			}
+		})
 	}
 
 	/// Atomimcally inserts the transaction into the commit queue
