@@ -254,7 +254,9 @@ impl Database {
 		let val = val.into_bytes();
 
 		let commit_slot = self.inner.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1;
-		let version = self.inner.oracle.timestamp.fetch_add(1, Ordering::SeqCst) + 1;
+		let version = self.inner.oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
+		self.inner.oracle.timestamp.fetch_max(version, Ordering::SeqCst);
+		self.inner.merge_retire_id.fetch_max(version, Ordering::SeqCst);
 
 		let commit = Commit::new_single(key.clone(), version);
 		self.inner.transaction_commit_queue.insert(commit_slot, Arc::new(commit));
@@ -326,7 +328,9 @@ impl Database {
 		let key = key.into_bytes();
 
 		let commit_slot = self.inner.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1;
-		let version = self.inner.oracle.timestamp.fetch_add(1, Ordering::SeqCst) + 1;
+		let version = self.inner.oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
+		self.inner.oracle.timestamp.fetch_max(version, Ordering::SeqCst);
+		self.inner.merge_retire_id.fetch_max(version, Ordering::SeqCst);
 
 		let commit = Commit::new_single(key.clone(), version);
 		self.inner.transaction_commit_queue.insert(commit_slot, Arc::new(commit));
