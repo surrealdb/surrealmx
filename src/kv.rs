@@ -13,14 +13,15 @@
 // limitations under the License.
 
 use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::borrow::Cow;
 
 /// An optimised trait for converting values to bytes only when needed
 pub trait IntoBytes {
 	/// Convert the key to a slice of bytes
 	fn as_slice(&self) -> &[u8];
-	/// Convert the key to an owned bytes slice
-	fn into_bytes(self) -> Bytes;
+	/// Convert the key to an owned byteslice
+	fn into_bytes(self) -> ByteSlice;
 }
 
 impl IntoBytes for &[u8] {
@@ -29,20 +30,38 @@ impl IntoBytes for &[u8] {
 		self
 	}
 
-	fn into_bytes(self) -> Bytes {
-		// Must copy from &[u8]
-		Bytes::copy_from_slice(self)
+	fn into_bytes(self) -> ByteSlice {
+		ByteSlice::from_slice(self)
+	}
+}
+
+impl<const N: usize> IntoBytes for &[u8; N] {
+	fn as_slice(&self) -> &[u8] {
+		&self[..]
+	}
+
+	fn into_bytes(self) -> ByteSlice {
+		ByteSlice::from_slice(&self[..])
+	}
+}
+
+impl<const N: usize> IntoBytes for [u8; N] {
+	fn as_slice(&self) -> &[u8] {
+		&self[..]
+	}
+
+	fn into_bytes(self) -> ByteSlice {
+		ByteSlice::from_slice(&self[..])
 	}
 }
 
 impl IntoBytes for Vec<u8> {
 	fn as_slice(&self) -> &[u8] {
-		self.as_slice()
+		&self[..]
 	}
 
-	fn into_bytes(self) -> Bytes {
-		// Zero-copy from Vec<u8>
-		Bytes::from(self)
+	fn into_bytes(self) -> ByteSlice {
+		ByteSlice::from(self)
 	}
 }
 
@@ -52,9 +71,28 @@ impl IntoBytes for &Vec<u8> {
 		&self[..]
 	}
 
-	fn into_bytes(self) -> Bytes {
-		// Must copy from &Vec<u8>
-		Bytes::copy_from_slice(&self[..])
+	fn into_bytes(self) -> ByteSlice {
+		ByteSlice::from_slice(&self[..])
+	}
+}
+
+impl IntoBytes for ByteSlice {
+	fn as_slice(&self) -> &[u8] {
+		self.as_ref()
+	}
+
+	fn into_bytes(self) -> ByteSlice {
+		self
+	}
+}
+
+impl IntoBytes for &ByteSlice {
+	fn as_slice(&self) -> &[u8] {
+		self.as_ref()
+	}
+
+	fn into_bytes(self) -> ByteSlice {
+		self.clone()
 	}
 }
 
@@ -64,9 +102,8 @@ impl IntoBytes for Bytes {
 		self.as_ref()
 	}
 
-	fn into_bytes(self) -> Bytes {
-		// Zero-copy from self
-		self
+	fn into_bytes(self) -> ByteSlice {
+		ByteSlice::from_bytes(&self)
 	}
 }
 
@@ -76,9 +113,8 @@ impl IntoBytes for &Bytes {
 		self.as_ref()
 	}
 
-	fn into_bytes(self) -> Bytes {
-		// Zero-copy from self
-		self.clone()
+	fn into_bytes(self) -> ByteSlice {
+		ByteSlice::from_bytes(self)
 	}
 }
 
@@ -88,9 +124,8 @@ impl IntoBytes for &str {
 		self.as_bytes()
 	}
 
-	fn into_bytes(self) -> Bytes {
-		// Must copy from &str
-		Bytes::copy_from_slice(self.as_bytes())
+	fn into_bytes(self) -> ByteSlice {
+		ByteSlice::from_slice(self.as_bytes())
 	}
 }
 
@@ -100,9 +135,8 @@ impl IntoBytes for String {
 		self.as_bytes()
 	}
 
-	fn into_bytes(self) -> Bytes {
-		// Zero-copy from String
-		Bytes::from(self.into_bytes())
+	fn into_bytes(self) -> ByteSlice {
+		ByteSlice::from(self.into_bytes())
 	}
 }
 
@@ -112,9 +146,8 @@ impl IntoBytes for &String {
 		self.as_bytes()
 	}
 
-	fn into_bytes(self) -> Bytes {
-		// Must copy from &String
-		Bytes::copy_from_slice(self.as_bytes())
+	fn into_bytes(self) -> ByteSlice {
+		ByteSlice::from_slice(self.as_bytes())
 	}
 }
 
@@ -124,9 +157,8 @@ impl IntoBytes for Box<[u8]> {
 		self.as_ref()
 	}
 
-	fn into_bytes(self) -> Bytes {
-		// Zero-copy from Box<[u8]>
-		Bytes::from(self)
+	fn into_bytes(self) -> ByteSlice {
+		ByteSlice::from_slice(self.as_ref())
 	}
 }
 
@@ -136,11 +168,11 @@ impl IntoBytes for Cow<'_, [u8]> {
 		self.as_ref()
 	}
 
-	fn into_bytes(self) -> Bytes {
+	fn into_bytes(self) -> ByteSlice {
 		// Match the Cow variant
 		match self {
-			Cow::Borrowed(s) => Bytes::copy_from_slice(s),
-			Cow::Owned(v) => Bytes::from(v),
+			Cow::Borrowed(s) => ByteSlice::from_slice(s),
+			Cow::Owned(v) => ByteSlice::from(v),
 		}
 	}
 }

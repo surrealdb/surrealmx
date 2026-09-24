@@ -28,7 +28,7 @@ use crate::versions::Versions;
 #[cfg(debug_assertions)]
 use crate::LOG_TARGET_CONFLICTS;
 use arc_swap::ArcSwap;
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
 use parking_lot::{Mutex, RwLock};
@@ -167,7 +167,7 @@ impl Transaction {
 	}
 
 	/// Fetch a key from the database
-	pub fn get<K>(&self, key: K) -> Result<Option<Bytes>, Error>
+	pub fn get<K>(&self, key: K) -> Result<Option<ByteSlice>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -175,7 +175,7 @@ impl Transaction {
 	}
 
 	/// Fetch multiple keys from the database
-	pub fn getm<K>(&self, keys: Vec<K>) -> Result<Vec<Option<Bytes>>, Error>
+	pub fn getm<K>(&self, keys: Vec<K>) -> Result<Vec<Option<ByteSlice>>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -192,7 +192,7 @@ impl Transaction {
 	/// A conflicting commit fails with [`Error::KeyReadConflict`], and
 	/// calling this method on a read-only transaction fails with
 	/// [`Error::TxNotWritable`]
-	pub fn get_for_update<K>(&mut self, key: K) -> Result<Option<Bytes>, Error>
+	pub fn get_for_update<K>(&mut self, key: K) -> Result<Option<ByteSlice>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -263,7 +263,7 @@ impl Transaction {
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<Vec<Bytes>, Error>
+	) -> Result<Vec<ByteSlice>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -276,7 +276,7 @@ impl Transaction {
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<Vec<Bytes>, Error>
+	) -> Result<Vec<ByteSlice>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -289,7 +289,7 @@ impl Transaction {
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	) -> Result<Vec<(ByteSlice, ByteSlice)>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -302,7 +302,7 @@ impl Transaction {
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	) -> Result<Vec<(ByteSlice, ByteSlice)>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -324,7 +324,7 @@ impl Transaction {
 	) -> Result<usize, Error>
 	where
 		K: IntoBytes,
-		F: FnMut(&Bytes, &Bytes) -> bool,
+		F: FnMut(&ByteSlice, &ByteSlice) -> bool,
 	{
 		self.inner.as_ref().expect(INNER_TAKEN).scan_for_each(rng, skip, limit, f)
 	}
@@ -340,7 +340,7 @@ impl Transaction {
 	) -> Result<usize, Error>
 	where
 		K: IntoBytes,
-		F: FnMut(&Bytes) -> bool,
+		F: FnMut(&ByteSlice) -> bool,
 	{
 		self.inner.as_ref().expect(INNER_TAKEN).keys_for_each(rng, skip, limit, f)
 	}
@@ -351,7 +351,7 @@ impl Transaction {
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-		buf: &mut Vec<(Bytes, Bytes)>,
+		buf: &mut Vec<(ByteSlice, ByteSlice)>,
 	) -> Result<(), Error>
 	where
 		K: IntoBytes,
@@ -365,7 +365,7 @@ impl Transaction {
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-		buf: &mut Vec<Bytes>,
+		buf: &mut Vec<ByteSlice>,
 	) -> Result<(), Error>
 	where
 		K: IntoBytes,
@@ -475,7 +475,7 @@ pub(crate) struct TransactionInner {
 	/// conflict validation at commit even when the writeset is empty
 	pub(crate) locked: bool,
 	/// The local set of key reads
-	pub(crate) readset: HashSet<Bytes>,
+	pub(crate) readset: HashSet<ByteSlice>,
 	/// Bloom filter over the readset for fast conflict pre-checks. Boxed
 	/// so that the filter's bit array lives off the transaction struct:
 	/// pooled transactions are stored and returned by value, so every
@@ -487,14 +487,14 @@ pub(crate) struct TransactionInner {
 	/// empty — without changing when the plain readset and scanset are
 	/// validated: locking a key never widens the abort surface of the
 	/// transaction's other reads
-	pub(crate) lockset: HashSet<Bytes>,
+	pub(crate) lockset: HashSet<ByteSlice>,
 	/// Bloom filter over the lockset for fast conflict pre-checks. Boxed
 	/// for the same reason as `readset_bloom`
 	pub(crate) lockset_bloom: Mutex<Box<BloomFilter>>,
 	/// The local set of key scans
-	pub(crate) scanset: SkipMap<Bytes, ArcSwap<Bytes>>,
+	pub(crate) scanset: SkipMap<ByteSlice, ArcSwap<ByteSlice>>,
 	/// The local set of updates and deletes
-	pub(crate) writeset: BTreeMap<Bytes, Option<Bytes>>,
+	pub(crate) writeset: BTreeMap<ByteSlice, Option<ByteSlice>>,
 	/// The parent database for this transaction
 	pub(crate) database: Arc<Inner>,
 	/// The reference to this transaction's pinned reader slot
@@ -508,7 +508,7 @@ pub(crate) struct TransactionInner {
 	/// tracked monotonically and are never rewound by a rollback, so a
 	/// surviving write can never depend on a read the transaction has
 	/// forgotten, and a locked key can never be silently unlocked
-	savepoint_stack: Vec<BTreeMap<Bytes, Option<Bytes>>>,
+	savepoint_stack: Vec<BTreeMap<ByteSlice, Option<ByteSlice>>>,
 }
 
 /// Register a transaction in the readers map and choose its snapshot.
@@ -757,7 +757,7 @@ impl TransactionInner {
 		// commit queue entry retains only these keys: conflict detection
 		// never reads values, and the entry outlives the merge queue's
 		// value-bearing writeset by the whole cleanup window.
-		let keys: Arc<[Bytes]> = writeset.keys().cloned().collect();
+		let keys: Arc<[ByteSlice]> = writeset.keys().cloned().collect();
 		// Build a bloom filter over the writeset keys
 		let mut writeset_bloom = BloomFilter::new();
 		for key in keys.iter() {
@@ -887,7 +887,9 @@ impl TransactionInner {
 						// A previous transaction has conflicts against scans
 						for k in tx.value().keys.iter() {
 							// Check if this key may be within a scan range
-							if let Some(entry) = self.scanset.range::<Bytes, _>(..=k).next_back() {
+							if let Some(entry) =
+								self.scanset.range::<ByteSlice, _>(..=k).next_back()
+							{
 								// Check if the range includes this key (load from ArcSwap)
 								if **entry.value().load() > *k {
 									// Do not remove the entry here — see the
@@ -978,7 +980,7 @@ impl TransactionInner {
 		// collected here and tracked in one batch after the apply loop so
 		// no hash-set work happens inside a chain write-lock critical
 		// section. Empty in the steady state, so no allocation occurs.
-		let mut tracked: Vec<Bytes> = Vec::new();
+		let mut tracked: Vec<ByteSlice> = Vec::new();
 		// Apply each writeset entry, reclaiming superseded versions
 		// inline while the chain write lock is already held.
 		for (key, value) in entry.writeset.iter() {
@@ -1141,7 +1143,7 @@ impl TransactionInner {
 	}
 
 	/// Fetch a key from the database
-	pub fn get<K>(&self, key: K) -> Result<Option<Bytes>, Error>
+	pub fn get<K>(&self, key: K) -> Result<Option<ByteSlice>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -1179,7 +1181,7 @@ impl TransactionInner {
 	}
 
 	/// Fetch multiple keys from the database
-	pub fn getm<K>(&self, keys: Vec<K>) -> Result<Vec<Option<Bytes>>, Error>
+	pub fn getm<K>(&self, keys: Vec<K>) -> Result<Vec<Option<ByteSlice>>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -1228,7 +1230,7 @@ impl TransactionInner {
 	}
 
 	/// Fetch a key from the database, locking the key for update
-	pub fn get_for_update<K>(&mut self, key: K) -> Result<Option<Bytes>, Error>
+	pub fn get_for_update<K>(&mut self, key: K) -> Result<Option<ByteSlice>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -1435,7 +1437,7 @@ impl TransactionInner {
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<Vec<Bytes>, Error>
+	) -> Result<Vec<ByteSlice>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -1448,7 +1450,7 @@ impl TransactionInner {
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<Vec<Bytes>, Error>
+	) -> Result<Vec<ByteSlice>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -1461,7 +1463,7 @@ impl TransactionInner {
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	) -> Result<Vec<(ByteSlice, ByteSlice)>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -1474,7 +1476,7 @@ impl TransactionInner {
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	) -> Result<Vec<(ByteSlice, ByteSlice)>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -1491,7 +1493,7 @@ impl TransactionInner {
 	) -> Result<usize, Error>
 	where
 		K: IntoBytes,
-		F: FnMut(&Bytes, &Bytes) -> bool,
+		F: FnMut(&ByteSlice, &ByteSlice) -> bool,
 	{
 		// Check to see if transaction is closed
 		if self.done {
@@ -1511,7 +1513,7 @@ impl TransactionInner {
 		// Fast path: no merge queue entries and no transaction writes in this
 		// range — walk the datastore directly.
 		if self.database.transaction_merge_queue.is_empty()
-			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
+			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
 				.database
@@ -1554,7 +1556,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
-			self.writeset.range::<Bytes, _>(beg..end),
+			self.writeset.range::<ByteSlice, _>(beg..end),
 			Direction::Forward,
 			self.version,
 			skip,
@@ -1590,7 +1592,7 @@ impl TransactionInner {
 	) -> Result<usize, Error>
 	where
 		K: IntoBytes,
-		F: FnMut(&Bytes) -> bool,
+		F: FnMut(&ByteSlice) -> bool,
 	{
 		// Check to see if transaction is closed
 		if self.done {
@@ -1610,7 +1612,7 @@ impl TransactionInner {
 		// Fast path: no merge queue entries and no transaction writes in this
 		// range — walk the datastore directly.
 		if self.database.transaction_merge_queue.is_empty()
-			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
+			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
 				.database
@@ -1653,7 +1655,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
-			self.writeset.range::<Bytes, _>(beg..end),
+			self.writeset.range::<ByteSlice, _>(beg..end),
 			Direction::Forward,
 			self.version,
 			skip,
@@ -1684,7 +1686,7 @@ impl TransactionInner {
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-		buf: &mut Vec<(Bytes, Bytes)>,
+		buf: &mut Vec<(ByteSlice, ByteSlice)>,
 	) -> Result<(), Error>
 	where
 		K: IntoBytes,
@@ -1707,7 +1709,7 @@ impl TransactionInner {
 		// Fast path: no merge queue entries and no transaction writes in this
 		// range — walk the datastore directly into the buffer.
 		if self.database.transaction_merge_queue.is_empty()
-			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
+			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
 				.database
@@ -1747,7 +1749,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
-			self.writeset.range::<Bytes, _>(beg..end),
+			self.writeset.range::<ByteSlice, _>(beg..end),
 			Direction::Forward,
 			self.version,
 			skip,
@@ -1775,7 +1777,7 @@ impl TransactionInner {
 		rng: Range<K>,
 		skip: Option<usize>,
 		limit: Option<usize>,
-		buf: &mut Vec<Bytes>,
+		buf: &mut Vec<ByteSlice>,
 	) -> Result<(), Error>
 	where
 		K: IntoBytes,
@@ -1798,7 +1800,7 @@ impl TransactionInner {
 		// Fast path: no merge queue entries and no transaction writes in this
 		// range — walk the datastore directly into the buffer.
 		if self.database.transaction_merge_queue.is_empty()
-			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
+			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
 				.database
@@ -1838,7 +1840,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
-			self.writeset.range::<Bytes, _>(beg..end),
+			self.writeset.range::<ByteSlice, _>(beg..end),
 			Direction::Forward,
 			self.version,
 			skip,
@@ -1864,12 +1866,12 @@ impl TransactionInner {
 	/// 1. `scanset.front()` is the minimum start bound.
 	/// 2. `scanset.back()` is the maximum end bound.
 	/// 3. `range(..=k).next_back()` finds the unique enclosing range.
-	fn track_scan_range(&self, beg: &Bytes, end: &Bytes) {
+	fn track_scan_range(&self, beg: &ByteSlice, end: &ByteSlice) {
 		let mut effective_beg = beg.clone();
 		let mut effective_end = end.clone();
 
 		// Check if a predecessor range covers or overlaps `beg`
-		if let Some(entry) = self.scanset.range::<Bytes, _>(..=beg).next_back() {
+		if let Some(entry) = self.scanset.range::<ByteSlice, _>(..=beg).next_back() {
 			let prev_end = entry.value().load();
 			if **prev_end >= *beg {
 				// Overlaps with predecessor
@@ -1885,7 +1887,7 @@ impl TransactionInner {
 		// Clean up and merge any subsequent ranges that overlap [effective_beg, effective_end]
 		// Any range starting <= effective_end overlaps with us
 		let overlapping: Vec<_> =
-			self.scanset.range::<Bytes, _>(&effective_beg..=&effective_end).collect();
+			self.scanset.range::<ByteSlice, _>(&effective_beg..=&effective_end).collect();
 
 		for entry in overlapping {
 			let entry_end = entry.value().load();
@@ -1944,7 +1946,7 @@ impl TransactionInner {
 		// uncommitted writes in this range, the merge iterator has nothing to
 		// merge — read straight from the datastore range.
 		if self.database.transaction_merge_queue.is_empty()
-			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
+			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
 				.database
@@ -1992,7 +1994,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
-			self.writeset.range::<Bytes, _>(beg..end),
+			self.writeset.range::<ByteSlice, _>(beg..end),
 			direction,
 			version,
 			skip,
@@ -2020,7 +2022,7 @@ impl TransactionInner {
 		limit: Option<usize>,
 		direction: Direction,
 		version: u64,
-	) -> Result<Vec<Bytes>, Error>
+	) -> Result<Vec<ByteSlice>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -2048,7 +2050,7 @@ impl TransactionInner {
 		// Fast path: no merge queue entries and no transaction writes in this
 		// range — read keys straight from the datastore range.
 		if self.database.transaction_merge_queue.is_empty()
-			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
+			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
 				.database
@@ -2096,7 +2098,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
-			self.writeset.range::<Bytes, _>(beg..end),
+			self.writeset.range::<ByteSlice, _>(beg..end),
 			direction,
 			version,
 			skip,
@@ -2124,7 +2126,7 @@ impl TransactionInner {
 		limit: Option<usize>,
 		direction: Direction,
 		version: u64,
-	) -> Result<Vec<(Bytes, Bytes)>, Error>
+	) -> Result<Vec<(ByteSlice, ByteSlice)>, Error>
 	where
 		K: IntoBytes,
 	{
@@ -2152,7 +2154,7 @@ impl TransactionInner {
 		// Fast path: no merge queue entries and no transaction writes in this
 		// range — read key/value pairs straight from the datastore range.
 		if self.database.transaction_merge_queue.is_empty()
-			&& self.writeset.range::<Bytes, _>(beg..end).next().is_none()
+			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
 				.database
@@ -2200,7 +2202,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
-			self.writeset.range::<Bytes, _>(beg..end),
+			self.writeset.range::<ByteSlice, _>(beg..end),
 			direction,
 			version,
 			skip,
@@ -2288,7 +2290,7 @@ impl TransactionInner {
 
 	/// Fetch a key if it exists in the datastore only
 	#[inline(always)]
-	fn fetch_in_datastore<K>(&self, key: K, version: u64) -> Option<Bytes>
+	fn fetch_in_datastore<K>(&self, key: K, version: u64) -> Option<ByteSlice>
 	where
 		K: IntoBytes,
 	{
@@ -2362,7 +2364,7 @@ impl TransactionInner {
 				if let Some(v) = entry.value().writeset.get(key) {
 					// Return whether the entry matches
 					return match (chk.as_ref(), v.as_ref()) {
-						(Some(x), Some(y)) => x.as_slice() == y,
+						(Some(x), Some(y)) => x.as_slice() == y.as_slice(),
 						(None, None) => true,
 						_ => false,
 					};
@@ -2381,7 +2383,7 @@ impl TransactionInner {
 				})
 				.as_ref(),
 		) {
-			(Some(x), Some(y)) => x.as_slice() == y,
+			(Some(x), Some(y)) => x.as_slice() == y.as_slice(),
 			(None, None) => true,
 			_ => false,
 		}

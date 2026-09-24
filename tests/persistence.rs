@@ -1,6 +1,6 @@
 #![cfg(not(target_arch = "wasm32"))]
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::time::Duration;
 use surrealmx::{
 	AolMode, CompressionMode, Database, DatabaseOptions, FsyncMode, PersistenceOptions,
@@ -46,8 +46,8 @@ fn test_aol_synchronous_basic() {
 	{
 		let mut tx = db.transaction(false);
 		assert_eq!(tx.get("key1").unwrap(), None); // Should be deleted
-		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
-		assert_eq!(tx.get("key3").unwrap(), Some(Bytes::from("value3")));
+		assert_eq!(tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
+		assert_eq!(tx.get("key3").unwrap(), Some(ByteSlice::from("value3")));
 		tx.cancel().unwrap();
 	}
 
@@ -103,8 +103,8 @@ fn test_aol_asynchronous_basic() {
 	{
 		let mut tx = db.transaction(false);
 		assert_eq!(tx.get("key1").unwrap(), None); // Should be deleted
-		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
-		assert_eq!(tx.get("key3").unwrap(), Some(Bytes::from("value3")));
+		assert_eq!(tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
+		assert_eq!(tx.get("key3").unwrap(), Some(ByteSlice::from("value3")));
 		tx.cancel().unwrap();
 	}
 
@@ -164,9 +164,9 @@ fn test_aol_recovery() {
 
 		// Verify data was recovered from AOL
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("recover_key1").unwrap(), Some(Bytes::from("updated_value1")));
+		assert_eq!(tx.get("recover_key1").unwrap(), Some(ByteSlice::from("updated_value1")));
 		assert_eq!(tx.get("recover_key2").unwrap(), None); // Should be deleted
-		assert_eq!(tx.get("recover_key3").unwrap(), Some(Bytes::from("recover_value3")));
+		assert_eq!(tx.get("recover_key3").unwrap(), Some(ByteSlice::from("recover_value3")));
 		tx.cancel().unwrap();
 	}
 }
@@ -298,8 +298,8 @@ fn test_snapshot_only_persistence_basic() {
 	// Verify data is accessible in current session
 	{
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
-		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+		assert_eq!(tx.get("key1").unwrap(), Some(ByteSlice::from("value1")));
+		assert_eq!(tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
 		tx.cancel().unwrap();
 	}
 
@@ -572,10 +572,13 @@ fn test_aol_snapshot_with_truncation() {
 		for i in 0..10 {
 			assert_eq!(
 				tx.get(format!("key_{i}")).unwrap(),
-				Some(Bytes::from(format!("value_{i}")))
+				Some(ByteSlice::from(format!("value_{i}")))
 			);
 		}
-		assert_eq!(tx.get("post_snapshot_key").unwrap(), Some(Bytes::from("post_snapshot_value")));
+		assert_eq!(
+			tx.get("post_snapshot_key").unwrap(),
+			Some(ByteSlice::from("post_snapshot_value"))
+		);
 		tx.cancel().unwrap();
 	}
 }
@@ -637,8 +640,8 @@ fn test_combined_recovery_complex() {
 			Some(b"final_phase1_value1" as &[u8])
 		);
 		assert_eq!(tx.get("phase1_key2").unwrap(), None); // Should be deleted
-		assert_eq!(tx.get("phase2_key1").unwrap(), Some(Bytes::from("phase2_value1")));
-		assert_eq!(tx.get("phase3_key1").unwrap(), Some(Bytes::from("phase3_value1")));
+		assert_eq!(tx.get("phase2_key1").unwrap(), Some(ByteSlice::from("phase2_value1")));
+		assert_eq!(tx.get("phase3_key1").unwrap(), Some(ByteSlice::from("phase3_value1")));
 		tx.cancel().unwrap();
 	}
 }
@@ -780,7 +783,7 @@ fn test_snapshot_persists_only_latest_version() {
 	let mut reader = std::io::BufReader::new(file);
 	let mut entries = Vec::new();
 	loop {
-		type Entry = (Bytes, Vec<(u64, Option<Bytes>)>);
+		type Entry = (ByteSlice, Vec<(u64, Option<ByteSlice>)>);
 		let result: Result<Entry, _> =
 			bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard());
 		match result {
@@ -808,7 +811,7 @@ fn test_snapshot_persists_only_latest_version() {
 		.with_compression(CompressionMode::None);
 	let db = Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap();
 	let mut tx = db.transaction(false);
-	assert_eq!(tx.get("alpha").unwrap(), Some(Bytes::from("v3")));
+	assert_eq!(tx.get("alpha").unwrap(), Some(ByteSlice::from("v3")));
 	assert_eq!(tx.get("beta").unwrap(), None);
 	tx.cancel().unwrap();
 }
@@ -849,17 +852,16 @@ fn test_restart_seeds_version_counter() {
 		tx.set("key", "d").unwrap();
 		tx.commit().unwrap();
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("d")));
+		assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("d")));
 		tx.cancel().unwrap();
 	}
 
-	// Run 3: replaying the full log after another restart must still
-	// surface the run-2 write as the latest value
+	// Reopen again and write a fifth version
 	{
 		let db =
 			Database::new_with_persistence(DatabaseOptions::default(), persistence_opts()).unwrap();
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("d")));
+		assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("d")));
 		tx.cancel().unwrap();
 	}
 }
@@ -879,16 +881,16 @@ fn test_loads_multiversion_snapshot_files() {
 		use std::io::Write as _;
 		let file = std::fs::File::create(temp_path.join("snapshot.bin")).unwrap();
 		let mut writer = std::io::BufWriter::new(file);
-		let multi: (Bytes, Vec<(u64, Option<Bytes>)>) = (
-			Bytes::from("multi"),
+		let multi: (ByteSlice, Vec<(u64, Option<ByteSlice>)>) = (
+			ByteSlice::from("multi"),
 			vec![
-				(1, Some(Bytes::from("v1"))),
-				(2, Some(Bytes::from("v2"))),
-				(3, Some(Bytes::from("v3"))),
+				(1, Some(ByteSlice::from("v1"))),
+				(2, Some(ByteSlice::from("v2"))),
+				(3, Some(ByteSlice::from("v3"))),
 			],
 		);
-		let gone: (Bytes, Vec<(u64, Option<Bytes>)>) =
-			(Bytes::from("gone"), vec![(1, Some(Bytes::from("x"))), (2, None)]);
+		let gone: (ByteSlice, Vec<(u64, Option<ByteSlice>)>) =
+			(ByteSlice::from("gone"), vec![(1, Some(ByteSlice::from("x"))), (2, None)]);
 		bincode::serde::encode_into_std_write(&multi, &mut writer, bincode::config::standard())
 			.unwrap();
 		bincode::serde::encode_into_std_write(&gone, &mut writer, bincode::config::standard())
@@ -903,7 +905,7 @@ fn test_loads_multiversion_snapshot_files() {
 		.with_compression(CompressionMode::None);
 	let db = Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap();
 	let mut tx = db.transaction(false);
-	assert_eq!(tx.get("multi").unwrap(), Some(Bytes::from("v3")));
+	assert_eq!(tx.get("multi").unwrap(), Some(ByteSlice::from("v3")));
 	assert_eq!(tx.get("gone").unwrap(), None);
 	tx.cancel().unwrap();
 }

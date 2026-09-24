@@ -18,7 +18,7 @@
 //! `release_savepoint()` behavior including nested savepoints, conflict
 //! detection and edge cases.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use surrealmx::{Database, Error};
 
 #[cfg(target_arch = "wasm32")]
@@ -47,27 +47,31 @@ fn savepoint_basic_rollback() {
 	tx.set("key3", "value3").unwrap();
 
 	// Verify changes are visible
-	assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("modified1")));
-	assert_eq!(tx.get("key3").unwrap(), Some(Bytes::from("value3")));
+	assert_eq!(tx.get("key1").unwrap(), Some(ByteSlice::from("modified1")));
+	assert_eq!(tx.get("key3").unwrap(), Some(ByteSlice::from("value3")));
 
 	// Rollback to savepoint
 	tx.rollback_to_savepoint().unwrap();
 
-	// Verify rollback - key1 should be original, key3 should not exist
+	// Verify rollback restored original state
 	assert_eq!(
 		tx.get("key1").unwrap(),
-		Some(Bytes::from("value1")),
+		Some(ByteSlice::from("value1")),
 		"key1 should be restored to original value"
 	);
-	assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")), "key2 should be unchanged");
+	assert_eq!(
+		tx.get("key2").unwrap(),
+		Some(ByteSlice::from("value2")),
+		"key2 should be unchanged"
+	);
 	assert_eq!(tx.get("key3").unwrap(), None, "key3 should not exist after rollback");
 
-	// Commit and verify final state
 	tx.commit().unwrap();
 
+	// Verify committed state
 	let mut verify_tx = db.transaction(false);
-	assert_eq!(verify_tx.get("key1").unwrap(), Some(Bytes::from("value1")));
-	assert_eq!(verify_tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+	assert_eq!(verify_tx.get("key1").unwrap(), Some(ByteSlice::from("value1")));
+	assert_eq!(verify_tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
 	assert_eq!(verify_tx.get("key3").unwrap(), None);
 	verify_tx.cancel().unwrap();
 }
@@ -98,7 +102,7 @@ fn savepoint_rollback_restores_deleted_keys() {
 	// Key should be restored
 	assert_eq!(
 		tx.get("delete_me").unwrap(),
-		Some(Bytes::from("will_be_deleted")),
+		Some(ByteSlice::from("will_be_deleted")),
 		"Deleted key should be restored after rollback"
 	);
 
@@ -106,7 +110,7 @@ fn savepoint_rollback_restores_deleted_keys() {
 
 	// Verify persistence
 	let mut verify = db.transaction(false);
-	assert_eq!(verify.get("delete_me").unwrap(), Some(Bytes::from("will_be_deleted")));
+	assert_eq!(verify.get("delete_me").unwrap(), Some(ByteSlice::from("will_be_deleted")));
 	verify.cancel().unwrap();
 }
 
@@ -140,31 +144,31 @@ fn savepoint_nested_multiple_levels() {
 	tx.set("added_at_3", "value3").unwrap();
 
 	// Verify we're at level 3
-	assert_eq!(tx.get("level").unwrap(), Some(Bytes::from("3")));
+	assert_eq!(tx.get("level").unwrap(), Some(ByteSlice::from("3")));
 	assert!(tx.get("added_at_3").unwrap().is_some());
 
 	// Rollback to level 2
 	tx.rollback_to_savepoint().unwrap();
-	assert_eq!(tx.get("level").unwrap(), Some(Bytes::from("2")));
+	assert_eq!(tx.get("level").unwrap(), Some(ByteSlice::from("2")));
 	assert!(tx.get("added_at_3").unwrap().is_none());
 	assert!(tx.get("added_at_2").unwrap().is_some());
 
 	// Rollback to level 1
 	tx.rollback_to_savepoint().unwrap();
-	assert_eq!(tx.get("level").unwrap(), Some(Bytes::from("1")));
+	assert_eq!(tx.get("level").unwrap(), Some(ByteSlice::from("1")));
 	assert!(tx.get("added_at_2").unwrap().is_none());
 	assert!(tx.get("added_at_1").unwrap().is_some());
 
 	// Rollback to level 0
 	tx.rollback_to_savepoint().unwrap();
-	assert_eq!(tx.get("level").unwrap(), Some(Bytes::from("0")));
+	assert_eq!(tx.get("level").unwrap(), Some(ByteSlice::from("0")));
 	assert!(tx.get("added_at_1").unwrap().is_none());
 
 	tx.commit().unwrap();
 
 	// Verify final state
 	let mut verify = db.transaction(false);
-	assert_eq!(verify.get("level").unwrap(), Some(Bytes::from("0")));
+	assert_eq!(verify.get("level").unwrap(), Some(ByteSlice::from("0")));
 	verify.cancel().unwrap();
 }
 
@@ -202,9 +206,9 @@ fn savepoint_partial_nested_rollback() {
 	tx.commit().unwrap();
 
 	let mut verify = db.transaction(false);
-	assert_eq!(verify.get("base").unwrap(), Some(Bytes::from("base_value")));
-	assert_eq!(verify.get("sp1_key").unwrap(), Some(Bytes::from("sp1_value")));
-	assert_eq!(verify.get("sp2_key").unwrap(), Some(Bytes::from("sp2_value")));
+	assert_eq!(verify.get("base").unwrap(), Some(ByteSlice::from("base_value")));
+	assert_eq!(verify.get("sp1_key").unwrap(), Some(ByteSlice::from("sp1_value")));
+	assert_eq!(verify.get("sp2_key").unwrap(), Some(ByteSlice::from("sp2_value")));
 	assert!(verify.get("sp3_key").unwrap().is_none());
 	verify.cancel().unwrap();
 }
@@ -275,8 +279,8 @@ fn savepoint_modify_after_rollback_then_commit() {
 	tx.commit().unwrap();
 
 	let mut verify = db.transaction(false);
-	assert_eq!(verify.get("original").unwrap(), Some(Bytes::from("modified")));
-	assert_eq!(verify.get("new_key").unwrap(), Some(Bytes::from("new_value")));
+	assert_eq!(verify.get("original").unwrap(), Some(ByteSlice::from("modified")));
+	assert_eq!(verify.get("new_key").unwrap(), Some(ByteSlice::from("new_value")));
 	assert!(verify.get("temp").unwrap().is_none());
 	verify.cancel().unwrap();
 }
@@ -296,12 +300,12 @@ fn savepoint_set_same_key_multiple_times() {
 	tx.set("counter", "2").unwrap();
 	tx.set("counter", "3").unwrap();
 
-	assert_eq!(tx.get("counter").unwrap(), Some(Bytes::from("3")));
+	assert_eq!(tx.get("counter").unwrap(), Some(ByteSlice::from("3")));
 
 	tx.rollback_to_savepoint().unwrap();
 
 	// Should go back to "0", not any intermediate value
-	assert_eq!(tx.get("counter").unwrap(), Some(Bytes::from("0")));
+	assert_eq!(tx.get("counter").unwrap(), Some(ByteSlice::from("0")));
 
 	tx.commit().unwrap();
 }
@@ -322,12 +326,12 @@ fn savepoint_empty_savepoint_rollback() {
 	tx.rollback_to_savepoint().unwrap();
 
 	// Original data should still be there
-	assert_eq!(tx.get("before").unwrap(), Some(Bytes::from("value")));
+	assert_eq!(tx.get("before").unwrap(), Some(ByteSlice::from("value")));
 
 	tx.commit().unwrap();
 
 	let mut verify = db.transaction(false);
-	assert_eq!(verify.get("before").unwrap(), Some(Bytes::from("value")));
+	assert_eq!(verify.get("before").unwrap(), Some(ByteSlice::from("value")));
 	verify.cancel().unwrap();
 }
 
@@ -378,12 +382,12 @@ fn savepoint_delete_then_recreate_key() {
 	tx.del("key").unwrap();
 	tx.set("key", "recreated").unwrap();
 
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("recreated")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("recreated")));
 
 	tx.rollback_to_savepoint().unwrap();
 
 	// Should be back to original
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("original")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("original")));
 
 	tx.commit().unwrap();
 }
@@ -441,7 +445,7 @@ fn savepoint_preserves_existing_data() {
 	let mut tx = db.transaction(true);
 
 	// Read existing data
-	assert_eq!(tx.get("existing1").unwrap(), Some(Bytes::from("value1")));
+	assert_eq!(tx.get("existing1").unwrap(), Some(ByteSlice::from("value1")));
 
 	tx.set_savepoint().unwrap();
 
@@ -452,8 +456,8 @@ fn savepoint_preserves_existing_data() {
 	tx.rollback_to_savepoint().unwrap();
 
 	// Existing data should still be visible (from database)
-	assert_eq!(tx.get("existing1").unwrap(), Some(Bytes::from("value1")));
-	assert_eq!(tx.get("existing2").unwrap(), Some(Bytes::from("value2")));
+	assert_eq!(tx.get("existing1").unwrap(), Some(ByteSlice::from("value1")));
+	assert_eq!(tx.get("existing2").unwrap(), Some(ByteSlice::from("value2")));
 	assert!(tx.get("new_key").unwrap().is_none());
 
 	tx.commit().unwrap();
@@ -474,7 +478,7 @@ fn savepoint_with_conditional_operations() {
 	assert!(result.is_err());
 
 	// Key should still have initial value
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("initial")));
 
 	// Modify with set
 	tx.set("key", "modified").unwrap();
@@ -482,7 +486,7 @@ fn savepoint_with_conditional_operations() {
 	tx.rollback_to_savepoint().unwrap();
 
 	// Should be back to initial
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("initial")));
 
 	tx.commit().unwrap();
 }
@@ -506,10 +510,10 @@ fn savepoint_release_keeps_writes() {
 	tx.release_savepoint().unwrap();
 
 	// Both writes should still be visible
-	assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
+	assert_eq!(tx.get("key1").unwrap(), Some(ByteSlice::from("value1")));
 	assert_eq!(
 		tx.get("key2").unwrap(),
-		Some(Bytes::from("value2")),
+		Some(ByteSlice::from("value2")),
 		"a released scope's write should be kept"
 	);
 
@@ -517,8 +521,8 @@ fn savepoint_release_keeps_writes() {
 
 	// And both should be persisted
 	let mut verify_tx = db.transaction(false);
-	assert_eq!(verify_tx.get("key1").unwrap(), Some(Bytes::from("value1")));
-	assert_eq!(verify_tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+	assert_eq!(verify_tx.get("key1").unwrap(), Some(ByteSlice::from("value1")));
+	assert_eq!(verify_tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
 	verify_tx.cancel().unwrap();
 }
 
@@ -539,7 +543,7 @@ fn savepoint_release_then_rollback_goes_to_enclosing_savepoint() {
 
 	// Releasing the inner savepoint keeps its write
 	tx.release_savepoint().unwrap();
-	assert_eq!(tx.get("inner").unwrap(), Some(Bytes::from("value")));
+	assert_eq!(tx.get("inner").unwrap(), Some(ByteSlice::from("value")));
 
 	// A single rollback unwinds past the released savepoint to the enclosing
 	// one, so the released scope's write is undone along with the outer one
@@ -583,8 +587,8 @@ fn savepoint_release_all_then_commit() {
 
 	// Everything should be persisted
 	let mut verify_tx = db.transaction(false);
-	assert_eq!(verify_tx.get("key1").unwrap(), Some(Bytes::from("value1")));
-	assert_eq!(verify_tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+	assert_eq!(verify_tx.get("key1").unwrap(), Some(ByteSlice::from("value1")));
+	assert_eq!(verify_tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
 	verify_tx.cancel().unwrap();
 }
 
@@ -610,7 +614,7 @@ fn savepoint_release_and_rollback_interleaved() {
 	tx.commit().unwrap();
 
 	let mut verify_tx = db.transaction(false);
-	assert_eq!(verify_tx.get("keep").unwrap(), Some(Bytes::from("value")));
+	assert_eq!(verify_tx.get("keep").unwrap(), Some(ByteSlice::from("value")));
 	assert_eq!(verify_tx.get("discard").unwrap(), None);
 	verify_tx.cancel().unwrap();
 }
@@ -638,7 +642,7 @@ fn savepoint_release_many_cycles() {
 	for i in 0..num_cycles {
 		assert_eq!(
 			verify_tx.get(format!("key_{i}")).unwrap(),
-			Some(Bytes::from(format!("value_{i}"))),
+			Some(ByteSlice::from(format!("value_{i}"))),
 			"key_{i} should be committed"
 		);
 	}
@@ -707,7 +711,7 @@ fn savepoint_release_still_detects_read_conflict() {
 
 	// Read a key inside a savepoint scope, then release the scope
 	tx1.set_savepoint().unwrap();
-	assert_eq!(tx1.get("read").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get("read").unwrap(), Some(ByteSlice::from("initial")));
 	tx1.release_savepoint().unwrap();
 
 	// Write elsewhere, based on what was read
@@ -744,7 +748,7 @@ fn savepoint_release_without_conflict_commits() {
 
 	// Read a key inside a savepoint scope, then release the scope
 	tx1.set_savepoint().unwrap();
-	assert_eq!(tx1.get("read").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get("read").unwrap(), Some(ByteSlice::from("initial")));
 	tx1.release_savepoint().unwrap();
 
 	tx1.set("other", "derived").unwrap();
@@ -758,7 +762,7 @@ fn savepoint_release_without_conflict_commits() {
 	tx1.commit().unwrap();
 
 	let mut verify_tx = db.transaction(false);
-	assert_eq!(verify_tx.get("other").unwrap(), Some(Bytes::from("derived")));
+	assert_eq!(verify_tx.get("other").unwrap(), Some(ByteSlice::from("derived")));
 	verify_tx.cancel().unwrap();
 }
 
@@ -781,7 +785,7 @@ fn savepoint_rollback_still_detects_read_conflict_from_rolled_back_scope() {
 
 	// Read a key inside a savepoint scope, then roll the scope back
 	tx1.set_savepoint().unwrap();
-	assert_eq!(tx1.get("read").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get("read").unwrap(), Some(ByteSlice::from("initial")));
 	tx1.rollback_to_savepoint().unwrap();
 
 	// Write elsewhere, based on what was read
@@ -819,7 +823,7 @@ fn savepoint_rollback_keeps_locked_read_armed() {
 
 	// Lock a key inside a savepoint scope, then roll the scope back
 	tx1.set_savepoint().unwrap();
-	assert_eq!(tx1.get_for_update("read").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get_for_update("read").unwrap(), Some(ByteSlice::from("initial")));
 	tx1.set("other", "derived").unwrap();
 	tx1.rollback_to_savepoint().unwrap();
 
@@ -856,7 +860,7 @@ fn savepoint_rollback_keeps_locked_read_on_discarded_write() {
 	// writeset, then roll the scope back
 	tx1.set_savepoint().unwrap();
 	tx1.set("read", "updated").unwrap();
-	assert_eq!(tx1.get_for_update("read").unwrap(), Some(Bytes::from("updated")));
+	assert_eq!(tx1.get_for_update("read").unwrap(), Some(ByteSlice::from("updated")));
 	tx1.rollback_to_savepoint().unwrap();
 
 	// A concurrent transaction modifies the key that tx1 locked

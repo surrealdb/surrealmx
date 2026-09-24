@@ -18,7 +18,7 @@
 //! Tests crash recovery scenarios including partial writes, corruption,
 //! and concurrent recovery attempts.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::fs;
 use std::io::Write;
 use surrealmx::{AolMode, Database, DatabaseOptions, PersistenceOptions, SnapshotMode};
@@ -166,7 +166,7 @@ fn recovery_empty_database() {
 
 		// Verify write succeeded
 		let tx = db.transaction(false);
-		assert_eq!(tx.get("new_key").unwrap(), Some(Bytes::from("new_value")));
+		assert_eq!(tx.get("new_key").unwrap(), Some(ByteSlice::from("new_value")));
 	}
 }
 
@@ -214,7 +214,7 @@ fn recovery_preserves_delete_state() {
 		// Kept key should exist
 		assert_eq!(
 			tx.get("keep_key").unwrap(),
-			Some(Bytes::from("keep_value")),
+			Some(ByteSlice::from("keep_value")),
 			"Kept key should be recovered"
 		);
 
@@ -296,10 +296,11 @@ fn concurrent_recovery_attempts() {
 	// If any succeeded, verify data integrity
 	if let Ok(db) = result1 {
 		let tx = db.transaction(false);
-		assert_eq!(tx.get("shared_key").unwrap(), Some(Bytes::from("shared_value")));
+		assert_eq!(tx.get("shared_key").unwrap(), Some(ByteSlice::from("shared_value")));
 	}
+
 	if let Ok(db) = result2 {
 		let tx = db.transaction(false);
-		assert_eq!(tx.get("shared_key").unwrap(), Some(Bytes::from("shared_value")));
+		assert_eq!(tx.get("shared_key").unwrap(), Some(ByteSlice::from("shared_value")));
 	}
 }

@@ -100,6 +100,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "byteslice"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "serde",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -769,6 +777,7 @@ dependencies = [
  "arc-swap",
  "bincode",
  "bytes",
+ "byteslice",
  "criterion",
  "crossbeam-deque",
  "crossbeam-queue",

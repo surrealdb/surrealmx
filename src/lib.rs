@@ -51,6 +51,8 @@ pub mod bench_internals;
 
 #[doc(inline)]
 pub use bytes::Bytes;
+#[doc(inline)]
+pub use byteslice::ByteSlice;
 
 #[doc(inline)]
 pub use self::cursor::*;

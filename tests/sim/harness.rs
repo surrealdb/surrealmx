@@ -14,7 +14,7 @@
 
 //! Deterministic Simulation & Differential Testing Runner.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::collections::HashMap;
 use surrealmx::{Database, DatabaseOptions, Transaction};
 
@@ -394,7 +394,7 @@ impl SimRunner {
 				}
 				let skip_n = skip.unwrap_or(0);
 				let limit_n = limit.unwrap_or(usize::MAX);
-				let model_res: Vec<(Bytes, Bytes)> =
+				let model_res: Vec<(ByteSlice, ByteSlice)> =
 					model_res.into_iter().skip(skip_n).take(limit_n).collect();
 
 				assert_eq!(

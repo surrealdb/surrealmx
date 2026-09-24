@@ -18,7 +18,7 @@
 //! Tests delete operations under concurrent access, including racing
 //! deletes, delete vs update conflicts, and phantom delete detection.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use surrealmx::Database;
@@ -118,7 +118,7 @@ fn delete_racing_with_update() {
 	let final_value = tx.get("key").unwrap();
 	// Either key is deleted (None) or updated (Some("updated"))
 	assert!(
-		final_value.is_none() || final_value == Some(Bytes::from("updated")),
+		final_value.is_none() || final_value == Some(ByteSlice::from("updated")),
 		"Final state should be either deleted or updated"
 	);
 }
@@ -290,7 +290,7 @@ fn ssi_delete_read_conflict() {
 	// Start tx1 and read the key
 	let mut tx1 = db.transaction(true).with_serializable_snapshot_isolation();
 	let value1 = tx1.get("key").unwrap();
-	assert_eq!(value1, Some(Bytes::from("value")));
+	assert_eq!(value1, Some(ByteSlice::from("value")));
 
 	// Start tx2 and delete the same key
 	let mut tx2 = db.transaction(true).with_serializable_snapshot_isolation();

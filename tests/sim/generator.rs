@@ -14,7 +14,7 @@
 
 //! Deterministic PRNG workload generator for simulation testing.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
@@ -30,40 +30,40 @@ pub enum SimAction {
 	},
 	Get {
 		txn_id: usize,
-		key: Bytes,
+		key: ByteSlice,
 	},
 	GetForUpdate {
 		txn_id: usize,
-		key: Bytes,
+		key: ByteSlice,
 	},
 	Exists {
 		txn_id: usize,
-		key: Bytes,
+		key: ByteSlice,
 	},
 	Set {
 		txn_id: usize,
-		key: Bytes,
-		val: Bytes,
+		key: ByteSlice,
+		val: ByteSlice,
 	},
 	Put {
 		txn_id: usize,
-		key: Bytes,
-		val: Bytes,
+		key: ByteSlice,
+		val: ByteSlice,
 	},
 	PutC {
 		txn_id: usize,
-		key: Bytes,
-		val: Bytes,
-		chk: Option<Bytes>,
+		key: ByteSlice,
+		val: ByteSlice,
+		chk: Option<ByteSlice>,
 	},
 	Del {
 		txn_id: usize,
-		key: Bytes,
+		key: ByteSlice,
 	},
 	DelC {
 		txn_id: usize,
-		key: Bytes,
-		chk: Option<Bytes>,
+		key: ByteSlice,
+		chk: Option<ByteSlice>,
 	},
 	SetSavepoint {
 		txn_id: usize,
@@ -76,18 +76,18 @@ pub enum SimAction {
 	},
 	Scan {
 		txn_id: usize,
-		start: Bytes,
-		end: Bytes,
+		start: ByteSlice,
+		end: ByteSlice,
 		skip: Option<usize>,
 		limit: Option<usize>,
 		reverse: bool,
 	},
 	DirectPointRead {
-		key: Bytes,
+		key: ByteSlice,
 	},
 	DirectScan {
-		start: Bytes,
-		end: Bytes,
+		start: ByteSlice,
+		end: ByteSlice,
 		skip: Option<usize>,
 		limit: Option<usize>,
 		reverse: bool,
@@ -146,17 +146,17 @@ impl WorkloadGenerator {
 		self
 	}
 
-	fn random_key(&mut self) -> Bytes {
+	fn random_key(&mut self) -> ByteSlice {
 		let id = self.rng.random_range(0..self.key_pool_size);
-		Bytes::from(format!("k_{id:04}"))
+		ByteSlice::from(format!("k_{id:04}"))
 	}
 
-	fn random_value(&mut self) -> Bytes {
+	fn random_value(&mut self) -> ByteSlice {
 		let id = self.rng.random_range(0..1000);
-		Bytes::from(format!("v_{id:06}"))
+		ByteSlice::from(format!("v_{id:06}"))
 	}
 
-	fn random_range(&mut self) -> (Bytes, Bytes) {
+	fn random_range(&mut self) -> (ByteSlice, ByteSlice) {
 		let k1 = self.random_key();
 		let k2 = self.random_key();
 		if k1 <= k2 {

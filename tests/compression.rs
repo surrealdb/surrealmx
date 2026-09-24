@@ -17,7 +17,7 @@
 //!
 //! Tests LZ4 compression for snapshots and compression round-trips.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use surrealmx::{
 	AolMode, CompressionMode, Database, DatabaseOptions, PersistenceOptions, SnapshotMode,
 };
@@ -69,7 +69,7 @@ fn lz4_snapshot_round_trip() {
 
 		let mut tx = db.transaction(false);
 		for i in 0..100 {
-			let expected = Bytes::from(format!("value_{i}"));
+			let expected = ByteSlice::from(format!("value_{i}"));
 			let actual = tx.get(format!("key_{i:04}")).unwrap();
 			assert_eq!(actual, Some(expected), "Key {i} should be recovered");
 		}
@@ -121,7 +121,7 @@ fn uncompressed_snapshot_round_trip() {
 
 		let mut tx = db.transaction(false);
 		for i in 0..100 {
-			let expected = Bytes::from(format!("value_{i}"));
+			let expected = ByteSlice::from(format!("value_{i}"));
 			let actual = tx.get(format!("key_{i:04}")).unwrap();
 			assert_eq!(actual, Some(expected));
 		}
@@ -181,7 +181,7 @@ fn lz4_compression_with_large_values() {
 		let mut tx = db.transaction(false);
 		for i in 0..50 {
 			let actual = tx.get(format!("key_{i}")).unwrap();
-			assert_eq!(actual, Some(Bytes::from(large_value.clone())));
+			assert_eq!(actual, Some(ByteSlice::from(large_value.clone())));
 		}
 		tx.cancel().unwrap();
 	}
@@ -231,7 +231,7 @@ fn lz4_compression_with_random_data() {
 			expected[1] = ((i / 256) % 256) as u8;
 
 			let actual = tx.get(format!("key_{i:04}")).unwrap();
-			assert_eq!(actual, Some(Bytes::from(expected)));
+			assert_eq!(actual, Some(ByteSlice::from(expected)));
 		}
 		tx.cancel().unwrap();
 	}
@@ -280,7 +280,7 @@ fn auto_detect_lz4_compressed_snapshot() {
 		let val = tx.get("key").unwrap();
 		assert_eq!(
 			val,
-			Some(Bytes::from("compressed_value")),
+			Some(ByteSlice::from("compressed_value")),
 			"Should auto-detect and read LZ4 snapshot"
 		);
 		tx.cancel().unwrap();
@@ -325,7 +325,7 @@ fn auto_detect_uncompressed_snapshot() {
 		let val = tx.get("key").unwrap();
 		assert_eq!(
 			val,
-			Some(Bytes::from("uncompressed_value")),
+			Some(ByteSlice::from("uncompressed_value")),
 			"Should auto-detect and read uncompressed snapshot"
 		);
 		tx.cancel().unwrap();
@@ -401,7 +401,7 @@ fn lz4_with_binary_data() {
 
 		let mut tx = db.transaction(false);
 		let val = tx.get(binary_key).unwrap();
-		assert_eq!(val, Some(Bytes::from(binary_value)));
+		assert_eq!(val, Some(ByteSlice::from(binary_value)));
 		tx.cancel().unwrap();
 	}
 }
@@ -447,7 +447,7 @@ fn lz4_multiple_snapshots() {
 
 		let mut tx = db.transaction(false);
 		assert!(tx.get("key1").unwrap().is_none(), "key1 should be deleted");
-		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+		assert_eq!(tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
 		tx.cancel().unwrap();
 	}
 }

@@ -17,7 +17,7 @@
 use crate::bloom::BloomFilter;
 #[cfg(debug_assertions)]
 use crate::LOG_TARGET_CONFLICTS;
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use papaya::HashSet;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -31,7 +31,7 @@ pub struct Commit {
 	/// detection, so they are not retained here: the merge queue holds
 	/// the full writeset only until the commit is applied, while this
 	/// entry survives until queue cleanup without pinning value memory.
-	pub(crate) keys: Arc<[Bytes]>,
+	pub(crate) keys: Arc<[ByteSlice]>,
 	/// Bloom filter over writeset keys for fast conflict pre-checks
 	pub(crate) writeset_bloom: BloomFilter,
 	/// The merge version this commit published, zero while the commit is
@@ -51,7 +51,7 @@ pub struct Commit {
 /// A transaction entry in the transaction merge queue
 pub struct Merge {
 	/// The local set of updates and deletes
-	pub(crate) writeset: Arc<BTreeMap<Bytes, Option<Bytes>>>,
+	pub(crate) writeset: Arc<BTreeMap<ByteSlice, Option<ByteSlice>>>,
 	/// Whether this merge has been fully applied to the datastore.
 	/// Consumed by the in-order retirement advance: merge entries are
 	/// removed from the queue strictly in version order, over the
@@ -65,25 +65,29 @@ pub struct Merge {
 impl Commit {
 	/// The smallest key in the writeset (for range overlap checks)
 	#[inline]
-	fn min_key(&self) -> Option<&Bytes> {
+	fn min_key(&self) -> Option<&ByteSlice> {
 		self.keys.first()
 	}
 
 	/// The largest key in the writeset (for range overlap checks)
 	#[inline]
-	fn max_key(&self) -> Option<&Bytes> {
+	fn max_key(&self) -> Option<&ByteSlice> {
 		self.keys.last()
 	}
 
 	/// Returns true if the writeset contains the specified key
 	#[inline]
-	fn contains_key(&self, key: &Bytes) -> bool {
+	fn contains_key(&self, key: &ByteSlice) -> bool {
 		self.keys.binary_search(key).is_ok()
 	}
 
 	/// Returns true if self has no elements in common with other.
 	/// Uses a bloom filter for a fast pre-check before the exact intersection.
-	pub fn is_disjoint_readset_bloom(&self, other: &HashSet<Bytes>, bloom: &BloomFilter) -> bool {
+	pub fn is_disjoint_readset_bloom(
+		&self,
+		other: &HashSet<ByteSlice>,
+		bloom: &BloomFilter,
+	) -> bool {
 		// Fast path: if the bloom filter is empty, there are no reads to conflict with
 		if bloom.is_empty() {
 			return true;
@@ -105,7 +109,7 @@ impl Commit {
 	}
 
 	/// Returns true if self has no elements in common with other
-	pub fn is_disjoint_readset(&self, other: &HashSet<Bytes>) -> bool {
+	pub fn is_disjoint_readset(&self, other: &HashSet<ByteSlice>) -> bool {
 		// Pin the readset for access
 		let other = other.pin();
 		// Check if the readset is not empty
@@ -170,7 +174,7 @@ impl Commit {
 	/// Returns true if this commit's writeset may contain keys within the
 	/// given range. Uses the min/max key bounds for a fast range overlap
 	/// check before iterating writeset keys for scan conflict detection.
-	pub fn may_overlap_range(&self, range_start: &Bytes, range_end: &Bytes) -> bool {
+	pub fn may_overlap_range(&self, range_start: &ByteSlice, range_end: &ByteSlice) -> bool {
 		// Check if the writeset key range overlaps the scan range
 		match (self.min_key(), self.max_key()) {
 			(Some(min_key), Some(max_key)) => min_key < range_end && max_key >= range_start,
@@ -211,10 +215,10 @@ mod tests {
 
 	/// Build a commit entry from an unsorted set of string keys
 	fn commit(input: &[&str]) -> Arc<Commit> {
-		let mut v: Vec<Bytes> = input.iter().map(|k| Bytes::from(k.to_string())).collect();
+		let mut v: Vec<ByteSlice> = input.iter().map(|k| ByteSlice::from(*k)).collect();
 		v.sort();
 		v.dedup();
-		let keys: Arc<[Bytes]> = v.into();
+		let keys: Arc<[ByteSlice]> = v.into();
 		let mut writeset_bloom = BloomFilter::new();
 		for k in keys.iter() {
 			writeset_bloom.insert(k);
@@ -227,12 +231,12 @@ mod tests {
 	}
 
 	/// Build a readset from a set of string keys
-	fn readset(input: &[&str]) -> HashSet<Bytes> {
+	fn readset(input: &[&str]) -> HashSet<ByteSlice> {
 		let set = HashSet::new();
 		{
 			let pin = set.pin();
 			for k in input {
-				pin.insert(Bytes::from(k.to_string()));
+				pin.insert(ByteSlice::from(*k));
 			}
 		}
 		set

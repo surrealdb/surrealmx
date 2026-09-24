@@ -17,7 +17,7 @@
 //! Tests `put()`, `putc()`, and `delc()` behavior for conditional
 //! insert, update, and delete operations.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use surrealmx::{Database, Error};
 
 #[cfg(target_arch = "wasm32")]
@@ -35,7 +35,7 @@ fn put_succeeds_for_new_key() {
 	let mut tx = db.transaction(true);
 	let result = tx.put("new_key", "value");
 	assert!(result.is_ok(), "put should succeed for new key");
-	assert_eq!(tx.get("new_key").unwrap(), Some(Bytes::from("value")));
+	assert_eq!(tx.get("new_key").unwrap(), Some(ByteSlice::from("value")));
 	tx.commit().unwrap();
 }
 
@@ -55,7 +55,7 @@ fn put_fails_for_existing_key() {
 	assert!(matches!(result, Err(Error::KeyAlreadyExists)), "put should fail for existing key");
 
 	// Verify original value unchanged
-	assert_eq!(tx.get("existing").unwrap(), Some(Bytes::from("original")));
+	assert_eq!(tx.get("existing").unwrap(), Some(ByteSlice::from("original")));
 	tx.cancel().unwrap();
 }
 
@@ -95,7 +95,7 @@ fn put_succeeds_after_delete_in_same_transaction() {
 	let result = tx.put("key", "recreated");
 	// This might fail or succeed depending on implementation
 	if result.is_ok() {
-		assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("recreated")));
+		assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("recreated")));
 		tx.commit().unwrap();
 	} else {
 		tx.cancel().unwrap();
@@ -120,12 +120,12 @@ fn putc_succeeds_when_value_matches() {
 	let mut tx = db.transaction(true);
 	let result = tx.putc("key", "new_value", Some("expected"));
 	assert!(result.is_ok(), "putc should succeed when value matches");
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("new_value")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("new_value")));
 	tx.commit().unwrap();
 
 	// Verify commit
 	let mut verify = db.transaction(false);
-	assert_eq!(verify.get("key").unwrap(), Some(Bytes::from("new_value")));
+	assert_eq!(verify.get("key").unwrap(), Some(ByteSlice::from("new_value")));
 	verify.cancel().unwrap();
 }
 
@@ -148,7 +148,7 @@ fn putc_fails_when_value_differs() {
 	);
 
 	// Value should be unchanged
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("actual")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("actual")));
 	tx.cancel().unwrap();
 }
 
@@ -161,7 +161,7 @@ fn putc_with_none_check_succeeds_for_non_existent_key() {
 	let mut tx = db.transaction(true);
 	let result = tx.putc::<_, _, &[u8]>("new_key", "value", None);
 	assert!(result.is_ok(), "putc with None check should succeed for new key");
-	assert_eq!(tx.get("new_key").unwrap(), Some(Bytes::from("value")));
+	assert_eq!(tx.get("new_key").unwrap(), Some(ByteSlice::from("value")));
 	tx.commit().unwrap();
 }
 
@@ -198,7 +198,7 @@ fn putc_in_same_transaction_with_matching_value() {
 	// putc with matching check should succeed
 	let result = tx.putc("key", "second", Some("first"));
 	assert!(result.is_ok(), "putc should succeed with matching writeset value");
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("second")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("second")));
 
 	tx.commit().unwrap();
 }
@@ -221,7 +221,7 @@ fn putc_in_same_transaction_with_non_matching_value() {
 	);
 
 	// Value should still be "first"
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("first")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("first")));
 	tx.cancel().unwrap();
 }
 
@@ -242,7 +242,7 @@ fn putc_after_delete_with_none_check() {
 	// putc with None check should succeed (key is deleted)
 	let result = tx.putc::<_, _, &[u8]>("key", "recreated", None);
 	assert!(result.is_ok(), "putc with None check should succeed after delete");
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("recreated")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("recreated")));
 	tx.commit().unwrap();
 }
 
@@ -294,7 +294,7 @@ fn delc_fails_when_value_differs() {
 	);
 
 	// Key should still exist
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("actual")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("actual")));
 	tx.cancel().unwrap();
 }
 
@@ -367,7 +367,7 @@ fn delc_in_same_transaction_with_non_matching_value() {
 	);
 
 	// Key should still exist
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("value")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("value")));
 	tx.cancel().unwrap();
 }
 
@@ -384,29 +384,29 @@ fn conditional_operations_chain() {
 
 	// Insert with None check (key doesn't exist)
 	tx.putc::<_, _, &[u8]>("key", "v1", None).unwrap();
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("v1")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("v1")));
 
 	// Update with value check
 	tx.putc("key", "v2", Some("v1")).unwrap();
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("v2")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("v2")));
 
 	// Update again
 	tx.putc("key", "v3", Some("v2")).unwrap();
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("v3")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("v3")));
 
 	// Delete with value check
 	tx.delc("key", Some("v3")).unwrap();
-	assert!(tx.get("key").unwrap().is_none());
+	assert_eq!(tx.get("key").unwrap(), None);
 
 	// Insert again with None check (key is deleted)
 	tx.putc::<_, _, &[u8]>("key", "final", None).unwrap();
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("final")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("final")));
 
 	tx.commit().unwrap();
 
 	// Verify
 	let mut verify = db.transaction(false);
-	assert_eq!(verify.get("key").unwrap(), Some(Bytes::from("final")));
+	assert_eq!(verify.get("key").unwrap(), Some(ByteSlice::from("final")));
 	verify.cancel().unwrap();
 }
 
@@ -460,7 +460,7 @@ fn conditional_with_empty_value() {
 
 	// Verify
 	let mut verify = db.transaction(false);
-	assert_eq!(verify.get("key").unwrap(), Some(Bytes::from("non_empty")));
+	assert_eq!(verify.get("key").unwrap(), Some(ByteSlice::from("non_empty")));
 	verify.cancel().unwrap();
 }
 
@@ -484,7 +484,7 @@ fn conditional_with_binary_data() {
 
 	// Verify
 	let mut verify = db.transaction(false);
-	assert_eq!(verify.get("key").unwrap(), Some(Bytes::from(new_data)));
+	assert_eq!(verify.get("key").unwrap(), Some(ByteSlice::from(new_data)));
 	verify.cancel().unwrap();
 }
 
@@ -521,6 +521,6 @@ fn putc_concurrent_conflict() {
 
 	// Verify final state
 	let mut verify = db.transaction(false);
-	assert_eq!(verify.get("key").unwrap(), Some(Bytes::from("tx1_value")));
+	assert_eq!(verify.get("key").unwrap(), Some(ByteSlice::from("tx1_value")));
 	verify.cancel().unwrap();
 }

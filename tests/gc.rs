@@ -17,7 +17,7 @@
 //!
 //! Tests manual `run_gc()` and background GC behavior.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::sync::Arc;
 use std::time::Duration;
 use surrealmx::{Database, DatabaseOptions};
@@ -68,7 +68,7 @@ fn manual_gc_respects_active_transactions() {
 	// Start long-lived read transaction
 	let read_tx = db.transaction(false);
 	let initial = read_tx.get("key").unwrap();
-	assert_eq!(initial, Some(Bytes::from("v1")));
+	assert_eq!(initial, Some(ByteSlice::from("v1")));
 
 	// Update multiple times
 	for i in 2..10 {
@@ -84,7 +84,7 @@ fn manual_gc_respects_active_transactions() {
 	let after_gc = read_tx.get("key").unwrap();
 	assert_eq!(
 		after_gc,
-		Some(Bytes::from("v1")),
+		Some(ByteSlice::from("v1")),
 		"Active transaction should still see v1 after GC"
 	);
 }
@@ -175,7 +175,7 @@ fn gc_handles_multiple_keys() {
 	let mut tx = db.transaction(false);
 	for key_id in 0..10 {
 		let val = tx.get(format!("key_{key_id}")).unwrap();
-		assert_eq!(val, Some(Bytes::from("v4")), "Key {key_id} should have latest value");
+		assert_eq!(val, Some(ByteSlice::from("v4")), "Key {key_id} should have latest value");
 	}
 	tx.cancel().unwrap();
 }
@@ -207,8 +207,8 @@ fn gc_with_mixed_deletes() {
 
 	// Verify state
 	let mut tx = db.transaction(false);
-	assert_eq!(tx.get("keep1").unwrap(), Some(Bytes::from("value1")));
-	assert_eq!(tx.get("keep2").unwrap(), Some(Bytes::from("value2")));
+	assert_eq!(tx.get("keep1").unwrap(), Some(ByteSlice::from("value1")));
+	assert_eq!(tx.get("keep2").unwrap(), Some(ByteSlice::from("value2")));
 	assert!(tx.get("delete1").unwrap().is_none());
 	assert!(tx.get("delete2").unwrap().is_none());
 	tx.cancel().unwrap();
@@ -376,7 +376,7 @@ fn gc_empty_database() {
 	tx.commit().unwrap();
 
 	let mut tx = db.transaction(false);
-	assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("value")));
+	assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("value")));
 	tx.cancel().unwrap();
 }
 
@@ -395,7 +395,7 @@ fn gc_preserves_tombstones_for_active_readers() {
 
 	// Start a read that sees the key
 	let read_tx = db.transaction(false);
-	assert_eq!(read_tx.get("key").unwrap(), Some(Bytes::from("original")));
+	assert_eq!(read_tx.get("key").unwrap(), Some(ByteSlice::from("original")));
 
 	// Delete the key
 	let mut tx = db.transaction(true);
@@ -408,7 +408,7 @@ fn gc_preserves_tombstones_for_active_readers() {
 	// Old reader should still see original value
 	assert_eq!(
 		read_tx.get("key").unwrap(),
-		Some(Bytes::from("original")),
+		Some(ByteSlice::from("original")),
 		"Reader should see value from its snapshot"
 	);
 

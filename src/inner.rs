@@ -20,7 +20,7 @@ use crate::persistence::Persistence;
 use crate::queue::{Commit, Merge};
 use crate::versions::Versions;
 use crate::DatabaseOptions;
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
 use parking_lot::RwLock;
@@ -77,7 +77,7 @@ pub struct Inner {
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
 	/// The underlying lock-free skip-list datastructure
-	pub(crate) datastore: SkipMap<Bytes, RwLock<Versions>>,
+	pub(crate) datastore: SkipMap<ByteSlice, RwLock<Versions>>,
 	/// Registered transaction snapshot slots, keyed by allocation order.
 	/// Contains exactly the live transactions: slots are inserted at
 	/// registration and removed on transaction drop, so watermark scans
@@ -144,14 +144,15 @@ pub struct Inner {
 	/// only these keys instead of scanning the whole datastore, so sweep
 	/// cost scales with the amount of pinned garbage rather than the
 	/// dataset size. Only keys are stored (deduplicated, refcounted
-	/// `Bytes` clones) — never values, which would pin the very memory
+	/// Only keys are stored (deduplicated, refcounted
+	/// `ByteSlice` clones) — never values, which would pin the very memory
 	/// the sweep exists to reclaim. While a long-lived reader pins the
 	/// watermark, every distinct key overwritten during its lifetime
 	/// stays tracked and is revisited (and re-tracked) by each sweep
 	/// tick until the reader departs — the deliberate trade for exact
 	/// reclamation the moment the pin clears; the per-tick cost is one
 	/// chain-lock-and-trim attempt per tracked key.
-	pub(crate) gc_candidates: HashSet<Bytes>,
+	pub(crate) gc_candidates: HashSet<ByteSlice>,
 	/// Optional persistence handler
 	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) persistence: RwLock<Option<Arc<Persistence>>>,
@@ -515,7 +516,7 @@ impl Inner {
 		// Snapshot the candidate keys: the snapshot is the sweep's
 		// working set, and keys tracked by commits racing with this
 		// sweep are picked up by the next pass.
-		let mut keys: Vec<Bytes> = Vec::with_capacity(candidates.len());
+		let mut keys: Vec<ByteSlice> = Vec::with_capacity(candidates.len());
 		keys.extend(candidates.iter().cloned());
 		// Process each candidate key in turn
 		for key in keys {

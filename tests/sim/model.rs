@@ -22,7 +22,7 @@
 //! write, range scan, savepoint rollback, and commit conflict is verified against
 //! `ModelDb` for exact equivalence.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use surrealmx::Error;
@@ -65,7 +65,7 @@ impl From<ModelError> for Error {
 pub struct ModelCommitRecord {
 	pub commit_id: u64,
 	pub version: u64,
-	pub writeset: BTreeMap<Bytes, Option<Bytes>>,
+	pub writeset: BTreeMap<ByteSlice, Option<ByteSlice>>,
 }
 
 /// The in-memory reference model representing ground truth.
@@ -76,7 +76,7 @@ pub struct ModelDb {
 	/// Monotonically increasing merge version / logical clock.
 	pub current_version: u64,
 	/// Full MVCC version history per key: sorted vector of (version, Option<value>).
-	pub key_history: BTreeMap<Bytes, Vec<(u64, Option<Bytes>)>>,
+	pub key_history: BTreeMap<ByteSlice, Vec<(u64, Option<ByteSlice>)>>,
 	/// Ordered history of all committed transactions.
 	pub commit_history: Vec<ModelCommitRecord>,
 }
@@ -109,7 +109,7 @@ impl ModelDb {
 	}
 
 	/// Retrieves the value of a key as of a specific version snapshot.
-	pub fn get_at_version(&self, key: &[u8], version: u64) -> Option<Bytes> {
+	pub fn get_at_version(&self, key: &[u8], version: u64) -> Option<ByteSlice> {
 		let history = self.key_history.get(key)?;
 		let idx = history.partition_point(|(v, _)| *v <= version);
 		if idx > 0 {
@@ -125,7 +125,12 @@ impl ModelDb {
 	}
 
 	/// Scans a range of keys as of a specific version snapshot.
-	pub fn scan_at_version(&self, start: &[u8], end: &[u8], version: u64) -> Vec<(Bytes, Bytes)> {
+	pub fn scan_at_version(
+		&self,
+		start: &[u8],
+		end: &[u8],
+		version: u64,
+	) -> Vec<(ByteSlice, ByteSlice)> {
 		let mut results = Vec::new();
 		for (k, _) in
 			self.key_history.range::<[u8], _>((Bound::Included(start), Bound::Excluded(end)))
@@ -227,22 +232,22 @@ pub struct ModelTxn {
 	pub mode: ModelIsolation,
 	pub start_commit_id: u64,
 	pub start_version: u64,
-	pub writeset: BTreeMap<Bytes, Option<Bytes>>,
-	pub readset: BTreeSet<Bytes>,
-	pub lockset: BTreeSet<Bytes>,
-	pub scanset: Vec<(Bytes, Bytes)>,
-	pub savepoints: Vec<BTreeMap<Bytes, Option<Bytes>>>,
+	pub writeset: BTreeMap<ByteSlice, Option<ByteSlice>>,
+	pub readset: BTreeSet<ByteSlice>,
+	pub lockset: BTreeSet<ByteSlice>,
+	pub scanset: Vec<(ByteSlice, ByteSlice)>,
+	pub savepoints: Vec<BTreeMap<ByteSlice, Option<ByteSlice>>>,
 	pub done: bool,
 }
 
 impl ModelTxn {
 	/// Point read of a key.
-	pub fn get(&mut self, model: &ModelDb, key: &[u8]) -> Result<Option<Bytes>, ModelError> {
+	pub fn get(&mut self, model: &ModelDb, key: &[u8]) -> Result<Option<ByteSlice>, ModelError> {
 		if self.done {
 			return Err(ModelError::TxClosed);
 		}
 
-		let key_bytes = Bytes::copy_from_slice(key);
+		let key_bytes = ByteSlice::from_slice(key);
 		let res = if let Some(local_val) = self.writeset.get(key) {
 			local_val.clone()
 		} else {
@@ -261,7 +266,7 @@ impl ModelTxn {
 		&mut self,
 		model: &ModelDb,
 		key: &[u8],
-	) -> Result<Option<Bytes>, ModelError> {
+	) -> Result<Option<ByteSlice>, ModelError> {
 		if self.done {
 			return Err(ModelError::TxClosed);
 		}
@@ -269,7 +274,7 @@ impl ModelTxn {
 			return Err(ModelError::TxNotWritable);
 		}
 
-		let key_bytes = Bytes::copy_from_slice(key);
+		let key_bytes = ByteSlice::from_slice(key);
 		self.lockset.insert(key_bytes);
 
 		let res = if let Some(local_val) = self.writeset.get(key) {
@@ -295,7 +300,7 @@ impl ModelTxn {
 			return Err(ModelError::TxNotWritable);
 		}
 
-		self.writeset.insert(Bytes::copy_from_slice(key), Some(Bytes::copy_from_slice(val)));
+		self.writeset.insert(ByteSlice::from_slice(key), Some(ByteSlice::from_slice(val)));
 		Ok(())
 	}
 
@@ -312,7 +317,7 @@ impl ModelTxn {
 			return Err(ModelError::KeyAlreadyExists);
 		}
 
-		self.writeset.insert(Bytes::copy_from_slice(key), Some(Bytes::copy_from_slice(val)));
+		self.writeset.insert(ByteSlice::from_slice(key), Some(ByteSlice::from_slice(val)));
 		Ok(())
 	}
 
@@ -347,7 +352,7 @@ impl ModelTxn {
 			return Err(ModelError::ValNotExpectedValue);
 		}
 
-		self.writeset.insert(Bytes::copy_from_slice(key), Some(Bytes::copy_from_slice(val)));
+		self.writeset.insert(ByteSlice::from_slice(key), Some(ByteSlice::from_slice(val)));
 		Ok(())
 	}
 
@@ -360,7 +365,7 @@ impl ModelTxn {
 			return Err(ModelError::TxNotWritable);
 		}
 
-		self.writeset.insert(Bytes::copy_from_slice(key), None);
+		self.writeset.insert(ByteSlice::from_slice(key), None);
 		Ok(())
 	}
 
@@ -394,7 +399,7 @@ impl ModelTxn {
 			return Err(ModelError::ValNotExpectedValue);
 		}
 
-		self.writeset.insert(Bytes::copy_from_slice(key), None);
+		self.writeset.insert(ByteSlice::from_slice(key), None);
 		Ok(())
 	}
 
@@ -443,20 +448,20 @@ impl ModelTxn {
 		skip: Option<usize>,
 		limit: Option<usize>,
 		reverse: bool,
-	) -> Result<Vec<(Bytes, Bytes)>, ModelError> {
+	) -> Result<Vec<(ByteSlice, ByteSlice)>, ModelError> {
 		if self.done {
 			return Err(ModelError::TxClosed);
 		}
 
-		let start_bytes = Bytes::copy_from_slice(start);
-		let end_bytes = Bytes::copy_from_slice(end);
+		let start_bytes = ByteSlice::from_slice(start);
+		let end_bytes = ByteSlice::from_slice(end);
 
 		if self.write && self.mode == ModelIsolation::SerializableSnapshotIsolation {
 			self.scanset.push((start_bytes.clone(), end_bytes.clone()));
 		}
 
 		// Gather keys present in snapshot and local writeset in range
-		let mut merged: BTreeMap<Bytes, Option<Bytes>> = BTreeMap::new();
+		let mut merged: BTreeMap<ByteSlice, Option<ByteSlice>> = BTreeMap::new();
 
 		// Add snapshot state
 		for (k, v) in model.scan_at_version(start, end, self.start_version) {
@@ -466,13 +471,13 @@ impl ModelTxn {
 		// Overlay local writeset
 		for (k, v) in self
 			.writeset
-			.range::<Bytes, _>((Bound::Included(&start_bytes), Bound::Excluded(&end_bytes)))
+			.range::<ByteSlice, _>((Bound::Included(&start_bytes), Bound::Excluded(&end_bytes)))
 		{
 			merged.insert(k.clone(), v.clone());
 		}
 
 		// Filter out deleted entries
-		let mut pairs: Vec<(Bytes, Bytes)> =
+		let mut pairs: Vec<(ByteSlice, ByteSlice)> =
 			merged.into_iter().filter_map(|(k, v)| v.map(|val| (k, val))).collect();
 
 		if reverse {

@@ -17,7 +17,7 @@
 //! Tests common transactional patterns including increment, compare-and-swap,
 //! conditional updates, and retry-on-conflict logic.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use surrealmx::Database;
 
 #[cfg(target_arch = "wasm32")]
@@ -88,7 +88,7 @@ fn compare_and_swap_pattern() {
 	// Verify update
 	{
 		let tx = db.transaction(false);
-		assert_eq!(tx.get("cas_key").unwrap(), Some(Bytes::from("updated")));
+		assert_eq!(tx.get("cas_key").unwrap(), Some(ByteSlice::from("updated")));
 	}
 
 	// Failed CAS: expect "initial" (but it's now "updated")
@@ -102,7 +102,7 @@ fn compare_and_swap_pattern() {
 	// Value should still be "updated"
 	{
 		let tx = db.transaction(false);
-		assert_eq!(tx.get("cas_key").unwrap(), Some(Bytes::from("updated")));
+		assert_eq!(tx.get("cas_key").unwrap(), Some(ByteSlice::from("updated")));
 	}
 }
 
@@ -135,7 +135,7 @@ fn conditional_update_chain() {
 
 	// Verify final state
 	let tx = db.transaction(false);
-	assert_eq!(tx.get("state").unwrap(), Some(Bytes::from("completed")));
+	assert_eq!(tx.get("state").unwrap(), Some(ByteSlice::from("completed")));
 
 	// Attempting invalid transition should fail
 	{
@@ -183,8 +183,8 @@ fn optimistic_locking_pattern() {
 
 	// Verify update
 	let tx = db.transaction(false);
-	assert_eq!(tx.get("data").unwrap(), Some(Bytes::from("modified_data")));
-	assert_eq!(tx.get("data_version").unwrap(), Some(Bytes::from("2")));
+	assert_eq!(tx.get("data").unwrap(), Some(ByteSlice::from("modified_data")));
+	assert_eq!(tx.get("data_version").unwrap(), Some(ByteSlice::from("2")));
 }
 
 // =============================================================================
@@ -207,7 +207,7 @@ fn retry_on_conflict() {
 	{
 		let tx = db.transaction(false);
 		let val = tx.get("retry_counter").unwrap();
-		assert_eq!(val, Some(Bytes::from("0")), "Counter should be initialized to 0");
+		assert_eq!(val, Some(ByteSlice::from("0")), "Counter should be initialized to 0");
 	}
 
 	// Perform sequential increments with retry-on-conflict pattern

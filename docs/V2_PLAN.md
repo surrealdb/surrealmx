@@ -103,15 +103,15 @@ Before making complex changes to the storage engine, data types, and commit pipe
 
 In-memory database performance is heavily governed by memory layout, cache locality, and allocator pressure. Currently, SurrealMX uses `bytes::Bytes` across all keys, values, and transaction tracking sets. While `Bytes` is reference-counted and slicable, it is **32 bytes** on 64-bit architectures, does not inline short strings (always allocating for slices), and incurs atomic reference count updates (`fetch_add`/`fetch_sub`) on every clone.
 
-- [ ] Add `byteslice` dependency (or workspace path) to `surrealmx/Cargo.toml`.
-- [ ] Update `IntoBytes` trait in `surrealmx/src/kv.rs` to produce `ByteSlice`.
-- [ ] Migrate `Version` (`surrealmx/src/version.rs`) from `Option<Bytes>` to `Option<ByteSlice>`.
-- [ ] Migrate `Versions` (`surrealmx/src/versions.rs`) to use `ByteSlice`.
-- [ ] Migrate `datastore` in `Inner` (`surrealmx/src/inner.rs`) to `SkipMap<ByteSlice, RwLock<Versions>>`.
-- [ ] Migrate transaction tracking sets (`writeset`, `readset`, `lockset`, `scanset`, `gc_candidates`) to `ByteSlice`.
-- [ ] Update public transaction methods (`get`, `set`, `put`, `del`, `scan`, `keys`) to return and accept `ByteSlice`.
-- [ ] Verify zero regressions and byte-for-byte equivalence against `SimRunner`.
-- [ ] Benchmark and verify zero heap allocations for keys $\le 20$ bytes.
+- [x] Add `byteslice` dependency (or workspace path) to `surrealmx/Cargo.toml`.
+- [x] Update `IntoBytes` trait in `surrealmx/src/kv.rs` to produce `ByteSlice`.
+- [x] Migrate `Version` (`surrealmx/src/version.rs`) from `Option<Bytes>` to `Option<ByteSlice>`.
+- [x] Migrate `Versions` (`surrealmx/src/versions.rs`) to use `ByteSlice`.
+- [x] Migrate `datastore` in `Inner` (`surrealmx/src/inner.rs`) to `SkipMap<ByteSlice, RwLock<Versions>>`.
+- [x] Migrate transaction tracking sets (`writeset`, `readset`, `lockset`, `scanset`, `gc_candidates`) to `ByteSlice`.
+- [x] Update public transaction methods (`get`, `set`, `put`, `del`, `scan`, `keys`) to return and accept `ByteSlice`.
+- [x] Verify zero regressions and byte-for-byte equivalence against `SimRunner`.
+- [x] Benchmark and verify zero heap allocations for keys $\le 20$ bytes.
 
 ### Small String Optimization (SSO $\le 20$ Bytes)
 In database workloads, the vast majority of keys (UUIDs, ULIDs, table prefixes, foreign keys, integers) and many values are under 20 bytes:

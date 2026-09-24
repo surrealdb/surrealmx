@@ -18,7 +18,7 @@
 //! Tests snapshot behavior under concurrent access including writes during
 //! snapshot, multiple concurrent snapshots, and reads during snapshot.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use surrealmx::{AolMode, Database, DatabaseOptions, PersistenceOptions, SnapshotMode};
@@ -271,7 +271,7 @@ fn recovery_from_concurrent_snapshot() {
 		assert_eq!(after_count, 50, "After-snapshot data should be recovered");
 
 		// Verify specific values
-		assert_eq!(tx.get("before_snap_000").unwrap(), Some(Bytes::from("before")));
-		assert_eq!(tx.get("after_snap_049").unwrap(), Some(Bytes::from("after")));
+		assert_eq!(tx.get("before_snap_000").unwrap(), Some(ByteSlice::from("before")));
+		assert_eq!(tx.get("after_snap_049").unwrap(), Some(ByteSlice::from("after")));
 	}
 }

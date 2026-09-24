@@ -17,7 +17,7 @@
 //! Tests cursor, `KeyIterator`, and `ScanIterator` behavior including
 //! direction switching, empty ranges, and edge cases.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use surrealmx::Database;
 
 #[cfg(target_arch = "wasm32")]
@@ -220,10 +220,10 @@ fn keys_iterator_double_ended_meets_in_middle() {
 
 	// Test basic forward iteration
 	let first = iter.next();
-	assert_eq!(first, Some(Bytes::from("a")));
+	assert_eq!(first, Some(ByteSlice::from("a")));
 
 	let second = iter.next();
-	assert_eq!(second, Some(Bytes::from("b")));
+	assert_eq!(second, Some(ByteSlice::from("b")));
 
 	// Continue to collect remaining
 	let remaining: Vec<_> = iter.collect();
@@ -379,9 +379,9 @@ fn iterator_merge_queue_and_writeset() {
 	// Iterator should see merged view
 	let scan: Vec<_> = tx2.scan_iter("a".."z").unwrap().collect();
 	assert_eq!(scan.len(), 3);
-	assert_eq!(scan[0], (Bytes::from("a"), Bytes::from("tx2_a"))); // From writeset
-	assert_eq!(scan[1], (Bytes::from("b"), Bytes::from("tx1_b"))); // From committed/merge queue
-	assert_eq!(scan[2], (Bytes::from("c"), Bytes::from("tx2_c"))); // From writeset
+	assert_eq!(scan[0], (ByteSlice::from("a"), ByteSlice::from("tx2_a"))); // From writeset
+	assert_eq!(scan[1], (ByteSlice::from("b"), ByteSlice::from("tx1_b"))); // From committed/merge queue
+	assert_eq!(scan[2], (ByteSlice::from("c"), ByteSlice::from("tx2_c"))); // From writeset
 
 	tx2.cancel().unwrap();
 }

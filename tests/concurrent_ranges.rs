@@ -18,7 +18,7 @@
 //! Tests range scans under concurrent modifications including inserts,
 //! deletes, and updates within scanned ranges.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use surrealmx::Database;
@@ -176,7 +176,7 @@ fn update_within_scanned_range() {
 	let tx = db.transaction(false);
 	assert_eq!(
 		tx.get("key_2").unwrap(),
-		Some(Bytes::from("updated_value")),
+		Some(ByteSlice::from("updated_value")),
 		"Update should be visible"
 	);
 }
@@ -323,12 +323,12 @@ fn range_scan_consistency() {
 	assert!(new_tx.get("data_03").unwrap().is_none(), "Deleted key should not exist");
 	assert_eq!(
 		new_tx.get("data_05").unwrap(),
-		Some(Bytes::from("modified")),
+		Some(ByteSlice::from("modified")),
 		"Modified key should have new value"
 	);
 	assert_eq!(
 		new_tx.get("data_99").unwrap(),
-		Some(Bytes::from("new_key")),
+		Some(ByteSlice::from("new_key")),
 		"New key should exist"
 	);
 }

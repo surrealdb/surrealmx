@@ -18,7 +18,7 @@
 use crate::direction::Direction;
 use crate::queue::Merge;
 use crate::versions::Versions;
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use crossbeam_skiplist::map::Entry;
 use crossbeam_skiplist::map::Range as SkipRange;
 use parking_lot::RwLock;
@@ -27,13 +27,13 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 /// Owned range bounds for the skip list range iterator.
-/// Using owned Bytes avoids lifetime coupling between range bounds
+/// Using owned `ByteSlice` avoids lifetime coupling between range bounds
 /// and the `MergeIterator`, enabling persistent storage (e.g., in a Cursor).
-pub(crate) type SkipBounds = (Bound<Bytes>, Bound<Bytes>);
+pub(crate) type SkipBounds = (Bound<ByteSlice>, Bound<ByteSlice>);
 
 /// Lazy k-way merge iterator over committed merge-queue writesets.
 ///
-/// Yields `(Bytes, Option<Bytes>)` pairs in sorted order with newest-wins
+/// Yields `(ByteSlice, Option<ByteSlice>)` pairs in sorted order with newest-wins
 /// dedup. Sources must be passed in newest-first order (index 0 = newest).
 /// On a tie, the lowest-index source wins; older sources at the same key
 /// are advanced past it.
@@ -43,9 +43,9 @@ pub(crate) type SkipBounds = (Bound<Bytes>, Bound<Bytes>);
 /// `BTreeMap` each step (O(log n) per advance).
 pub(crate) struct MergeQueueIter {
 	sources: Vec<Arc<Merge>>,
-	heads: Vec<Option<(Bytes, Option<Bytes>)>>,
-	beg: Bytes,
-	end: Bytes,
+	heads: Vec<Option<(ByteSlice, Option<ByteSlice>)>>,
+	beg: ByteSlice,
+	end: ByteSlice,
 	direction: Direction,
 }
 
@@ -57,8 +57,8 @@ impl MergeQueueIter {
 	/// `end` is excluded.
 	pub(crate) fn new(
 		sources: Vec<Arc<Merge>>,
-		beg: Bytes,
-		end: Bytes,
+		beg: ByteSlice,
+		end: ByteSlice,
 		direction: Direction,
 	) -> Self {
 		let mut heads = Vec::with_capacity(sources.len());
@@ -76,27 +76,27 @@ impl MergeQueueIter {
 }
 
 /// Seek the next entry within `[beg, end)` for `direction`, optionally past
-/// `after`. Returns owned `(Bytes, Option<Bytes>)` (refcount clones only).
+/// `after`. Returns owned `(ByteSlice, Option<ByteSlice>)` (refcount clones only).
 fn seek_in_writeset(
 	src: &Arc<Merge>,
 	direction: Direction,
-	beg: &Bytes,
-	end: &Bytes,
-	after: Option<&Bytes>,
-) -> Option<(Bytes, Option<Bytes>)> {
+	beg: &ByteSlice,
+	end: &ByteSlice,
+	after: Option<&ByteSlice>,
+) -> Option<(ByteSlice, Option<ByteSlice>)> {
 	let ws = &src.writeset;
 	let entry = match (direction, after) {
 		(Direction::Forward, None) => {
-			ws.range::<Bytes, _>((Bound::Included(beg), Bound::Excluded(end))).next()
+			ws.range::<ByteSlice, _>((Bound::Included(beg), Bound::Excluded(end))).next()
 		}
 		(Direction::Forward, Some(k)) => {
-			ws.range::<Bytes, _>((Bound::Excluded(k), Bound::Excluded(end))).next()
+			ws.range::<ByteSlice, _>((Bound::Excluded(k), Bound::Excluded(end))).next()
 		}
 		(Direction::Reverse, None) => {
-			ws.range::<Bytes, _>((Bound::Included(beg), Bound::Excluded(end))).next_back()
+			ws.range::<ByteSlice, _>((Bound::Included(beg), Bound::Excluded(end))).next_back()
 		}
 		(Direction::Reverse, Some(k)) => {
-			ws.range::<Bytes, _>((Bound::Included(beg), Bound::Excluded(k))).next_back()
+			ws.range::<ByteSlice, _>((Bound::Included(beg), Bound::Excluded(k))).next_back()
 		}
 	};
 	entry.map(|(k, v)| (k.clone(), v.clone()))
@@ -115,7 +115,7 @@ const WINNER_HEAD: &str = "winner index is only set for a Some head";
 const SELECTED_HEAD: &str = "next_source is only set when the matching head is Some";
 
 impl Iterator for MergeQueueIter {
-	type Item = (Bytes, Option<Bytes>);
+	type Item = (ByteSlice, Option<ByteSlice>);
 
 	fn next(&mut self) -> Option<Self::Item> {
 		// Find the winning source: smallest (Forward) or largest (Reverse)
@@ -173,16 +173,16 @@ impl Iterator for MergeQueueIter {
 /// writesets
 pub struct MergeIterator<'a> {
 	// Source iterators
-	pub(crate) tree_iter: SkipRange<'a, Bytes, SkipBounds, Bytes, RwLock<Versions>>,
-	pub(crate) self_iter: TreeRange<'a, Bytes, Option<Bytes>>,
+	pub(crate) tree_iter: SkipRange<'a, ByteSlice, SkipBounds, ByteSlice, RwLock<Versions>>,
+	pub(crate) self_iter: TreeRange<'a, ByteSlice, Option<ByteSlice>>,
 
 	// Lazy iterator over committed merge-queue writesets
-	pub(crate) join_iter: Box<dyn Iterator<Item = (Bytes, Option<Bytes>)> + 'a>,
+	pub(crate) join_iter: Box<dyn Iterator<Item = (ByteSlice, Option<ByteSlice>)> + 'a>,
 
 	// Current buffered entries from each source
-	pub(crate) tree_next: Option<Entry<'a, Bytes, RwLock<Versions>>>,
-	pub(crate) join_next: Option<(Bytes, Option<Bytes>)>,
-	pub(crate) self_next: Option<(&'a Bytes, &'a Option<Bytes>)>,
+	pub(crate) tree_next: Option<Entry<'a, ByteSlice, RwLock<Versions>>>,
+	pub(crate) join_next: Option<(ByteSlice, Option<ByteSlice>)>,
+	pub(crate) self_next: Option<(&'a ByteSlice, &'a Option<ByteSlice>)>,
 
 	// Iterator configuration
 	pub(crate) direction: Direction,
@@ -203,9 +203,9 @@ enum KeySource {
 
 impl<'a> MergeIterator<'a> {
 	pub fn new(
-		mut tree_iter: SkipRange<'a, Bytes, SkipBounds, Bytes, RwLock<Versions>>,
-		mut join_iter: Box<dyn Iterator<Item = (Bytes, Option<Bytes>)> + 'a>,
-		mut self_iter: TreeRange<'a, Bytes, Option<Bytes>>,
+		mut tree_iter: SkipRange<'a, ByteSlice, SkipBounds, ByteSlice, RwLock<Versions>>,
+		mut join_iter: Box<dyn Iterator<Item = (ByteSlice, Option<ByteSlice>)> + 'a>,
+		mut self_iter: TreeRange<'a, ByteSlice, Option<ByteSlice>>,
 		direction: Direction,
 		version: u64,
 		skip: usize,
@@ -248,7 +248,7 @@ impl<'a> MergeIterator<'a> {
 	pub fn next_count(&mut self) -> Option<bool> {
 		loop {
 			// Find the next key to process (smallest for Forward, largest for Reverse)
-			let mut next_key: Option<&Bytes> = None;
+			let mut next_key: Option<&ByteSlice> = None;
 			let mut next_source = KeySource::None;
 
 			// Check self iterator (highest priority)
@@ -373,10 +373,10 @@ impl<'a> MergeIterator<'a> {
 	}
 
 	/// Get next entry with key (no value cloning) - optimized for key iteration
-	pub fn next_key(&mut self) -> Option<(Bytes, bool)> {
+	pub fn next_key(&mut self) -> Option<(ByteSlice, bool)> {
 		loop {
 			// Find the next key to process (smallest for Forward, largest for Reverse)
-			let mut next_key: Option<&Bytes> = None;
+			let mut next_key: Option<&ByteSlice> = None;
 			let mut next_source = KeySource::None;
 
 			// Check self iterator (highest priority)
@@ -537,12 +537,12 @@ impl<'a> MergeIterator<'a> {
 }
 
 impl Iterator for MergeIterator<'_> {
-	type Item = (Bytes, Option<Bytes>);
+	type Item = (ByteSlice, Option<ByteSlice>);
 
 	fn next(&mut self) -> Option<Self::Item> {
 		loop {
 			// Find the next key to process (smallest for Forward, largest for Reverse)
-			let mut next_key: Option<&Bytes> = None;
+			let mut next_key: Option<&ByteSlice> = None;
 			let mut next_source = KeySource::None;
 
 			// Check self iterator (highest priority)

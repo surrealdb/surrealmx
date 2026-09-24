@@ -17,7 +17,7 @@
 //!
 //! Tests recovery scenarios, edge cases, and persistence behavior.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::time::Duration;
 use surrealmx::{AolMode, Database, DatabaseOptions, FsyncMode, PersistenceOptions, SnapshotMode};
 use tempfile::TempDir;
@@ -84,8 +84,8 @@ fn recovery_snapshot_only_no_aol() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
-		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+		assert_eq!(tx.get("key1").unwrap(), Some(ByteSlice::from("value1")));
+		assert_eq!(tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
 		tx.cancel().unwrap();
 	}
 }
@@ -121,8 +121,8 @@ fn recovery_aol_only_no_snapshot() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
-		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+		assert_eq!(tx.get("key1").unwrap(), Some(ByteSlice::from("value1")));
+		assert_eq!(tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
 		tx.cancel().unwrap();
 	}
 }
@@ -163,8 +163,8 @@ fn recovery_combined_snapshot_and_aol() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("before_snap").unwrap(), Some(Bytes::from("value1")));
-		assert_eq!(tx.get("after_snap").unwrap(), Some(Bytes::from("value2")));
+		assert_eq!(tx.get("before_snap").unwrap(), Some(ByteSlice::from("value1")));
+		assert_eq!(tx.get("after_snap").unwrap(), Some(ByteSlice::from("value2")));
 		tx.cancel().unwrap();
 	}
 }
@@ -200,7 +200,7 @@ fn snapshot_during_read_transaction() {
 	}
 
 	// Read should still see data
-	assert_eq!(read_tx.get("key").unwrap(), Some(Bytes::from("value")));
+	assert_eq!(read_tx.get("key").unwrap(), Some(ByteSlice::from("value")));
 }
 
 #[test]
@@ -236,7 +236,7 @@ fn snapshot_preserves_delete_state() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("keep").unwrap(), Some(Bytes::from("keeper")));
+		assert_eq!(tx.get("keep").unwrap(), Some(ByteSlice::from("keeper")));
 		assert!(tx.get("delete_me").unwrap().is_none(), "Deleted key should stay deleted");
 		tx.cancel().unwrap();
 	}
@@ -309,7 +309,7 @@ fn async_aol_eventual_persistence() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("async_key").unwrap(), Some(Bytes::from("async_value")));
+		assert_eq!(tx.get("async_key").unwrap(), Some(ByteSlice::from("async_value")));
 		tx.cancel().unwrap();
 	}
 }
@@ -370,7 +370,7 @@ fn fsync_never_mode() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("key").unwrap(), Some(Bytes::from("value")));
+		assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("value")));
 		tx.cancel().unwrap();
 	}
 }
@@ -419,7 +419,7 @@ fn custom_aol_and_snapshot_paths() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("custom_key").unwrap(), Some(Bytes::from("custom_value")));
+		assert_eq!(tx.get("custom_key").unwrap(), Some(ByteSlice::from("custom_value")));
 		tx.cancel().unwrap();
 	}
 }
@@ -454,7 +454,7 @@ fn multiple_restarts_accumulate_data() {
 
 		// Should see key1
 		let tx = db.transaction(false);
-		assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
+		assert_eq!(tx.get("key1").unwrap(), Some(ByteSlice::from("value1")));
 
 		// Add key2
 		let mut tx = db.transaction(true);
@@ -468,8 +468,8 @@ fn multiple_restarts_accumulate_data() {
 
 		// Should see both keys
 		let tx = db.transaction(false);
-		assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
-		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
+		assert_eq!(tx.get("key1").unwrap(), Some(ByteSlice::from("value1")));
+		assert_eq!(tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
 
 		// Add key3
 		let mut tx = db.transaction(true);
@@ -482,9 +482,9 @@ fn multiple_restarts_accumulate_data() {
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
 		let mut tx = db.transaction(false);
-		assert_eq!(tx.get("key1").unwrap(), Some(Bytes::from("value1")));
-		assert_eq!(tx.get("key2").unwrap(), Some(Bytes::from("value2")));
-		assert_eq!(tx.get("key3").unwrap(), Some(Bytes::from("value3")));
+		assert_eq!(tx.get("key1").unwrap(), Some(ByteSlice::from("value1")));
+		assert_eq!(tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
+		assert_eq!(tx.get("key3").unwrap(), Some(ByteSlice::from("value3")));
 		tx.cancel().unwrap();
 	}
 }

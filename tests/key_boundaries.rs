@@ -17,7 +17,7 @@
 //! Tests boundary conditions including empty values, null bytes,
 //! byte boundaries, and key ordering.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use surrealmx::Database;
 
 #[cfg(target_arch = "wasm32")]
@@ -41,7 +41,7 @@ fn empty_value() {
 	// Verify empty value is retrievable and distinct from non-existent
 	let tx = db.transaction(false);
 	let empty_val = tx.get("key_with_empty_value").unwrap();
-	assert_eq!(empty_val, Some(Bytes::from("")), "Empty value should be Some(empty)");
+	assert_eq!(empty_val, Some(ByteSlice::from("")), "Empty value should be Some(empty)");
 
 	let nonexistent = tx.get("nonexistent_key").unwrap();
 	assert!(nonexistent.is_none(), "Non-existent key should be None");
@@ -75,17 +75,17 @@ fn null_bytes_in_key() {
 	let tx = db.transaction(false);
 	assert_eq!(
 		tx.get(key1.as_slice()).unwrap(),
-		Some(Bytes::from("value1")),
+		Some(ByteSlice::from("value1")),
 		"Key with middle null byte"
 	);
 	assert_eq!(
 		tx.get(key2.as_slice()).unwrap(),
-		Some(Bytes::from("value2")),
+		Some(ByteSlice::from("value2")),
 		"Key starting with null byte"
 	);
 	assert_eq!(
 		tx.get(key3.as_slice()).unwrap(),
-		Some(Bytes::from("value3")),
+		Some(ByteSlice::from("value3")),
 		"Key ending with null byte"
 	);
 }
@@ -140,9 +140,9 @@ fn max_byte_key() {
 
 	// Verify retrieval
 	let tx = db.transaction(false);
-	assert_eq!(tx.get(&key_all_ff).unwrap(), Some(Bytes::from("all_ff")), "All 0xFF key");
-	assert_eq!(tx.get(&key_mixed).unwrap(), Some(Bytes::from("mixed")), "Mixed byte key");
-	assert_eq!(tx.get(&key_high).unwrap(), Some(Bytes::from("high")), "High byte key");
+	assert_eq!(tx.get(&key_all_ff).unwrap(), Some(ByteSlice::from("all_ff")), "All 0xFF key");
+	assert_eq!(tx.get(&key_mixed).unwrap(), Some(ByteSlice::from("mixed")), "Mixed byte key");
+	assert_eq!(tx.get(&key_high).unwrap(), Some(ByteSlice::from("high")), "High byte key");
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -166,7 +166,7 @@ fn single_byte_keys() {
 		let expected = format!("value_{byte:02X}");
 		assert_eq!(
 			tx.get(&key).unwrap(),
-			Some(Bytes::from(expected)),
+			Some(ByteSlice::from(expected)),
 			"Single byte key 0x{byte:02X}"
 		);
 	}
@@ -202,7 +202,7 @@ fn unicode_keys() {
 	let tx = db.transaction(false);
 	for (i, key) in keys.iter().enumerate() {
 		let expected = format!("value_{i}");
-		assert_eq!(tx.get(*key).unwrap(), Some(Bytes::from(expected)), "Unicode key: {key}");
+		assert_eq!(tx.get(*key).unwrap(), Some(ByteSlice::from(expected)), "Unicode key: {key}");
 	}
 
 	// Verify we can retrieve all keys using a wide scan
@@ -247,7 +247,7 @@ fn binary_key_ordering() {
 	let results = tx.scan(start..end, None, None).unwrap();
 
 	// Verify keys are in byte-lexicographic order
-	let mut prev: Option<&Bytes> = None;
+	let mut prev: Option<&ByteSlice> = None;
 	for (key, _) in &results {
 		if let Some(p) = prev {
 			assert!(

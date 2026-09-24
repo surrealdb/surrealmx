@@ -17,7 +17,7 @@
 //!
 //! Tests `getm()` for multi-key operations.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use surrealmx::Database;
 
 // =============================================================================
@@ -41,9 +41,9 @@ fn getm_returns_values_in_order() {
 	let results = tx.getm(keys).unwrap();
 
 	assert_eq!(results.len(), 3);
-	assert_eq!(results[0], Some(Bytes::from("value1")));
-	assert_eq!(results[1], Some(Bytes::from("value2")));
-	assert_eq!(results[2], Some(Bytes::from("value3")));
+	assert_eq!(results[0], Some(ByteSlice::from("value1")));
+	assert_eq!(results[1], Some(ByteSlice::from("value2")));
+	assert_eq!(results[2], Some(ByteSlice::from("value3")));
 }
 
 #[test]
@@ -62,9 +62,9 @@ fn getm_handles_missing_keys() {
 	let results = tx.getm(keys).unwrap();
 
 	assert_eq!(results.len(), 4);
-	assert_eq!(results[0], Some(Bytes::from("value1")));
+	assert_eq!(results[0], Some(ByteSlice::from("value1")));
 	assert_eq!(results[1], None, "Missing key2 should be None");
-	assert_eq!(results[2], Some(Bytes::from("value3")));
+	assert_eq!(results[2], Some(ByteSlice::from("value3")));
 	assert_eq!(results[3], None, "Missing key4 should be None");
 }
 
@@ -105,7 +105,7 @@ fn getm_with_duplicate_keys() {
 	let results = tx.getm(keys).unwrap();
 
 	assert_eq!(results.len(), 3);
-	assert!(results.iter().all(|r| *r == Some(Bytes::from("value"))));
+	assert!(results.iter().all(|r| *r == Some(ByteSlice::from("value"))));
 }
 
 #[test]
@@ -120,8 +120,8 @@ fn getm_sees_uncommitted_writes() {
 	let keys = vec!["key1", "key2"];
 	let results = tx.getm(keys).unwrap();
 
-	assert_eq!(results[0], Some(Bytes::from("uncommitted1")));
-	assert_eq!(results[1], Some(Bytes::from("uncommitted2")));
+	assert_eq!(results[0], Some(ByteSlice::from("uncommitted1")));
+	assert_eq!(results[1], Some(ByteSlice::from("uncommitted2")));
 
 	tx.cancel().unwrap();
 }
@@ -145,7 +145,7 @@ fn getm_with_deleted_keys() {
 	let results = tx.getm(keys).unwrap();
 
 	assert_eq!(results[0], None, "Deleted key should be None");
-	assert_eq!(results[1], Some(Bytes::from("value2")));
+	assert_eq!(results[1], Some(ByteSlice::from("value2")));
 
 	tx.commit().unwrap();
 }
@@ -169,7 +169,7 @@ fn getm_large_batch() {
 
 	assert_eq!(results.len(), count);
 	for (i, result) in results.iter().enumerate() {
-		assert_eq!(*result, Some(Bytes::from(format!("value_{i}"))));
+		assert_eq!(*result, Some(ByteSlice::from(format!("value_{i}"))));
 	}
 }
 
@@ -223,8 +223,8 @@ fn getm_with_binary_keys() {
 	let keys = vec![key1, key2];
 	let results = tx.getm(keys).unwrap();
 
-	assert_eq!(results[0], Some(Bytes::from("binary1")));
-	assert_eq!(results[1], Some(Bytes::from("binary2")));
+	assert_eq!(results[0], Some(ByteSlice::from("binary1")));
+	assert_eq!(results[1], Some(ByteSlice::from("binary2")));
 }
 
 #[test]
@@ -250,6 +250,6 @@ fn getm_concurrent_with_writes() {
 	let keys = vec!["key1", "key2"];
 	let results = read_tx.getm(keys).unwrap();
 
-	assert_eq!(results[0], Some(Bytes::from("v1")));
-	assert_eq!(results[1], Some(Bytes::from("v1")));
+	assert_eq!(results[0], Some(ByteSlice::from("v1")));
+	assert_eq!(results[1], Some(ByteSlice::from("v1")));
 }

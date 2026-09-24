@@ -19,7 +19,7 @@ use crate::bloom::BloomFilter;
 use crate::direction::Direction;
 use crate::iter::MergeQueueIter;
 use crate::queue::{Commit, Merge};
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use papaya::HashSet;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -30,19 +30,19 @@ pub struct ReadsetConflictScenario {
 	/// The committed transaction entry
 	commit: Arc<Commit>,
 	/// The transaction readset
-	readset: HashSet<Bytes>,
+	readset: HashSet<ByteSlice>,
 	/// The bloom filter over the readset
 	readset_bloom: BloomFilter,
 }
 
 impl ReadsetConflictScenario {
 	/// Build a scenario with the given writeset and readset keys
-	pub fn new(writeset_keys: &[Bytes], readset_keys: &[Bytes]) -> Self {
+	pub fn new(writeset_keys: &[ByteSlice], readset_keys: &[ByteSlice]) -> Self {
 		// Build the sorted writeset key list (inputs may be unsorted)
-		let mut ws: Vec<Bytes> = writeset_keys.to_vec();
+		let mut ws: Vec<ByteSlice> = writeset_keys.to_vec();
 		ws.sort();
 		ws.dedup();
-		let keys: Arc<[Bytes]> = ws.into();
+		let keys: Arc<[ByteSlice]> = ws.into();
 		// Build the writeset bloom filter
 		let mut writeset_bloom = BloomFilter::new();
 		for k in keys.iter() {
@@ -92,7 +92,7 @@ pub struct WritesetConflictScenario {
 
 impl WritesetConflictScenario {
 	/// Build a scenario with two writesets
-	pub fn new(committed_keys: &[Bytes], current_keys: &[Bytes]) -> Self {
+	pub fn new(committed_keys: &[ByteSlice], current_keys: &[ByteSlice]) -> Self {
 		Self {
 			committed: Arc::new(Self::build_commit(committed_keys)),
 			current: Arc::new(Self::build_commit(current_keys)),
@@ -104,24 +104,23 @@ impl WritesetConflictScenario {
 		self.committed.is_disjoint_writeset_bloom(&self.current)
 	}
 
-	/// Check writeset disjointness WITHOUT bloom filter (sorted merge only)
+	/// Check writeset disjointness WITHOUT bloom filter (exact check only)
 	pub fn check_without_bloom(&self) -> bool {
 		self.committed.is_disjoint_writeset(&self.current)
 	}
 
 	/// Build a Commit entry from a set of keys
-	fn build_commit(input: &[Bytes]) -> Commit {
+	fn build_commit(input: &[ByteSlice]) -> Commit {
 		// Build the sorted writeset key list (inputs may be unsorted)
-		let mut ws: Vec<Bytes> = input.to_vec();
+		let mut ws: Vec<ByteSlice> = input.to_vec();
 		ws.sort();
 		ws.dedup();
-		let keys: Arc<[Bytes]> = ws.into();
+		let keys: Arc<[ByteSlice]> = ws.into();
 		// Build the writeset bloom filter
 		let mut writeset_bloom = BloomFilter::new();
 		for k in keys.iter() {
 			writeset_bloom.insert(k);
 		}
-		// Build the commit entry
 		Commit {
 			keys,
 			writeset_bloom,
@@ -130,18 +129,16 @@ impl WritesetConflictScenario {
 	}
 }
 
-/// A prepared merge-queue scenario for benchmarking the lazy k-way merge.
-/// Holds a vector of `Arc<Merge>` source writesets and the iteration bounds.
+/// A prepared merge queue scenario for benchmarking
 pub struct MergeQueueScenario {
 	sources: Vec<Arc<Merge>>,
-	beg: Bytes,
-	end: Bytes,
+	beg: ByteSlice,
+	end: ByteSlice,
 }
 
 impl MergeQueueScenario {
-	/// Build a scenario with `num_sources` writesets, each populated with
-	/// `keys_per_source` keys drawn pseudo-randomly from `0..total_keys` so
-	/// that sources statistically overlap and the merge has to dedup.
+	/// Build a scenario with `num_sources` merge entries, each holding
+	/// `keys_per_source` keys spread across a total keyspace of `total_keys`.
 	pub fn new(num_sources: usize, keys_per_source: usize, total_keys: usize) -> Self {
 		let mut sources = Vec::with_capacity(num_sources);
 		for i in 0..num_sources {
@@ -150,16 +147,16 @@ impl MergeQueueScenario {
 				// Cheap deterministic spread; collisions across sources are
 				// expected and exercise the dedup path.
 				let key_idx = (i.wrapping_mul(31) + j.wrapping_mul(17)) % total_keys;
-				let key = Bytes::from(format!("key_{key_idx:08}").into_bytes());
-				ws.insert(key, Some(Bytes::from_static(b"v")));
+				let key = ByteSlice::from(format!("key_{key_idx:08}"));
+				ws.insert(key, Some(ByteSlice::from("v")));
 			}
 			sources.push(Arc::new(Merge {
 				writeset: Arc::new(ws),
 				applied: AtomicBool::new(false),
 			}));
 		}
-		let beg = Bytes::from(b"key_00000000".to_vec());
-		let end = Bytes::from(format!("key_{total_keys:08}").into_bytes());
+		let beg = ByteSlice::from("key_00000000");
+		let end = ByteSlice::from(format!("key_{total_keys:08}"));
 		Self {
 			sources,
 			beg,

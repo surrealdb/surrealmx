@@ -14,7 +14,7 @@
 
 //! This module stores a MVCC versioned entry.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::cmp::Ordering;
 
 #[derive(Clone, Eq, PartialEq)]
@@ -24,7 +24,7 @@ pub struct Version {
 	/// The value of this entry. If this is
 	/// None, then the key is deleted and if
 	/// it is Some then the key exists.
-	pub(crate) value: Option<Bytes>,
+	pub(crate) value: Option<ByteSlice>,
 }
 
 impl Ord for Version {

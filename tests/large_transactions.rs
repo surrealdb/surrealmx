@@ -17,7 +17,7 @@
 //! Tests high-volume transaction scenarios including many keys,
 //! large values, and sustained write pressure.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use surrealmx::Database;
 
 #[cfg(target_arch = "wasm32")]
@@ -49,9 +49,9 @@ fn transaction_with_thousands_of_keys() {
 	assert_eq!(results.len(), num_keys, "All {num_keys} keys should be present");
 
 	// Spot check some values
-	assert_eq!(tx.get("key_000000").unwrap(), Some(Bytes::from("value_0")));
-	assert_eq!(tx.get("key_005000").unwrap(), Some(Bytes::from("value_5000")));
-	assert_eq!(tx.get("key_009999").unwrap(), Some(Bytes::from("value_9999")));
+	assert_eq!(tx.get("key_000000").unwrap(), Some(ByteSlice::from("value_0")));
+	assert_eq!(tx.get("key_005000").unwrap(), Some(ByteSlice::from("value_5000")));
+	assert_eq!(tx.get("key_009999").unwrap(), Some(ByteSlice::from("value_9999")));
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -135,7 +135,7 @@ fn large_scan_results() {
 	assert_eq!(results.len(), num_keys);
 
 	// Verify ordering
-	let mut prev_key: Option<Bytes> = None;
+	let mut prev_key: Option<ByteSlice> = None;
 	for (key, _value) in &results {
 		if let Some(ref prev) = prev_key {
 			assert!(key > prev, "Keys should be in sorted order");
@@ -215,7 +215,7 @@ fn large_batch_getm() {
 	for (i, result) in results.iter().enumerate() {
 		assert!(result.is_some(), "Key {i} should have a value");
 		let expected = format!("batch_value_{i}");
-		assert_eq!(result.as_ref().unwrap(), &Bytes::from(expected));
+		assert_eq!(result.as_ref().unwrap(), &ByteSlice::from(expected));
 	}
 
 	// Test with some missing keys

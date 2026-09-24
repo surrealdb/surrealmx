@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::{rngs::StdRng, RngExt, SeedableRng};
 use std::hint::black_box;
@@ -30,27 +30,27 @@ fn create_database() -> Database {
 }
 
 // Helper functions for generating test data
-fn generate_key(rng: &mut StdRng, size: usize) -> Bytes {
+fn generate_key(rng: &mut StdRng, size: usize) -> ByteSlice {
 	let mut key = vec![0u8; size];
 	rng.fill(&mut key[..]);
-	Bytes::from(key)
+	ByteSlice::from(key)
 }
 
-fn generate_value(rng: &mut StdRng, size: usize) -> Bytes {
+fn generate_value(rng: &mut StdRng, size: usize) -> ByteSlice {
 	let mut val = vec![0u8; size];
 	rng.fill(&mut val[..]);
-	Bytes::from(val)
+	ByteSlice::from(val)
 }
 
-fn generate_sequential_key(index: usize) -> Bytes {
-	Bytes::from(format!("key_{index:08}").into_bytes())
+fn generate_sequential_key(index: usize) -> ByteSlice {
+	ByteSlice::from(format!("key_{index:08}"))
 }
 
-fn generate_sequential_value(index: usize, size: usize) -> Bytes {
+fn generate_sequential_value(index: usize, size: usize) -> ByteSlice {
 	let base = format!("value_{index:08}");
 	let mut val = base.into_bytes();
 	val.resize(size, b'x');
-	Bytes::from(val)
+	ByteSlice::from(val)
 }
 
 fn setup_database_with_data(count: usize, key_size: usize, value_size: usize) -> Database {
@@ -113,7 +113,7 @@ fn bench_put_operations(c: &mut Criterion) {
 			let mut rng = StdRng::seed_from_u64(SEED);
 
 			// Pre-generate data for consistent benchmarking
-			let test_data: Vec<(Bytes, Bytes)> = (0..*entry_count)
+			let test_data: Vec<(ByteSlice, ByteSlice)> = (0..*entry_count)
 				.map(|_| (generate_key(&mut rng, 16), generate_value(&mut rng, *data_size)))
 				.collect();
 
@@ -149,7 +149,8 @@ fn bench_get_operations(c: &mut Criterion) {
 			let mut rng = StdRng::seed_from_u64(SEED);
 
 			// Pre-generate keys for lookup
-			let lookup_keys: Vec<Bytes> = (0..100).map(|_| generate_key(&mut rng, 16)).collect();
+			let lookup_keys: Vec<ByteSlice> =
+				(0..100).map(|_| generate_key(&mut rng, 16)).collect();
 
 			group.throughput(Throughput::Elements(lookup_keys.len() as u64));
 			group.bench_with_input(
@@ -178,7 +179,7 @@ fn bench_exists_operations(c: &mut Criterion) {
 		let mut rng = StdRng::seed_from_u64(SEED);
 
 		// Pre-generate keys for lookup
-		let lookup_keys: Vec<Bytes> = (0..100).map(|_| generate_key(&mut rng, 16)).collect();
+		let lookup_keys: Vec<ByteSlice> = (0..100).map(|_| generate_key(&mut rng, 16)).collect();
 
 		group.throughput(Throughput::Elements(lookup_keys.len() as u64));
 		group.bench_with_input(
@@ -205,7 +206,7 @@ fn bench_delete_operations(c: &mut Criterion) {
 		let mut rng = StdRng::seed_from_u64(SEED);
 
 		// Pre-generate keys for deletion
-		let delete_keys: Vec<Bytes> = (0..(*entry_count / 10)) // Delete 10% of entries
+		let delete_keys: Vec<ByteSlice> = (0..(*entry_count / 10)) // Delete 10% of entries
 			.map(|_| generate_key(&mut rng, 16))
 			.collect();
 
@@ -446,7 +447,7 @@ fn bench_concurrent_readers(c: &mut Criterion) {
 
 		// Pre-generate keys for lookup (more keys for better distribution across
 		// threads)
-		let lookup_keys: Vec<Bytes> =
+		let lookup_keys: Vec<ByteSlice> =
 			(0..200).map(|_| generate_sequential_key(rng.random_range(0..*entry_count))).collect();
 
 		for &thread_count in &thread_counts {
@@ -525,9 +526,9 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 									match operation_type {
 										0 => {
 											// Insert new key
-											let key = Bytes::from(
-												format!("new_key_{thread_id}_{op_id}").into_bytes(),
-											);
+											let key = ByteSlice::from(format!(
+												"new_key_{thread_id}_{op_id}"
+											));
 											let value = generate_value(&mut rng, 100);
 											thread_ops.push(("insert", key, value));
 										}
@@ -543,10 +544,9 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 											let key = if op_id % 2 == 0 {
 												generate_sequential_key(base_key_id % *entry_count) // Existing key
 											} else {
-												Bytes::from(
-													format!("upsert_key_{thread_id}_{op_id}")
-														.into_bytes(),
-												) // New key
+												ByteSlice::from(format!(
+													"upsert_key_{thread_id}_{op_id}"
+												)) // New key
 											};
 											let value = generate_value(&mut rng, 100);
 											thread_ops.push(("upsert", key, value));
@@ -643,14 +643,14 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 							let mut rng = StdRng::seed_from_u64(SEED);
 
 							// Generate read keys
-							let read_keys: Vec<Bytes> = (0..ops_per_thread)
+							let read_keys: Vec<ByteSlice> = (0..ops_per_thread)
 								.map(|_| generate_sequential_key(rng.random_range(0..*entry_count)))
 								.collect();
 
 							// Generate write operations
-							let write_ops: Vec<(Bytes, Bytes)> = (0..ops_per_thread)
+							let write_ops: Vec<(ByteSlice, ByteSlice)> = (0..ops_per_thread)
 								.map(|i| {
-									let key = Bytes::from(format!("mixed_write_{i}").into_bytes());
+									let key = ByteSlice::from(format!("mixed_write_{i}"));
 									let value = generate_value(&mut rng, 100);
 									(key, value)
 								})
@@ -686,14 +686,11 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 									let mut success_count = 0;
 									for (key, value) in &ops {
 										// Make keys unique per writer thread
-										let unique_key = Bytes::from(
-											format!(
-												"{}_w{}",
-												String::from_utf8_lossy(key),
-												writer_id
-											)
-											.into_bytes(),
-										);
+										let unique_key = ByteSlice::from(format!(
+											"{}_w{}",
+											String::from_utf8_lossy(key),
+											writer_id
+										));
 										if tx.put(unique_key, value.clone()).is_ok() {
 											success_count += 1;
 										}
@@ -807,7 +804,7 @@ fn bench_database_options(c: &mut Criterion) {
 		let mut rng = StdRng::seed_from_u64(SEED);
 
 		// Pre-generate data for consistent benchmarking
-		let test_data: Vec<(Bytes, Bytes)> = (0..1000)
+		let test_data: Vec<(ByteSlice, ByteSlice)> = (0..1000)
 			.map(|_| (generate_key(&mut rng, 16), generate_value(&mut rng, 100)))
 			.collect();
 
@@ -993,7 +990,7 @@ fn bench_gc_full_scan(c: &mut Criterion) {
 				let mut tx = db.transaction(true);
 				for i in 0..stale_count {
 					let key = generate_sequential_key(i);
-					let value = Bytes::from(format!("updated_{i:08}").into_bytes());
+					let value = ByteSlice::from(format!("updated_{i:08}"));
 					tx.set(key, value).unwrap();
 				}
 				tx.commit().unwrap();
@@ -1060,7 +1057,7 @@ fn bench_commit_inline_gc(c: &mut Criterion) {
 	// Wide writeset: one commit overwriting many keys
 	group.bench_function("wide_writeset_1000", |b| {
 		let db = Database::new_with_options(DatabaseOptions::default().with_all_workers_disabled());
-		let keys: Vec<Bytes> = (0..1_000).map(generate_sequential_key).collect();
+		let keys: Vec<ByteSlice> = (0..1_000).map(generate_sequential_key).collect();
 		let value = generate_sequential_value(0, 100);
 		b.iter(|| {
 			let mut tx = db.transaction(true);
@@ -1100,9 +1097,10 @@ fn bench_readset_bloom_impact(c: &mut Criterion) {
 
 	for readset_size in &[100, 1_000, 10_000] {
 		// Committed transaction wrote 10 keys in the high range
-		let writeset_keys: Vec<Bytes> = (90_000..90_010).map(generate_sequential_key).collect();
+		let writeset_keys: Vec<ByteSlice> = (90_000..90_010).map(generate_sequential_key).collect();
 		// Current transaction read keys in the low range (no overlap)
-		let readset_keys: Vec<Bytes> = (0..*readset_size).map(generate_sequential_key).collect();
+		let readset_keys: Vec<ByteSlice> =
+			(0..*readset_size).map(generate_sequential_key).collect();
 		// Build the scenario once
 		let scenario = ReadsetConflictScenario::new(&writeset_keys, &readset_keys);
 
@@ -1133,9 +1131,10 @@ fn bench_readset_bloom_conflict_path(c: &mut Criterion) {
 
 	for readset_size in &[100, 1_000, 10_000] {
 		// Committed transaction wrote 10 keys that overlap the readset
-		let writeset_keys: Vec<Bytes> = (0..10).map(generate_sequential_key).collect();
+		let writeset_keys: Vec<ByteSlice> = (0..10).map(generate_sequential_key).collect();
 		// Current transaction read keys 0..readset_size (overlap on 0..10)
-		let readset_keys: Vec<Bytes> = (0..*readset_size).map(generate_sequential_key).collect();
+		let readset_keys: Vec<ByteSlice> =
+			(0..*readset_size).map(generate_sequential_key).collect();
 		// Build the scenario once
 		let scenario = ReadsetConflictScenario::new(&writeset_keys, &readset_keys);
 
@@ -1166,10 +1165,11 @@ fn bench_writeset_bloom_impact(c: &mut Criterion) {
 
 	for writeset_size in &[10, 100, 1_000] {
 		// Committed transaction wrote keys in the high range
-		let committed_keys: Vec<Bytes> =
+		let committed_keys: Vec<ByteSlice> =
 			(90_000..(90_000 + *writeset_size)).map(generate_sequential_key).collect();
 		// Current transaction wrote keys in the low range (no overlap)
-		let current_keys: Vec<Bytes> = (0..*writeset_size).map(generate_sequential_key).collect();
+		let current_keys: Vec<ByteSlice> =
+			(0..*writeset_size).map(generate_sequential_key).collect();
 		// Build the scenario once
 		let scenario = WritesetConflictScenario::new(&committed_keys, &current_keys);
 
@@ -1202,8 +1202,9 @@ fn bench_writeset_bloom_conflict_path(c: &mut Criterion) {
 
 	for writeset_size in &[10, 100, 1_000] {
 		// Both write to overlapping ranges
-		let committed_keys: Vec<Bytes> = (0..10).map(generate_sequential_key).collect();
-		let current_keys: Vec<Bytes> = (0..*writeset_size).map(generate_sequential_key).collect();
+		let committed_keys: Vec<ByteSlice> = (0..10).map(generate_sequential_key).collect();
+		let current_keys: Vec<ByteSlice> =
+			(0..*writeset_size).map(generate_sequential_key).collect();
 		// Build the scenario once
 		let scenario = WritesetConflictScenario::new(&committed_keys, &current_keys);
 
@@ -1263,11 +1264,8 @@ fn bench_bloom_concurrent_throughput(c: &mut Criterion) {
 							}
 							// Write 10 keys in our range
 							for i in range_start..(range_start + 10) {
-								tx.set(
-									generate_sequential_key(i),
-									Bytes::from("updated".as_bytes().to_vec()),
-								)
-								.unwrap();
+								tx.set(generate_sequential_key(i), ByteSlice::from("updated"))
+									.unwrap();
 							}
 							tx.commit().unwrap();
 						})
@@ -1296,11 +1294,8 @@ fn bench_bloom_concurrent_throughput(c: &mut Criterion) {
 								}
 								// Write 10 keys in our range
 								for i in range_start..(range_start + 10) {
-									tx.set(
-										generate_sequential_key(i),
-										Bytes::from("updated".as_bytes().to_vec()),
-									)
-									.unwrap();
+									tx.set(generate_sequential_key(i), ByteSlice::from("updated"))
+										.unwrap();
 								}
 								tx.commit().unwrap();
 							})

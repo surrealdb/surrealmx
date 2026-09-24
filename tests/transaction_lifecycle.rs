@@ -18,7 +18,7 @@
 //! Tests transaction management edge cases including long-lived transactions,
 //! transaction drop behavior, and high transaction counts.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -46,7 +46,7 @@ fn long_lived_read_transaction() {
 	// Start a long-lived read transaction
 	let read_tx = db.transaction(false);
 	let initial_value = read_tx.get("key").unwrap();
-	assert_eq!(initial_value, Some(Bytes::from("v1")));
+	assert_eq!(initial_value, Some(ByteSlice::from("v1")));
 
 	// Perform many updates while read transaction is open
 	for i in 2..20 {
@@ -62,14 +62,14 @@ fn long_lived_read_transaction() {
 	let value_after_updates = read_tx.get("key").unwrap();
 	assert_eq!(
 		value_after_updates,
-		Some(Bytes::from("v1")),
+		Some(ByteSlice::from("v1")),
 		"Long-lived read transaction should maintain snapshot"
 	);
 
 	// New transaction should see latest value
 	let new_tx = db.transaction(false);
 	let latest = new_tx.get("key").unwrap();
-	assert_eq!(latest, Some(Bytes::from("v19")), "New transaction should see latest");
+	assert_eq!(latest, Some(ByteSlice::from("v19")), "New transaction should see latest");
 }
 
 // =============================================================================
@@ -99,7 +99,7 @@ fn transaction_drop_without_close() {
 	let tx = db.transaction(false);
 	assert_eq!(
 		tx.get("key").unwrap(),
-		Some(Bytes::from("initial")),
+		Some(ByteSlice::from("initial")),
 		"Dropped transaction should not have committed"
 	);
 	assert!(
@@ -201,7 +201,7 @@ fn transaction_after_gc() {
 	let tx = db.transaction(false);
 	assert_eq!(
 		tx.get("gc_test_key").unwrap(),
-		Some(Bytes::from("post_gc_value")),
+		Some(ByteSlice::from("post_gc_value")),
 		"Transaction after GC should work"
 	);
 }

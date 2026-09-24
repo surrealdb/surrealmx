@@ -19,7 +19,7 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use surrealmx::Database;
@@ -51,7 +51,7 @@ fn sequential_inserts_with_shared_prefix() {
 	let mut tx = db.transaction(false);
 	for i in 0..LARGE {
 		let v = tx.get(pkey("account:user", i)).unwrap();
-		assert_eq!(v, Some(Bytes::from(format!("v{i}"))), "missing key at i={i}");
+		assert_eq!(v, Some(ByteSlice::from(format!("v{i}"))), "missing key at i={i}");
 	}
 	// Full forward scan returns them in key order
 	let lo: &[u8] = b"account:user:";

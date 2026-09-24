@@ -19,7 +19,7 @@
 //! modifications during iteration, transaction lifecycle, and concurrent
 //! access.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use surrealmx::Database;
@@ -92,7 +92,7 @@ fn modify_key_while_iterating() {
 
 	// Find key_b and verify it has the modified value
 	let key_b = results.iter().find(|(k, _)| k.as_ref() == b"key_b").unwrap();
-	assert_eq!(key_b.1, Bytes::from("modified_b"));
+	assert_eq!(key_b.1, ByteSlice::from("modified_b"));
 
 	tx.commit().unwrap();
 }
@@ -183,19 +183,19 @@ fn iterator_exhaustion_and_reuse() {
 	// Create iterator and exhaust it
 	let mut iter = tx.keys_iter("x".."zz").unwrap();
 	let first = iter.next();
-	assert_eq!(first, Some(Bytes::from("x")));
+	assert_eq!(first, Some(ByteSlice::from("x")));
 	let second = iter.next();
-	assert_eq!(second, Some(Bytes::from("y")));
+	assert_eq!(second, Some(ByteSlice::from("y")));
 	let third = iter.next();
-	assert_eq!(third, Some(Bytes::from("z")));
+	assert_eq!(third, Some(ByteSlice::from("z")));
 
 	// Iterator should be exhausted
-	assert!(iter.next().is_none());
-	assert!(iter.next().is_none()); // Multiple calls should keep returning None
+	assert_eq!(iter.next(), None);
+	assert_eq!(iter.next(), None); // Multiple calls after exhaustion
 
 	// Creating a new iterator should work fine
 	let mut new_iter = tx.keys_iter("x".."zz").unwrap();
-	assert_eq!(new_iter.next(), Some(Bytes::from("x")));
+	assert_eq!(new_iter.next(), Some(ByteSlice::from("x")));
 }
 
 #[test]

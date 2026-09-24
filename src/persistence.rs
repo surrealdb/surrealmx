@@ -24,7 +24,7 @@ use crate::inner::Inner;
 use crate::version::Version;
 use crate::versions::Versions;
 use bincode::config;
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use crossbeam_deque::{Injector, Steal};
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
@@ -41,7 +41,7 @@ use web_time::{Duration, Instant};
 #[derive(Debug, Clone)]
 pub(crate) struct AsyncAppendOperation {
 	pub version: u64,
-	pub writeset: BTreeMap<Bytes, Option<Bytes>>,
+	pub writeset: BTreeMap<ByteSlice, Option<ByteSlice>>,
 }
 
 /// Configuration for AOL (Append-Only Log) behavior
@@ -366,8 +366,8 @@ impl Persistence {
 	/// 2. Applies any changes from the append-only log
 	fn load(&self) -> Result<(), PersistenceError> {
 		// Decoded record shapes, one per file format
-		type SnapshotEntry = (Bytes, Vec<(u64, Option<Bytes>)>);
-		type AolEntry = (Bytes, u64, Option<Bytes>);
+		type SnapshotEntry = (ByteSlice, Vec<(u64, Option<ByteSlice>)>);
+		type AolEntry = (ByteSlice, u64, Option<ByteSlice>);
 		// Track the maximum version seen across EVERY decoded record —
 		// snapshot entries (including keys skipped as tombstone-topped)
 		// and every append-only log record (including deletes). The
@@ -908,7 +908,7 @@ impl Persistence {
 	pub(crate) fn append(
 		&self,
 		version: u64,
-		writeset: &BTreeMap<Bytes, Option<Bytes>>,
+		writeset: &BTreeMap<ByteSlice, Option<ByteSlice>>,
 	) -> Result<(), PersistenceError> {
 		// Skip AOL writing if AOL is disabled
 		if self.aol_mode == AolMode::Never {

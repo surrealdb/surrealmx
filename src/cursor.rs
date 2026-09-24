@@ -18,7 +18,7 @@ use crate::direction::Direction;
 use crate::inner::Inner;
 use crate::iter::{MergeIterator, MergeQueueIter};
 use crate::queue::Merge;
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -50,11 +50,11 @@ pub struct Cursor<'a> {
 	/// Reference to the database inner structure
 	database: &'a Arc<Inner>,
 	/// Reference to the transaction's writeset
-	writeset: &'a BTreeMap<Bytes, Option<Bytes>>,
+	writeset: &'a BTreeMap<ByteSlice, Option<ByteSlice>>,
 	/// Original range start bound
-	beg: Bytes,
+	beg: ByteSlice,
 	/// Original range end bound
-	end: Bytes,
+	end: ByteSlice,
 	/// Transaction version for MVCC
 	version: u64,
 	/// Snapshot of merge-queue writesets visible to this cursor (Arc bumps,
@@ -64,7 +64,7 @@ pub struct Cursor<'a> {
 	/// Current direction of iteration
 	direction: Direction,
 	/// Current cached entry (key, value) - None means invalid position
-	current: Option<(Bytes, Option<Bytes>)>,
+	current: Option<(ByteSlice, Option<ByteSlice>)>,
 	/// Whether the cursor has been positioned
 	positioned: bool,
 	/// Persistent merge iterator, reused across sequential next/prev calls
@@ -78,9 +78,9 @@ impl<'a> Cursor<'a> {
 	/// `seek_to_last()`, or `seek()` to position it.
 	pub(crate) fn new(
 		database: &'a Arc<Inner>,
-		writeset: &'a BTreeMap<Bytes, Option<Bytes>>,
-		beg: Bytes,
-		end: Bytes,
+		writeset: &'a BTreeMap<ByteSlice, Option<ByteSlice>>,
+		beg: ByteSlice,
+		end: ByteSlice,
 		version: u64,
 	) -> Self {
 		// Snapshot the merge-queue writesets once (Arc bumps); the lazy
@@ -114,14 +114,14 @@ impl<'a> Cursor<'a> {
 
 	/// Get the current key, or None if the cursor is not valid.
 	#[inline]
-	pub fn key(&self) -> Option<&Bytes> {
+	pub fn key(&self) -> Option<&ByteSlice> {
 		self.current.as_ref().map(|(k, _)| k)
 	}
 
 	/// Get the current value, or None if the cursor is not valid or the entry
 	/// is deleted.
 	#[inline]
-	pub fn value(&self) -> Option<&Bytes> {
+	pub fn value(&self) -> Option<&ByteSlice> {
 		self.current.as_ref().and_then(|(_, v)| v.as_ref())
 	}
 
@@ -155,7 +155,7 @@ impl<'a> Cursor<'a> {
 	pub fn seek<K: AsRef<[u8]>>(&mut self, key: K) {
 		self.direction = Direction::Forward;
 		self.positioned = true;
-		let key_bytes = Bytes::copy_from_slice(key.as_ref());
+		let key_bytes = ByteSlice::from_slice(key.as_ref());
 		// Clamp to range bounds
 		let seek_key = if key_bytes < self.beg {
 			self.beg.clone()
@@ -176,7 +176,7 @@ impl<'a> Cursor<'a> {
 	pub fn seek_for_prev<K: AsRef<[u8]>>(&mut self, key: K) {
 		self.direction = Direction::Reverse;
 		self.positioned = true;
-		let key_bytes = Bytes::copy_from_slice(key.as_ref());
+		let key_bytes = ByteSlice::from_slice(key.as_ref());
 		// Clamp to range bounds
 		let seek_key = if key_bytes >= self.end {
 			self.end.clone()
@@ -259,7 +259,7 @@ impl<'a> Cursor<'a> {
 
 	/// Create a new merge iterator over the given range and direction.
 	/// Replaces any existing iterator.
-	fn create_iterator(&mut self, start: &Bytes, end: &Bytes, direction: Direction) {
+	fn create_iterator(&mut self, start: &ByteSlice, end: &ByteSlice, direction: Direction) {
 		let join_iter = Box::new(MergeQueueIter::new(
 			self.merge_sources.clone(),
 			start.clone(),
@@ -272,7 +272,7 @@ impl<'a> Cursor<'a> {
 				.datastore
 				.range((Bound::Included(start.clone()), Bound::Excluded(end.clone()))),
 			join_iter,
-			self.writeset.range::<Bytes, _>(start..end),
+			self.writeset.range::<ByteSlice, _>(start..end),
 			direction,
 			self.version,
 			0,
@@ -336,7 +336,7 @@ impl<'a> KeyIterator<'a> {
 }
 
 impl Iterator for KeyIterator<'_> {
-	type Item = Bytes;
+	type Item = ByteSlice;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		// Skip deleted entries
@@ -433,7 +433,7 @@ impl<'a> ScanIterator<'a> {
 }
 
 impl Iterator for ScanIterator<'_> {
-	type Item = (Bytes, Bytes);
+	type Item = (ByteSlice, ByteSlice);
 
 	fn next(&mut self) -> Option<Self::Item> {
 		// Skip deleted entries
@@ -489,11 +489,11 @@ impl DoubleEndedIterator for ScanIterator<'_> {
 
 /// Compute the next key after the given key (lexicographically).
 /// This is used for exclusive lower bounds.
-fn next_key(key: &Bytes) -> Bytes {
+fn next_key(key: &ByteSlice) -> ByteSlice {
 	let mut next = key.to_vec();
 	// Append a zero byte to get the next key
 	next.push(0);
-	Bytes::from(next)
+	ByteSlice::from(next)
 }
 
 #[cfg(test)]
@@ -502,7 +502,7 @@ mod tests {
 
 	#[test]
 	fn test_next_key() {
-		let key = Bytes::from_static(b"hello");
+		let key = ByteSlice::from("hello");
 		let next = next_key(&key);
 		assert_eq!(next.as_ref(), b"hello\0");
 		assert!(next > key);

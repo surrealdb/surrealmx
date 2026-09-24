@@ -17,7 +17,7 @@
 //! Tests SSI (Serializable Snapshot Isolation) conflict detection
 //! and Snapshot Isolation behavior.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use surrealmx::{Database, Error};
 
 #[cfg(target_arch = "wasm32")]
@@ -50,12 +50,12 @@ fn snapshot_isolation_read_sees_consistent_snapshot() {
 	// Read transaction should still see the original values (snapshot)
 	assert_eq!(
 		read_tx.get("key1").unwrap(),
-		Some(Bytes::from("initial1")),
+		Some(ByteSlice::from("initial1")),
 		"SI read should see original value for key1"
 	);
 	assert_eq!(
 		read_tx.get("key2").unwrap(),
-		Some(Bytes::from("initial2")),
+		Some(ByteSlice::from("initial2")),
 		"SI read should see original value for key2"
 	);
 
@@ -65,7 +65,7 @@ fn snapshot_isolation_read_sees_consistent_snapshot() {
 	let mut new_tx = db.transaction(false);
 	assert_eq!(
 		new_tx.get("key1").unwrap(),
-		Some(Bytes::from("modified1")),
+		Some(ByteSlice::from("modified1")),
 		"New transaction should see modified value"
 	);
 	new_tx.cancel().unwrap();
@@ -98,8 +98,8 @@ fn snapshot_isolation_allows_concurrent_writes_to_different_keys() {
 
 	// Verify final state
 	let mut verify_tx = db.transaction(false);
-	assert_eq!(verify_tx.get("key1").unwrap(), Some(Bytes::from("tx1_value")));
-	assert_eq!(verify_tx.get("key2").unwrap(), Some(Bytes::from("tx2_value")));
+	assert_eq!(verify_tx.get("key1").unwrap(), Some(ByteSlice::from("tx1_value")));
+	assert_eq!(verify_tx.get("key2").unwrap(), Some(ByteSlice::from("tx2_value")));
 	verify_tx.cancel().unwrap();
 }
 
@@ -130,7 +130,7 @@ fn ssi_detects_write_write_conflict_on_same_key() {
 	let mut verify_tx = db.transaction(false);
 	assert_eq!(
 		verify_tx.get("key").unwrap(),
-		Some(Bytes::from("value1")),
+		Some(ByteSlice::from("value1")),
 		"Value should be from first committed transaction"
 	);
 	verify_tx.cancel().unwrap();
@@ -181,8 +181,8 @@ fn ssi_allows_concurrent_writes_to_disjoint_keys() {
 
 	// Verify
 	let mut verify_tx = db.transaction(false);
-	assert_eq!(verify_tx.get("key_a").unwrap(), Some(Bytes::from("value_a")));
-	assert_eq!(verify_tx.get("key_b").unwrap(), Some(Bytes::from("value_b")));
+	assert_eq!(verify_tx.get("key_a").unwrap(), Some(ByteSlice::from("value_a")));
+	assert_eq!(verify_tx.get("key_b").unwrap(), Some(ByteSlice::from("value_b")));
 	verify_tx.cancel().unwrap();
 }
 
@@ -419,7 +419,7 @@ fn concurrent_counter_increment_conflict() {
 
 	// Verify counter is 1, not 2
 	let mut verify = db.transaction(false);
-	assert_eq!(verify.get("counter").unwrap(), Some(Bytes::from("1")));
+	assert_eq!(verify.get("counter").unwrap(), Some(ByteSlice::from("1")));
 	verify.cancel().unwrap();
 }
 
@@ -439,7 +439,7 @@ fn si_locked_read_detects_concurrent_write_conflict() {
 
 	// tx1 with SI locks the key for update
 	let mut tx1 = db.transaction(true).with_snapshot_isolation();
-	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(ByteSlice::from("initial")));
 
 	// tx2 modifies the locked key
 	let mut tx2 = db.transaction(true);
@@ -472,7 +472,7 @@ fn si_locked_read_unrelated_write_commits() {
 
 	// tx1 with SI locks the key for update
 	let mut tx1 = db.transaction(true).with_snapshot_isolation();
-	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(ByteSlice::from("initial")));
 
 	// tx2 modifies an unrelated key
 	let mut tx2 = db.transaction(true);
@@ -498,7 +498,7 @@ fn si_locked_read_without_writes_detects_conflict() {
 
 	// tx1 with SI locks the key for update, but writes nothing
 	let mut tx1 = db.transaction(true).with_snapshot_isolation();
-	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(ByteSlice::from("initial")));
 
 	// tx2 modifies the locked key
 	let mut tx2 = db.transaction(true);
@@ -525,7 +525,7 @@ fn ssi_locked_read_without_writes_detects_conflict() {
 
 	// tx1 with SSI locks the key for update, but writes nothing
 	let mut tx1 = db.transaction(true).with_serializable_snapshot_isolation();
-	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(ByteSlice::from("initial")));
 
 	// tx2 modifies the locked key
 	let mut tx2 = db.transaction(true);
@@ -553,7 +553,7 @@ fn locked_read_without_writes_commits_when_unchanged() {
 
 	// tx1 with SI locks the key for update, but writes nothing
 	let mut tx1 = db.transaction(true).with_snapshot_isolation();
-	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(ByteSlice::from("initial")));
 
 	// tx2 modifies an unrelated key
 	let mut tx2 = db.transaction(true);
@@ -602,11 +602,11 @@ fn locked_read_reads_snapshot_and_own_writes() {
 	let mut tx1 = db.transaction(true).with_snapshot_isolation();
 
 	// The locked read sees the snapshot value
-	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(ByteSlice::from("initial")));
 
 	// The locked read sees this transaction's own writes
 	tx1.set("key", "updated").unwrap();
-	assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("updated")));
+	assert_eq!(tx1.get_for_update("key").unwrap(), Some(ByteSlice::from("updated")));
 
 	tx1.commit().unwrap();
 }
@@ -628,8 +628,8 @@ fn ssi_locked_read_scopes_validation_to_the_locked_key() {
 
 	// tx1 with SSI locks one key and plainly reads another, writing nothing
 	let mut tx1 = db.transaction(true).with_serializable_snapshot_isolation();
-	assert_eq!(tx1.get_for_update("locked").unwrap(), Some(Bytes::from("initial")));
-	assert_eq!(tx1.get("plain").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get_for_update("locked").unwrap(), Some(ByteSlice::from("initial")));
+	assert_eq!(tx1.get("plain").unwrap(), Some(ByteSlice::from("initial")));
 
 	// tx2 modifies only the plainly read key
 	let mut tx2 = db.transaction(true);
@@ -657,8 +657,8 @@ fn ssi_locked_read_keeps_plain_read_validation_for_writers() {
 
 	// tx1 with SSI locks one key, plainly reads another, and writes
 	let mut tx1 = db.transaction(true).with_serializable_snapshot_isolation();
-	assert_eq!(tx1.get_for_update("locked").unwrap(), Some(Bytes::from("initial")));
-	assert_eq!(tx1.get("plain").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get_for_update("locked").unwrap(), Some(ByteSlice::from("initial")));
+	assert_eq!(tx1.get("plain").unwrap(), Some(ByteSlice::from("initial")));
 	tx1.set("other", "value").unwrap();
 
 	// tx2 modifies only the plainly read key
@@ -690,8 +690,8 @@ fn si_locked_read_does_not_track_plain_reads() {
 
 	// tx1 with SI locks one key, plainly reads another, and writes
 	let mut tx1 = db.transaction(true).with_snapshot_isolation();
-	assert_eq!(tx1.get_for_update("locked").unwrap(), Some(Bytes::from("initial")));
-	assert_eq!(tx1.get("plain").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get_for_update("locked").unwrap(), Some(ByteSlice::from("initial")));
+	assert_eq!(tx1.get("plain").unwrap(), Some(ByteSlice::from("initial")));
 	tx1.set("other", "value").unwrap();
 
 	// tx2 modifies only the plainly read key
@@ -720,7 +720,7 @@ fn ssi_locked_read_does_not_arm_scan_validation() {
 
 	// tx1 with SSI locks one key and scans a range, writing nothing
 	let mut tx1 = db.transaction(true).with_serializable_snapshot_isolation();
-	assert_eq!(tx1.get_for_update("locked").unwrap(), Some(Bytes::from("initial")));
+	assert_eq!(tx1.get_for_update("locked").unwrap(), Some(ByteSlice::from("initial")));
 	assert_eq!(tx1.scan("scan/".."scan/z", None, None).unwrap().len(), 1);
 
 	// tx2 writes inside the scanned range
@@ -746,7 +746,7 @@ fn locked_read_does_not_leak_into_a_pooled_reuse() {
 	// cancelling it, so it goes back to the pool with a populated lockset
 	{
 		let mut tx1 = db.transaction(true);
-		assert_eq!(tx1.get_for_update("key").unwrap(), Some(Bytes::from("initial")));
+		assert_eq!(tx1.get_for_update("key").unwrap(), Some(ByteSlice::from("initial")));
 	}
 
 	// Take that pooled transaction back out. Its snapshot is established

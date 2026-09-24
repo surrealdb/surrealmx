@@ -18,7 +18,7 @@
 //! Tests concurrent operations, GC with active readers, and multi-writer
 //! scenarios.
 
-use bytes::Bytes;
+use byteslice::ByteSlice;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
@@ -46,7 +46,7 @@ fn gc_does_not_remove_versions_needed_by_active_readers() {
 	// Start a long-lived read transaction
 	let read_tx = db.transaction(false);
 	let initial_value = read_tx.get("key").unwrap();
-	assert_eq!(initial_value, Some(Bytes::from("v1")));
+	assert_eq!(initial_value, Some(ByteSlice::from("v1")));
 
 	// Update the key multiple times
 	for i in 2..10 {
@@ -62,7 +62,7 @@ fn gc_does_not_remove_versions_needed_by_active_readers() {
 	let value_after_gc = read_tx.get("key").unwrap();
 	assert_eq!(
 		value_after_gc,
-		Some(Bytes::from("v1")),
+		Some(ByteSlice::from("v1")),
 		"Active reader should still see original value after GC"
 	);
 }
@@ -102,7 +102,7 @@ fn gc_cleans_up_after_readers_complete() {
 	// Current value should be latest
 	let mut tx = db.transaction(false);
 	let current = tx.get("key").unwrap();
-	assert_eq!(current, Some(Bytes::from("v19")));
+	assert_eq!(current, Some(ByteSlice::from("v19")));
 	tx.cancel().unwrap();
 }
 
@@ -148,7 +148,7 @@ fn multiple_writers_disjoint_keys() {
 			let key = format!("writer_{writer_id}_key_{op_id}");
 			let expected = format!("value_{writer_id}_{op_id}");
 			let actual = tx.get(&key).unwrap();
-			assert_eq!(actual, Some(Bytes::from(expected)), "Key {key} missing");
+			assert_eq!(actual, Some(ByteSlice::from(expected)), "Key {key} missing");
 		}
 	}
 	tx.cancel().unwrap();
