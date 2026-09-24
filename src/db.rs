@@ -241,6 +241,65 @@ impl Database {
 		Ok(exists)
 	}
 
+	/// Set a key to a value in an auto-committed write transaction.
+	///
+	/// Atomically sets the key to the specified value and commits the write.
+	/// Overwrites any existing value at the key.
+	#[inline]
+	pub fn set<K: IntoBytes, V: IntoBytes>(&self, key: K, val: V) -> Result<(), Error> {
+		let mut tx = self.transaction(true);
+		tx.set(key, val)?;
+		tx.commit()
+	}
+
+	/// Put a key to a value in an auto-committed write transaction.
+	///
+	/// Atomically inserts the key-value pair, returning an error if the key
+	/// already exists in the datastore.
+	#[inline]
+	pub fn put<K: IntoBytes, V: IntoBytes>(&self, key: K, val: V) -> Result<(), Error> {
+		let mut tx = self.transaction(true);
+		tx.put(key, val)?;
+		tx.commit()
+	}
+
+	/// Conditionally set a key to a value in an auto-committed write transaction.
+	///
+	/// Succeeds only if the existing value at `key` matches `chk` (or does not
+	/// exist when `chk` is `None`).
+	#[inline]
+	pub fn putc<K: IntoBytes, V: IntoBytes, C: IntoBytes>(
+		&self,
+		key: K,
+		val: V,
+		chk: Option<C>,
+	) -> Result<(), Error> {
+		let mut tx = self.transaction(true);
+		tx.putc(key, val, chk)?;
+		tx.commit()
+	}
+
+	/// Delete a key in an auto-committed write transaction.
+	///
+	/// Atomically creates a tombstone at the key and commits the deletion.
+	#[inline]
+	pub fn del<K: IntoBytes>(&self, key: K) -> Result<(), Error> {
+		let mut tx = self.transaction(true);
+		tx.del(key)?;
+		tx.commit()
+	}
+
+	/// Conditionally delete a key in an auto-committed write transaction.
+	///
+	/// Succeeds only if the existing value at `key` matches `chk` (or does not
+	/// exist when `chk` is `None`).
+	#[inline]
+	pub fn delc<K: IntoBytes, C: IntoBytes>(&self, key: K, chk: Option<C>) -> Result<(), Error> {
+		let mut tx = self.transaction(true);
+		tx.delc(key, chk)?;
+		tx.commit()
+	}
+
 	/// Get a reference to the persistence layer if enabled
 	#[cfg(not(target_arch = "wasm32"))]
 	pub const fn persistence(&self) -> Option<&Persistence> {
@@ -508,20 +567,40 @@ mod tests {
 	}
 
 	#[test]
-	fn direct_database_reads() {
+	fn direct_database_operations() {
 		let db = Database::new();
 		assert!(!db.exists("test").unwrap());
 		assert_eq!(db.get("test").unwrap(), None);
 
-		let mut tx = db.transaction(true);
-		tx.put("test", "hello world").unwrap();
-		tx.commit().unwrap();
-
+		// Direct put
+		db.put("test", "hello world").unwrap();
 		assert!(db.exists("test").unwrap());
 		assert_eq!(db.get("test").unwrap().as_deref(), Some(b"hello world" as &[u8]));
+		assert!(db.put("test", "fail duplicate").is_err());
 
+		// Direct with_value
 		let len = db.with_value("test", <[u8]>::len).unwrap();
 		assert_eq!(len, Some(11));
+
+		// Direct set (overwrite)
+		db.set("test", "updated").unwrap();
+		assert_eq!(db.get("test").unwrap().as_deref(), Some(b"updated" as &[u8]));
+
+		// Direct putc
+		assert!(db.putc("test", "conditional", Some("wrong")).is_err());
+		db.putc("test", "conditional", Some("updated")).unwrap();
+		assert_eq!(db.get("test").unwrap().as_deref(), Some(b"conditional" as &[u8]));
+
+		// Direct delc
+		assert!(db.delc("test", Some("wrong")).is_err());
+		db.delc("test", Some("conditional")).unwrap();
+		assert!(!db.exists("test").unwrap());
+
+		// Direct del
+		db.set("another", "value").unwrap();
+		assert!(db.exists("another").unwrap());
+		db.del("another").unwrap();
+		assert!(!db.exists("another").unwrap());
 	}
 
 	#[test]
