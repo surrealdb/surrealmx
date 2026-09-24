@@ -144,8 +144,7 @@ fn recovery_empty_database() {
 
 	// Create and close empty database
 	{
-		let _db =
-			Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
+		let _ = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 		// Don't write any data
 	}
 

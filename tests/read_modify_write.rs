@@ -172,7 +172,7 @@ fn optimistic_locking_pattern() {
 		let version_num: i32 = std::str::from_utf8(&version).unwrap().parse().unwrap();
 
 		// Read and modify data
-		let _data = tx.get("data").unwrap().unwrap();
+		let _ = tx.get("data").unwrap().unwrap();
 
 		// Update data and bump version
 		tx.set("data", "modified_data").unwrap();

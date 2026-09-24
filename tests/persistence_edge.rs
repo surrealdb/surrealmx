@@ -38,8 +38,7 @@ fn recovery_with_empty_aol() {
 
 	// Create database but don't add any data
 	{
-		let _db =
-			Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
+		let _ = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 		// No operations - AOL file might be empty or not exist
 	}
 

@@ -707,7 +707,7 @@ fn test_persistence_options_builder() {
 
 	// Test that database can be created with these options
 	let db_opts = DatabaseOptions::default();
-	let _db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+	let _ = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 }
 
 #[test]

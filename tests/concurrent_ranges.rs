@@ -115,7 +115,7 @@ fn delete_from_scanned_range() {
 		tx.commit()
 	});
 
-	let (scan_count, _scan_commit) = scan_handle.join().unwrap();
+	let (scan_count, _) = scan_handle.join().unwrap();
 	let delete_result = delete_handle.join().unwrap();
 
 	// Scan should see a consistent snapshot
@@ -164,7 +164,7 @@ fn update_within_scanned_range() {
 		tx.commit()
 	});
 
-	let (scan_values, _scan_commit) = scan_handle.join().unwrap();
+	let (scan_values, _) = scan_handle.join().unwrap();
 	let update_result = update_handle.join().unwrap();
 
 	// Scan should see consistent values

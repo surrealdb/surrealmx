@@ -137,7 +137,7 @@ fn large_scan_results() {
 
 	// Verify ordering
 	let mut prev_key: Option<ByteSlice> = None;
-	for (key, _value) in &results {
+	for (key, _) in &results {
 		if let Some(ref prev) = prev_key {
 			assert!(key > prev, "Keys should be in sorted order");
 		}
@@ -177,7 +177,7 @@ fn memory_under_write_pressure() {
 
 	// Verify values have the content from the last iteration
 	let expected_byte = ((iterations - 1) % 256) as u8;
-	for (_key, value) in &results {
+	for (_, value) in &results {
 		assert_eq!(value.len(), value_size);
 		assert!(
 			value.iter().all(|&b| b == expected_byte),
