@@ -79,7 +79,7 @@ impl Versions {
 
 	/// Returns a reference to the latest version, if any.
 	#[inline]
-	#[cfg(any(test, not(target_arch = "wasm32")))]
+	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) fn last(&self) -> Option<&Version> {
 		match self {
 			Self::Empty => None,
