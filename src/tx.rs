@@ -86,7 +86,7 @@ impl Drop for Transaction {
 			// snapshot values, which is only ever conservative. The slot
 			// allocation itself is retained on the pooled transaction and
 			// re-pinned on reuse.
-			inner.database.readers.remove(&inner.slot_id);
+			inner.database.readers.remove(inner.slot_id);
 			// Put the transaction in to the pool
 			self.pool.put(inner);
 		}
@@ -561,9 +561,8 @@ fn pin_slot(db: &Inner, slot: &Arc<Slot>) -> (u64, u64, u64) {
 	// Publish the pinning sentinels before the slot becomes visible
 	slot.version.store(SLOT_PINNING, Ordering::SeqCst);
 	slot.commit.store(SLOT_PINNING, Ordering::SeqCst);
-	// Insert the slot into the readers map under a fresh id
-	let slot_id = db.reader_slot_id.fetch_add(1, Ordering::Relaxed) + 1;
-	db.readers.insert(slot_id, Arc::clone(slot));
+	// Insert the slot into the partitioned readers map under a fresh id
+	let slot_id = db.readers.pin(slot);
 	// Pair with the fence in every watermark scan
 	fence(Ordering::SeqCst);
 	// Load the commit snapshot, then the version snapshot
@@ -704,7 +703,7 @@ impl TransactionInner {
 		// Mark this transaction as done
 		self.done = true;
 		// Unpin from readers immediately so queue cleanup and watermarks are unblocked
-		self.database.readers.remove(&self.slot_id);
+		self.database.readers.remove(self.slot_id);
 		// Clear the transaction state
 		self.clear_read_state();
 		self.writeset.clear();
@@ -749,7 +748,10 @@ impl TransactionInner {
 		let mark = self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
 		// Revert writes made since the savepoint mark in reverse order
 		while self.undo_journal.len() > mark {
-			let entry = self.undo_journal.pop().unwrap();
+			let entry = self
+				.undo_journal
+				.pop()
+				.expect("undo journal length checked greater than mark");
 			match entry.op {
 				UndoOp::Remove => {
 					self.writeset.remove(&entry.key);
@@ -801,7 +803,7 @@ impl TransactionInner {
 		// writeset is empty
 		if self.writeset.is_empty() && !self.locked {
 			// Unpin from readers immediately
-			self.database.readers.remove(&self.slot_id);
+			self.database.readers.remove(self.slot_id);
 			// Clear the transaction state
 			self.clear_read_state();
 			// Clear savepoint stack and undo journal
@@ -895,7 +897,7 @@ impl TransactionInner {
 					// on the writeset-conflict branch above. The
 					// unwind guard marks it aborted on return.
 					// Unpin from readers immediately
-					self.database.readers.remove(&self.slot_id);
+					self.database.readers.remove(self.slot_id);
 					// Clear the transaction state
 					self.clear_read_state();
 					self.writeset.clear();
@@ -921,7 +923,7 @@ impl TransactionInner {
 						// on the writeset-conflict branch above. The
 						// unwind guard marks it aborted on return.
 						// Unpin from readers immediately
-						self.database.readers.remove(&self.slot_id);
+						self.database.readers.remove(self.slot_id);
 						// Clear the transaction state
 						self.clear_read_state();
 						self.writeset.clear();
@@ -958,7 +960,7 @@ impl TransactionInner {
 									// above. The unwind guard marks it
 									// aborted on return.
 									// Unpin from readers immediately
-									self.database.readers.remove(&self.slot_id);
+									self.database.readers.remove(self.slot_id);
 									// Clear the transaction state
 									self.clear_read_state();
 									self.writeset.clear();
@@ -995,7 +997,7 @@ impl TransactionInner {
 			commit_guard.armed = false;
 			self.database.advance_commit_watermark();
 			// Unpin from readers immediately
-			self.database.readers.remove(&self.slot_id);
+			self.database.readers.remove(self.slot_id);
 			// Clear the transaction state
 			self.clear_read_state();
 			// Clear savepoint stack and undo journal
@@ -1134,7 +1136,7 @@ impl TransactionInner {
 				// pre-existing applied-but-unpersisted limitation of this
 				// error path).
 				// Unpin from readers immediately
-				self.database.readers.remove(&self.slot_id);
+				self.database.readers.remove(self.slot_id);
 				// Clear the transaction state
 				self.clear_read_state();
 				self.writeset.clear();
@@ -1155,7 +1157,7 @@ impl TransactionInner {
 		merge_guard.armed = false;
 		self.database.advance_merge_retirement();
 		// Unpin from readers immediately
-		self.database.readers.remove(&self.slot_id);
+		self.database.readers.remove(self.slot_id);
 		// Clear the transaction state
 		self.clear_read_state();
 		self.writeset.clear();

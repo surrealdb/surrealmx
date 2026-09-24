@@ -1402,7 +1402,7 @@ mod tests {
 		db.run_cleanup();
 		assert_eq!(db.transaction_commit_queue.len(), before);
 		// Remove the pinning slot; sweeps proceed again
-		db.readers.remove(&u64::MAX);
+		db.readers.remove(u64::MAX);
 		assert!(db.compute_cleanup_ts().is_some());
 		db.run_cleanup();
 		assert_eq!(db.transaction_commit_queue.len(), 1);

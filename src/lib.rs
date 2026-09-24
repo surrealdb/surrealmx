@@ -42,6 +42,7 @@ mod oracle;
 mod persistence;
 mod pool;
 mod queue;
+mod readers;
 mod tx;
 mod version;
 mod versions;

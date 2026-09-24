@@ -18,6 +18,7 @@ use crate::oracle::Oracle;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::persistence::Persistence;
 use crate::queue::{Commit, Merge};
+use crate::readers::Readers;
 use crate::versions::Versions;
 use crate::DatabaseOptions;
 use byteslice::ByteSlice;
@@ -25,7 +26,7 @@ use crossbeam_skiplist::SkipMap;
 use crossbeam_utils::CachePadded;
 use papaya::HashSet;
 use parking_lot::RwLock;
-use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
@@ -79,11 +80,11 @@ pub struct Inner {
 	pub(crate) oracle: Arc<Oracle>,
 	/// The underlying lock-free skip-list datastructure
 	pub(crate) datastore: SkipMap<ByteSlice, RwLock<Versions>>,
-	/// Registered transaction snapshot slots, keyed by allocation order.
-	/// Contains exactly the live transactions: slots are inserted at
+	/// Registered transaction snapshot slots, partitioned across cache-padded
+	/// shards. Contains exactly the live transactions: slots are inserted at
 	/// registration and removed on transaction drop, so watermark scans
 	/// walk a map sized by concurrency, not by the transaction pool.
-	pub(crate) readers: SkipMap<u64, Arc<Slot>>,
+	pub(crate) readers: Readers,
 	/// Monotonic slot id allocator for the readers map
 	pub(crate) reader_slot_id: CachePadded<AtomicU64>,
 	/// The contiguous completed prefix of the commit queue: every commit
@@ -175,7 +176,7 @@ impl Inner {
 		Self {
 			oracle: Oracle::new(),
 			datastore: SkipMap::new(),
-			readers: SkipMap::new(),
+			readers: Readers::new(),
 			reader_slot_id: CachePadded::new(AtomicU64::new(0)),
 			commit_watermark: CachePadded::new(AtomicU64::new(0)),
 			transaction_queue_id: CachePadded::new(AtomicU64::new(0)),
@@ -202,7 +203,7 @@ impl Inner {
 	/// is mid-registration. See [`earliest_pinned`].
 	#[inline]
 	pub(crate) fn earliest_active_version(&self, fallback: u64) -> Option<u64> {
-		earliest_pinned(&self.readers, |s| &s.version, fallback, None)
+		self.readers.earliest_pinned(|s| &s.version, fallback, None)
 	}
 
 	/// Returns the minimum snapshot commit id across all pinned
@@ -210,7 +211,7 @@ impl Inner {
 	/// is mid-registration. See [`earliest_pinned`].
 	#[inline]
 	pub(crate) fn earliest_active_commit(&self, fallback: u64) -> Option<u64> {
-		earliest_pinned(&self.readers, |s| &s.commit, fallback, None)
+		self.readers.earliest_pinned(|s| &s.commit, fallback, None)
 	}
 
 	/// Trim commit-queue entries which no active or future transaction can
@@ -264,7 +265,7 @@ impl Inner {
 		// Load the clock bound before the fence-and-scan
 		let now = self.oracle.timestamp.load(Ordering::SeqCst);
 		// Bound by every other registered transaction
-		earliest_pinned(&self.readers, |s| &s.version, now, Some(own_slot))
+		self.readers.earliest_pinned(|s| &s.version, now, Some(own_slot))
 	}
 
 	/// Compute the next `cleanup_ts` below which no live or future
@@ -561,42 +562,6 @@ impl Inner {
 			}
 		}
 	}
-}
-
-/// Returns the minimum value of one slot dimension across all pinned
-/// slots, bounded by `fallback`, or `None` when any scanned slot still
-/// holds [`SLOT_PINNING`] in that dimension.
-///
-/// The fence pairs with the fence in the pin-then-read registration
-/// protocol: a transaction whose pin-fence precedes ours in the `SeqCst`
-/// total order is visible to this scan (as a value or as the sentinel);
-/// a transaction whose pin-fence follows ours performs its snapshot
-/// loads after the caller's bound load, so its snapshot is at least the
-/// caller's fallback bound. `exclude` skips a single slot id — used by
-/// a committer to exclude its own slot, which is safe only because a
-/// committing transaction performs no further reads.
-#[inline]
-pub(crate) fn earliest_pinned(
-	map: &SkipMap<u64, Arc<Slot>>,
-	dim: impl Fn(&Slot) -> &AtomicU64,
-	fallback: u64,
-	exclude: Option<u64>,
-) -> Option<u64> {
-	fence(Ordering::SeqCst);
-	if map.is_empty() {
-		return Some(fallback);
-	}
-	let mut min = fallback;
-	for entry in map {
-		if Some(*entry.key()) == exclude {
-			continue;
-		}
-		match dim(entry.value()).load(Ordering::SeqCst) {
-			SLOT_PINNING => return None,
-			v => min = min.min(v),
-		}
-	}
-	Some(min)
 }
 
 impl Default for Inner {

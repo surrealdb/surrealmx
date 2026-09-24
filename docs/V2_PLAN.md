@@ -77,9 +77,10 @@ Before making complex changes to the storage engine, data types, and commit pipe
 - [x] Add CLI / test harness support for `SIM_SEED=<u64>` to reproduce any divergence deterministically in seconds.
 - [x] Support environment variables `SURREALMX_SIM_SEEDS` and `SURREALMX_SIM_STEPS`, executable via:
   ```bash
-  SURREALMX_SIM_SEEDS=100 SURREALMX_SIM_STEPS=1000 cargo test -p surrealmx --lib test::sim
+  SURREALMX_SIM_SEEDS=5000 SURREALMX_SIM_STEPS=5000 cargo test --release -p surrealmx --lib test::sim
   ```
-- [x] Run 25,000,000+ simulation steps (5,000 seeds $\times$ 5,000 steps) across 64 parallel threads with 100% equivalence assertions against `ModelDb` in 3.21 seconds.
+- [x] Run 25,000,000+ simulation steps (5,000 seeds $\times$ 5,000 steps) across 64 parallel threads with 100% equivalence assertions against `ModelDb` in 2.3 seconds.
+- [x] Integrated into GitHub Actions CI pipeline running 5,000 seeds $\times$ 5,000 steps (25,000,000 operations) on every PR and push to `main` and `next`.
 
 ### The Differential Testing Oracle (`ModelDb`)
 ```text
@@ -208,6 +209,7 @@ The commit pipeline previously suffered from lockstep CAS loops waiting for pred
 - [x] Resolve reader pin lifetimes: immediately unpin reader slots on `commit()` and `cancel()` rather than waiting for `Drop`, unblocking watermark advancement and commit queue trimming.
 - [x] Eliminate lockstep CAS spinning: implement cooperative prefix advancement in `atomic_commit` and `atomic_merge` via `try_advance_commit_prefix()` and `try_advance_merge_clock()`.
 - [x] Reduce commit queue allocation footprint: `Commit` shrunk from 544B down to 32B with adaptive writeset filtering (0 bytes bloom allocation for $\le 2$ keys).
+- [x] Partition active reader map: replace single global skiplist with 32 cache-padded shards and TLS striping, eliminating reader registration atomic CAS contention across multi-core CPUs.
 - [ ] Scaffold the fixed-size power-of-two `Ring` buffer (16,384 slots) inspired by ShaleDB D29 and SurrealKV V2.
 - [ ] Replace `transaction_queue_id` and `transaction_commit_id` lockstep spinning with single atomic `claim()` via `fetch_add(1)`.
 - [ ] Pre-allocate slot buffers with reusable `Commit` structures to eliminate per-commit `Arc<Commit>` allocations.
