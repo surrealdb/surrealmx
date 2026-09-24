@@ -85,12 +85,30 @@ impl<'a> Cursor<'a> {
 	) -> Self {
 		// Snapshot the merge-queue writesets once (Arc bumps); the lazy
 		// iterator built in `create_iterator` ranges into them on demand.
-		let merge_sources: Vec<Arc<Merge>> = database
-			.transaction_merge_queue
-			.range(..=version)
-			.rev()
-			.map(|e| Arc::clone(e.value()))
-			.collect();
+		let merge_sources: Vec<Arc<Merge>> = if version
+			<= database.merge_retire_id.load(std::sync::atomic::Ordering::Acquire)
+		{
+			Vec::new()
+		} else {
+			database
+				.transaction_merge_queue
+				.range(..=version)
+				.rev()
+				.filter_map(|e| {
+					let m = e.value();
+					match (&m.min_key, &m.max_key) {
+						(Some(min), Some(max)) => {
+							if max.as_slice() < beg.as_slice() || min.as_slice() >= end.as_slice() {
+								None
+							} else {
+								Some(Arc::clone(m))
+							}
+						}
+						_ => None,
+					}
+				})
+				.collect()
+		};
 
 		Cursor {
 			database,
@@ -260,12 +278,12 @@ impl<'a> Cursor<'a> {
 	/// Create a new merge iterator over the given range and direction.
 	/// Replaces any existing iterator.
 	fn create_iterator(&mut self, start: &ByteSlice, end: &ByteSlice, direction: Direction) {
-		let join_iter = Box::new(MergeQueueIter::new(
+		let join_iter = MergeQueueIter::new(
 			self.merge_sources.clone(),
 			start.clone(),
 			end.clone(),
 			direction,
-		));
+		);
 
 		self.iter = Some(MergeIterator::new(
 			self.database

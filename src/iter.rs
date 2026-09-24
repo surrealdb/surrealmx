@@ -84,6 +84,16 @@ fn seek_in_writeset(
 	end: &ByteSlice,
 	after: Option<&ByteSlice>,
 ) -> Option<(ByteSlice, Option<ByteSlice>)> {
+	// Fast path: if the writeset range does not overlap [beg, end), return None immediately
+	match (&src.min_key, &src.max_key) {
+		(Some(min), Some(max)) => {
+			if max.as_slice() < beg.as_slice() || min.as_slice() >= end.as_slice() {
+				return None;
+			}
+		}
+		_ => return None,
+	}
+
 	let ws = &src.writeset;
 	let entry = match (direction, after) {
 		(Direction::Forward, None) => {
@@ -176,8 +186,8 @@ pub struct MergeIterator<'a> {
 	pub(crate) tree_iter: SkipRange<'a, ByteSlice, SkipBounds, ByteSlice, RwLock<Versions>>,
 	pub(crate) self_iter: TreeRange<'a, ByteSlice, Option<ByteSlice>>,
 
-	// Lazy iterator over committed merge-queue writesets
-	pub(crate) join_iter: Box<dyn Iterator<Item = (ByteSlice, Option<ByteSlice>)> + 'a>,
+	// Concrete lazy iterator over committed merge-queue writesets
+	pub(crate) join_iter: MergeQueueIter,
 
 	// Current buffered entries from each source
 	pub(crate) tree_next: Option<Entry<'a, ByteSlice, RwLock<Versions>>>,
@@ -204,7 +214,7 @@ enum KeySource {
 impl<'a> MergeIterator<'a> {
 	pub fn new(
 		mut tree_iter: SkipRange<'a, ByteSlice, SkipBounds, ByteSlice, RwLock<Versions>>,
-		mut join_iter: Box<dyn Iterator<Item = (ByteSlice, Option<ByteSlice>)> + 'a>,
+		mut join_iter: MergeQueueIter,
 		mut self_iter: TreeRange<'a, ByteSlice, Option<ByteSlice>>,
 		direction: Direction,
 		version: u64,

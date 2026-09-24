@@ -1578,9 +1578,10 @@ impl TransactionInner {
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.track_scan_range(beg, end);
 		}
-		// Fast path: no merge queue entries and no transaction writes in this
+		// Fast path: no merge queue entries in range and no transaction writes in this
 		// range — walk the datastore directly.
-		if self.database.transaction_merge_queue.is_empty()
+		let merge_sources = self.snapshot_merge_sources_in_range(self.version, beg, end);
+		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
@@ -1612,12 +1613,12 @@ impl TransactionInner {
 			return Ok(count);
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = Box::new(MergeQueueIter::new(
-			self.snapshot_merge_sources(self.version),
+		let join_iter = MergeQueueIter::new(
+			merge_sources,
 			beg.clone(),
 			end.clone(),
 			Direction::Forward,
-		));
+		);
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
 			self.database
@@ -1677,9 +1678,10 @@ impl TransactionInner {
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.track_scan_range(beg, end);
 		}
-		// Fast path: no merge queue entries and no transaction writes in this
+		// Fast path: no merge queue entries in range and no transaction writes in this
 		// range — walk the datastore directly.
-		if self.database.transaction_merge_queue.is_empty()
+		let merge_sources = self.snapshot_merge_sources_in_range(self.version, beg, end);
+		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
@@ -1711,12 +1713,12 @@ impl TransactionInner {
 			return Ok(count);
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = Box::new(MergeQueueIter::new(
-			self.snapshot_merge_sources(self.version),
+		let join_iter = MergeQueueIter::new(
+			merge_sources,
 			beg.clone(),
 			end.clone(),
 			Direction::Forward,
-		));
+		);
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database
@@ -1774,9 +1776,10 @@ impl TransactionInner {
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.track_scan_range(beg, end);
 		}
-		// Fast path: no merge queue entries and no transaction writes in this
+		// Fast path: no merge queue entries in range and no transaction writes in this
 		// range — walk the datastore directly into the buffer.
-		if self.database.transaction_merge_queue.is_empty()
+		let merge_sources = self.snapshot_merge_sources_in_range(self.version, beg, end);
+		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
@@ -1805,12 +1808,12 @@ impl TransactionInner {
 			return Ok(());
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = Box::new(MergeQueueIter::new(
-			self.snapshot_merge_sources(self.version),
+		let join_iter = MergeQueueIter::new(
+			merge_sources,
 			beg.clone(),
 			end.clone(),
 			Direction::Forward,
-		));
+		);
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
 			self.database
@@ -1865,9 +1868,10 @@ impl TransactionInner {
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.track_scan_range(beg, end);
 		}
-		// Fast path: no merge queue entries and no transaction writes in this
+		// Fast path: no merge queue entries in range and no transaction writes in this
 		// range — walk the datastore directly into the buffer.
-		if self.database.transaction_merge_queue.is_empty()
+		let merge_sources = self.snapshot_merge_sources_in_range(self.version, beg, end);
+		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
@@ -1896,12 +1900,12 @@ impl TransactionInner {
 			return Ok(());
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = Box::new(MergeQueueIter::new(
-			self.snapshot_merge_sources(self.version),
+		let join_iter = MergeQueueIter::new(
+			merge_sources,
 			beg.clone(),
 			end.clone(),
 			Direction::Forward,
-		));
+		);
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database
@@ -1968,15 +1972,35 @@ impl TransactionInner {
 		self.scanset.insert(effective_beg, ArcSwap::from_pointee(effective_end));
 	}
 
-	/// Snapshot the merge-queue writesets visible at `version` as a vector of
+	/// Snapshot the merge-queue writesets visible at `version` within `[beg, end)` as a vector of
 	/// `Arc<Merge>` ordered newest-first. Cheap — each element is an Arc bump.
 	#[inline]
-	fn snapshot_merge_sources(&self, version: u64) -> Vec<Arc<Merge>> {
+	fn snapshot_merge_sources_in_range(
+		&self,
+		version: u64,
+		beg: &ByteSlice,
+		end: &ByteSlice,
+	) -> Vec<Arc<Merge>> {
+		if version <= self.database.merge_retire_id.load(Ordering::Acquire) {
+			return Vec::new();
+		}
 		self.database
 			.transaction_merge_queue
 			.range(..=version)
 			.rev()
-			.map(|e| Arc::clone(e.value()))
+			.filter_map(|e| {
+				let m = e.value();
+				match (&m.min_key, &m.max_key) {
+					(Some(min), Some(max)) => {
+						if max.as_slice() < beg.as_slice() || min.as_slice() >= end.as_slice() {
+							None
+						} else {
+							Some(Arc::clone(m))
+						}
+					}
+					_ => None,
+				}
+			})
 			.collect()
 	}
 
@@ -2013,7 +2037,8 @@ impl TransactionInner {
 		// Fast path: when there are no in-flight committed transactions and no
 		// uncommitted writes in this range, the merge iterator has nothing to
 		// merge — read straight from the datastore range.
-		if self.database.transaction_merge_queue.is_empty()
+		let merge_sources = self.snapshot_merge_sources_in_range(version, beg, end);
+		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
@@ -2050,12 +2075,12 @@ impl TransactionInner {
 			return Ok(res);
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = Box::new(MergeQueueIter::new(
-			self.snapshot_merge_sources(version),
+		let join_iter = MergeQueueIter::new(
+			merge_sources,
 			beg.clone(),
 			end.clone(),
 			direction,
-		));
+		);
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database
@@ -2116,8 +2141,11 @@ impl TransactionInner {
 			}
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
-		// range — read keys straight from the datastore range.
-		if self.database.transaction_merge_queue.is_empty()
+		// Fast path: when there are no in-flight committed transactions and no
+		// uncommitted writes in this range, the merge iterator has nothing to
+		// merge — read straight from the datastore range.
+		let merge_sources = self.snapshot_merge_sources_in_range(version, beg, end);
+		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
@@ -2154,12 +2182,12 @@ impl TransactionInner {
 			return Ok(res);
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = Box::new(MergeQueueIter::new(
-			self.snapshot_merge_sources(version),
+		let join_iter = MergeQueueIter::new(
+			merge_sources,
 			beg.clone(),
 			end.clone(),
 			direction,
-		));
+		);
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database
@@ -2221,7 +2249,11 @@ impl TransactionInner {
 		}
 		// Fast path: no merge queue entries and no transaction writes in this
 		// range — read key/value pairs straight from the datastore range.
-		if self.database.transaction_merge_queue.is_empty()
+		// Fast path: when there are no in-flight committed transactions and no
+		// uncommitted writes in this range, the merge iterator has nothing to
+		// merge — read straight from the datastore range.
+		let merge_sources = self.snapshot_merge_sources_in_range(version, beg, end);
+		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
 			let datastore_range = self
@@ -2258,12 +2290,12 @@ impl TransactionInner {
 			return Ok(res);
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = Box::new(MergeQueueIter::new(
-			self.snapshot_merge_sources(version),
+		let join_iter = MergeQueueIter::new(
+			merge_sources,
 			beg.clone(),
 			end.clone(),
 			direction,
-		));
+		);
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
 			self.database
