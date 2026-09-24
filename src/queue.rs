@@ -55,6 +55,18 @@ impl BloomCheck for AtomicBloomFilter {
 	}
 }
 
+impl<T: BloomCheck> BloomCheck for Box<T> {
+	#[inline]
+	fn is_empty(&self) -> bool {
+		(**self).is_empty()
+	}
+
+	#[inline]
+	fn may_contain(&self, key: &[u8]) -> bool {
+		(**self).may_contain(key)
+	}
+}
+
 /// A transaction entry in the transaction commit queue
 pub struct Commit {
 	/// The sorted writeset keys. Values are never read during conflict

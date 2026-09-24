@@ -493,7 +493,10 @@ pub(crate) struct TransactionInner {
 	/// The local set of key reads
 	pub(crate) readset: HashSet<ByteSlice>,
 	/// Lock-free atomic bloom filter over the readset for fast conflict pre-checks.
-	pub(crate) readset_bloom: AtomicBloomFilter,
+	/// Boxed so that the filter's bit array lives off the transaction struct:
+	/// pooled transactions are stored and returned by value, so keeping it boxed
+	/// avoids copying 1 KB on every pool checkout and return.
+	pub(crate) readset_bloom: Box<AtomicBloomFilter>,
 	/// The local set of keys locked with `get_for_update`. Locked keys
 	/// are tracked separately from the readset so they can be validated
 	/// at commit in every isolation mode — even when the writeset is
@@ -502,7 +505,7 @@ pub(crate) struct TransactionInner {
 	/// transaction's other reads
 	pub(crate) lockset: HashSet<ByteSlice>,
 	/// Lock-free atomic bloom filter over the lockset for fast conflict pre-checks.
-	pub(crate) lockset_bloom: AtomicBloomFilter,
+	pub(crate) lockset_bloom: Box<AtomicBloomFilter>,
 	/// The local set of key scans
 	pub(crate) scanset: SkipMap<ByteSlice, ArcSwap<ByteSlice>>,
 	/// The local set of updates and deletes
@@ -581,9 +584,9 @@ impl TransactionInner {
 			version,
 			locked: false,
 			readset: HashSet::new(),
-			readset_bloom: AtomicBloomFilter::new(),
+			readset_bloom: Box::new(AtomicBloomFilter::new()),
 			lockset: HashSet::new(),
-			lockset_bloom: AtomicBloomFilter::new(),
+			lockset_bloom: Box::new(AtomicBloomFilter::new()),
 			scanset: SkipMap::new(),
 			writeset: BTreeMap::new(),
 			database: db,
@@ -605,36 +608,33 @@ impl TransactionInner {
 		let (slot_id, commit, version) = pin_slot(&self.database, &self.slot);
 		// Store the threshold for the allocated state resets
 		let threshold = self.reset_threshold;
-		// Clear the transaction scanset
-		self.scanset.clear();
-		// Clear the transaction readset
-		self.readset.pin().clear();
-		// Clear the readset bloom filter
-		self.readset_bloom.clear();
-		// Clear the transaction lockset. `locked` still describes the
-		// previous use of this pooled transaction here, so the clear is
-		// skipped for the transactions that never locked a key and whose
-		// lockset is therefore already empty
+		// Clear transaction state. `self.write` describes whether the
+		// previous use of this pooled transaction was writeable: a read-only
+		// transaction never populates scanset, readset, writeset, or
+		// savepoints, so all clears are skipped when `!self.write`.
+		if self.write {
+			self.scanset.clear();
+			self.readset.pin().clear();
+			self.readset_bloom.clear();
+			if self.writeset.len() > threshold {
+				self.writeset = BTreeMap::new();
+			} else {
+				self.writeset.clear();
+			}
+			if self.savepoint_stack.len() > threshold {
+				self.savepoint_stack = Vec::new();
+			} else {
+				self.savepoint_stack.clear();
+			}
+			if self.undo_journal.len() > threshold {
+				self.undo_journal = Vec::new();
+			} else {
+				self.undo_journal.clear();
+			}
+		}
 		if self.locked {
 			self.lockset.pin().clear();
 			self.lockset_bloom.clear();
-		}
-		// Clear or completely reset the allocated writeset
-		if self.writeset.len() > threshold {
-			self.writeset = BTreeMap::new();
-		} else {
-			self.writeset.clear();
-		}
-		// Clear or completely reset the allocated savepoints and undo journal
-		if self.savepoint_stack.len() > threshold {
-			self.savepoint_stack = Vec::new();
-		} else {
-			self.savepoint_stack.clear();
-		}
-		if self.undo_journal.len() > threshold {
-			self.undo_journal = Vec::new();
-		} else {
-			self.undo_journal.clear();
 		}
 		// Reset the transaction
 		self.done = false;

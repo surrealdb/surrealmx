@@ -167,6 +167,9 @@ impl AtomicBloomFilter {
 
 	/// Clears all bits in the filter
 	pub fn clear(&self) {
+		if self.count.load(Ordering::Relaxed) == 0 {
+			return;
+		}
 		for word in &self.bits {
 			word.store(0, Ordering::Relaxed);
 		}
