@@ -253,15 +253,15 @@ impl Database {
 		let key = key.into_bytes();
 		let val = val.into_bytes();
 
-		let commit_slot = self.inner.transaction_queue_id.fetch_add(1, Ordering::Relaxed) + 1;
+		let commit_slot = self.inner.commit_ring.claim();
 		let version = self.inner.oracle.alloc.fetch_add(1, Ordering::Relaxed) + 1;
 		self.inner.oracle.timestamp.fetch_max(version, Ordering::Release);
 		self.inner.merge_retire_id.fetch_max(version, Ordering::Release);
 
 		let commit = Commit::new_single(key.clone(), version);
-		self.inner.transaction_commit_queue.insert(commit_slot, Arc::new(commit));
+		self.inner.commit_ring.publish(commit_slot, Arc::new(commit));
 		if commit_slot.trailing_zeros() >= 3 {
-			self.inner.try_advance_commit_prefix();
+			self.inner.commit_ring.advance_published_prefix();
 			self.inner.advance_commit_watermark();
 		}
 
@@ -283,7 +283,8 @@ impl Database {
 		});
 		let mut versions = entry.value().write();
 		if !entry.is_removed() {
-			let is_new_insert = matches!(*versions, Versions::Single(ref v) if v.version == version);
+			let is_new_insert =
+				matches!(*versions, Versions::Single(ref v) if v.version == version);
 			if !is_new_insert {
 				versions.push(Version {
 					version,
@@ -306,7 +307,8 @@ impl Database {
 		tx.commit()
 	}
 
-	/// Conditionally set a key to a value in an auto-committed write transaction.
+	/// Conditionally set a key to a value in an auto-committed write
+	/// transaction.
 	///
 	/// Succeeds only if the existing value at `key` matches `chk` (or does not
 	/// exist when `chk` is `None`).
@@ -329,15 +331,15 @@ impl Database {
 	pub fn del<K: IntoBytes>(&self, key: K) -> Result<(), Error> {
 		let key = key.into_bytes();
 
-		let commit_slot = self.inner.transaction_queue_id.fetch_add(1, Ordering::Relaxed) + 1;
+		let commit_slot = self.inner.commit_ring.claim();
 		let version = self.inner.oracle.alloc.fetch_add(1, Ordering::Relaxed) + 1;
 		self.inner.oracle.timestamp.fetch_max(version, Ordering::Release);
 		self.inner.merge_retire_id.fetch_max(version, Ordering::Release);
 
 		let commit = Commit::new_single(key.clone(), version);
-		self.inner.transaction_commit_queue.insert(commit_slot, Arc::new(commit));
+		self.inner.commit_ring.publish(commit_slot, Arc::new(commit));
 		if commit_slot.trailing_zeros() >= 3 {
-			self.inner.try_advance_commit_prefix();
+			self.inner.commit_ring.advance_published_prefix();
 			self.inner.advance_commit_watermark();
 		}
 
@@ -359,7 +361,8 @@ impl Database {
 		});
 		let mut versions = entry.value().write();
 		if !entry.is_removed() {
-			let is_new_insert = matches!(*versions, Versions::Single(ref v) if v.version == version);
+			let is_new_insert =
+				matches!(*versions, Versions::Single(ref v) if v.version == version);
 			if !is_new_insert {
 				versions.push(Version {
 					version,
@@ -386,6 +389,12 @@ impl Database {
 	#[cfg(not(target_arch = "wasm32"))]
 	pub const fn persistence(&self) -> Option<&Persistence> {
 		self.persistence.as_ref()
+	}
+
+	/// Returns the number of unretired commits in the commit ring.
+	#[cfg(test)]
+	pub fn unretired_commits(&self) -> u64 {
+		self.inner.unretired_commits()
 	}
 
 	/// Manually perform transaction queue cleanup.
@@ -1426,14 +1435,14 @@ mod tests {
 			tx.set(format!("key{i}"), "value").unwrap();
 			tx.commit().unwrap();
 		}
-		assert_eq!(db.transaction_commit_queue.len(), 10);
+		assert_eq!(db.unretired_commits(), 10);
 		db.run_cleanup();
 		// With no registered readers the trim bound falls back to the
 		// current commit id: everything below it is unreachable by any
 		// future transaction's conflict window, which starts strictly
 		// above the commit id the transaction registers at. The exclusive
 		// bound leaves exactly the entry at the current commit id.
-		assert_eq!(db.transaction_commit_queue.len(), 1);
+		assert_eq!(db.unretired_commits(), 1);
 	}
 
 	#[test]
@@ -1455,17 +1464,17 @@ mod tests {
 			tx.set(format!("post{i}"), "value").unwrap();
 			tx.commit().unwrap();
 		}
-		assert_eq!(db.transaction_commit_queue.len(), 10);
+		assert_eq!(db.unretired_commits(), 10);
 		db.run_cleanup();
 		// Entries above the reader's snapshot commit id must survive:
 		// they sit inside its potential conflict window. Entries at ids
 		// 1-4 are trimmed; the entry at the reader's snapshot (5) and
 		// everything above remain.
-		assert_eq!(db.transaction_commit_queue.len(), 6);
+		assert_eq!(db.unretired_commits(), 6);
 		drop(reader);
 		db.run_cleanup();
 		// With the reader gone the idle fallback applies again
-		assert_eq!(db.transaction_commit_queue.len(), 1);
+		assert_eq!(db.unretired_commits(), 1);
 	}
 
 	#[test]
@@ -1556,14 +1565,14 @@ mod tests {
 		db.readers.insert(u64::MAX, Arc::new(Slot::pinning()));
 		// Every sweep must treat the watermark as unknown and skip
 		assert_eq!(db.compute_cleanup_ts(), None);
-		let before = db.transaction_commit_queue.len();
+		let before = db.unretired_commits();
 		db.run_cleanup();
-		assert_eq!(db.transaction_commit_queue.len(), before);
+		assert_eq!(db.unretired_commits(), before);
 		// Remove the pinning slot; sweeps proceed again
 		db.readers.remove(u64::MAX);
 		assert!(db.compute_cleanup_ts().is_some());
 		db.run_cleanup();
-		assert_eq!(db.transaction_commit_queue.len(), 1);
+		assert_eq!(db.unretired_commits(), 1);
 	}
 
 	#[test]
@@ -1579,18 +1588,18 @@ mod tests {
 		}
 		// Every commit completed, so the watermark covers all claimed ids
 		assert_eq!(db.commit_watermark.load(Ordering::SeqCst), 5);
-		assert_eq!(db.transaction_commit_id.load(Ordering::SeqCst), 5);
+		assert_eq!(db.inner.commit_ring.published_prefix.load(Ordering::SeqCst), 5);
 		// An aborted commit removes its entry, which also counts as
 		// complete: the watermark must still cover the aborted id.
 		let mut tx1 = db.transaction(true);
+		tx1.set("conflict", "a").unwrap();
 		let mut tx2 = db.transaction(true);
-		tx1.set("clash", "one").unwrap();
-		tx2.set("clash", "two").unwrap();
+		tx2.set("conflict", "b").unwrap();
 		tx1.commit().unwrap();
 		assert!(tx2.commit().is_err());
 		assert_eq!(
 			db.commit_watermark.load(Ordering::SeqCst),
-			db.transaction_commit_id.load(Ordering::SeqCst)
+			db.inner.commit_ring.published_prefix.load(Ordering::SeqCst)
 		);
 	}
 

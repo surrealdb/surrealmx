@@ -25,8 +25,6 @@ use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::version::Version;
 use crate::versions::Versions;
-#[cfg(debug_assertions)]
-use crate::LOG_TARGET_CONFLICTS;
 use arc_swap::ArcSwap;
 use byteslice::ByteSlice;
 use crossbeam_skiplist::SkipMap;
@@ -37,8 +35,6 @@ use std::ops::Bound;
 use std::ops::Range;
 use std::sync::atomic::{fence, Ordering};
 use std::sync::Arc;
-#[cfg(debug_assertions)]
-use tracing::debug;
 
 /// The isolation level of a database transaction
 #[derive(PartialEq, PartialOrd)]
@@ -850,13 +846,64 @@ impl TransactionInner {
 		};
 		// Check wether we should check reads conflicts on commit
 		if self.mode >= IsolationLevel::SnapshotIsolation {
-			// Retrieve all transactions committed since we began. The
-			// window base is the completed watermark our snapshot was
-			// taken from, which over-approximates concurrency: it can
-			// include commits our version snapshot already sees.
-			for tx in self.database.transaction_commit_queue.range(self.commit + 1..commit_slot) {
+			// Check if the ring buffer has lapped past this transaction's
+			// snapshot
+			if self.commit < self.database.commit_ring.taken.load(Ordering::Acquire) {
+				commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
+				commit_guard.armed = false;
+				self.database.advance_commit_watermark();
+				self.database.readers.remove(self.slot_id);
+				self.clear_read_state();
+				self.writeset.clear();
+				self.savepoint_stack.clear();
+				self.undo_journal.clear();
+				return Err(Error::KeyWriteConflict);
+			}
+
+			// Retrieve all transactions committed since we began.
+			for s in (self.commit + 1)..commit_slot {
+				let slot = self.database.commit_ring.slot(s);
+				let mut spins = 0;
+				while !slot.is_published(s) {
+					let cur_seq = slot.seq.load(Ordering::Acquire);
+					if cur_seq > s || self.database.commit_ring.taken.load(Ordering::Acquire) >= s {
+						commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
+						commit_guard.armed = false;
+						self.database.advance_commit_watermark();
+						self.database.readers.remove(self.slot_id);
+						self.clear_read_state();
+						self.writeset.clear();
+						self.savepoint_stack.clear();
+						self.undo_journal.clear();
+						return Err(Error::KeyWriteConflict);
+					}
+					crate::tx::backoff(spins);
+					spins += 1;
+				}
+
+				let tx = {
+					let guard = slot.commit.read();
+					if slot.seq.load(Ordering::Acquire) != s {
+						commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
+						commit_guard.armed = false;
+						self.database.advance_commit_watermark();
+						self.database.readers.remove(self.slot_id);
+						self.clear_read_state();
+						self.writeset.clear();
+						self.savepoint_stack.clear();
+						self.undo_journal.clear();
+						return Err(Error::KeyWriteConflict);
+					}
+					let Some(ref tx) = *guard else {
+						continue;
+					};
+					let cloned = Arc::clone(tx);
+					drop(guard);
+					cloned
+				};
+
 				// Skip aborted commits: their writes will never publish
-				let merge_version = tx.value().merge_version.load(Ordering::SeqCst);
+				let merge_version = tx.merge_version.load(Ordering::SeqCst);
 				if merge_version == COMMIT_ABORTED {
 					continue;
 				}
@@ -869,46 +916,31 @@ impl TransactionInner {
 					continue;
 				}
 				// Check if a previous transaction conflicts against writes
-				if has_writes && !tx.value().is_disjoint_writeset_bloom(&commit_entry) {
-					// Do NOT remove the entry here: the commit-queue
-					// insertion-order watermark is advanced opportunistically
-					// (see `Inner::try_advance_commit_prefix`) rather than
-					// synchronously by this slot's own claim, so an entry
-					// must stay visible until that watermark has confirmably
-					// passed it — otherwise a concurrent advance could
-					// mistake "removed early" for "never inserted" and stall
-					// forever. The unwind guard (dropped below, on return)
-					// marks the entry aborted and advances the completed
-					// watermark; `cleanup_commit_queue` removes it later,
-					// once it is safely below every reader's visibility.
-					// Clear the transaction state
+				if has_writes && !tx.is_disjoint_writeset_bloom(&commit_entry) {
+					commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
+					commit_guard.armed = false;
+					self.database.advance_commit_watermark();
+					self.database.readers.remove(self.slot_id);
 					self.clear_read_state();
 					self.writeset.clear();
-					// Clear savepoint stack and undo journal
 					self.savepoint_stack.clear();
 					self.undo_journal.clear();
-					// Return the error for this transaction
 					return Err(Error::KeyWriteConflict);
 				}
 				// Locked reads are validated in every isolation mode, and
 				// even when the writeset is empty: a successful commit
 				// guarantees that no concurrent transaction committed a
 				// write to a key locked with `get_for_update`
-				if self.locked
-					&& !tx.value().is_disjoint_readset_bloom(&self.lockset, &self.lockset_bloom)
+				if self.locked && !tx.is_disjoint_readset_bloom(&self.lockset, &self.lockset_bloom)
 				{
-					// Do not remove the entry here — see the comment
-					// on the writeset-conflict branch above. The
-					// unwind guard marks it aborted on return.
-					// Unpin from readers immediately
+					commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
+					commit_guard.armed = false;
+					self.database.advance_commit_watermark();
 					self.database.readers.remove(self.slot_id);
-					// Clear the transaction state
 					self.clear_read_state();
 					self.writeset.clear();
-					// Clear savepoint stack and undo journal
 					self.savepoint_stack.clear();
 					self.undo_journal.clear();
-					// Return the error for this transaction
 					return Err(Error::KeyReadConflict);
 				}
 				// Plain reads and scans are validated only under
@@ -919,19 +951,15 @@ impl TransactionInner {
 				// validation of the transaction's other reads
 				if has_writes && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 					// Check if a previous transaction conflicts against reads
-					if !tx.value().is_disjoint_readset_bloom(&self.readset, &self.readset_bloom) {
-						// Do not remove the entry here — see the comment
-						// on the writeset-conflict branch above. The
-						// unwind guard marks it aborted on return.
-						// Unpin from readers immediately
+					if !tx.is_disjoint_readset_bloom(&self.readset, &self.readset_bloom) {
+						commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
+						commit_guard.armed = false;
+						self.database.advance_commit_watermark();
 						self.database.readers.remove(self.slot_id);
-						// Clear the transaction state
 						self.clear_read_state();
 						self.writeset.clear();
-						// Clear savepoint stack and undo journal
 						self.savepoint_stack.clear();
 						self.undo_journal.clear();
-						// Return the error for this transaction
 						return Err(Error::KeyReadConflict);
 					}
 					// Check if the committed writeset may overlap any scan
@@ -940,7 +968,7 @@ impl TransactionInner {
 						// Get the upper bound of the last scan range
 						if let Some(scan_back) = self.scanset.back() {
 							let scan_max_end = Arc::clone(&scan_back.value().load());
-							tx.value().may_overlap_range(scan_front.key(), &scan_max_end)
+							tx.may_overlap_range(scan_front.key(), &scan_max_end)
 						} else {
 							false
 						}
@@ -950,7 +978,7 @@ impl TransactionInner {
 					// Only iterate writeset keys if ranges may overlap
 					if scan_overlap {
 						// A previous transaction has conflicts against scans
-						for k in tx.value().keys.iter() {
+						for k in tx.keys.iter() {
 							// Check if this key may be within a scan range
 							if let Some(entry) =
 								self.scanset.range::<ByteSlice, _>(..=k).next_back()
@@ -958,22 +986,16 @@ impl TransactionInner {
 								// Check if the range includes this key (load
 								// from ArcSwap)
 								if **entry.value().load() > *k {
-									// Do not remove the entry here — see the
-									// comment on the writeset-conflict branch
-									// above. The unwind guard marks it
-									// aborted on return.
-									// Unpin from readers immediately
+									commit_entry
+										.merge_version
+										.store(COMMIT_ABORTED, Ordering::SeqCst);
+									commit_guard.armed = false;
+									self.database.advance_commit_watermark();
 									self.database.readers.remove(self.slot_id);
-									// Clear the transaction state
 									self.clear_read_state();
 									self.writeset.clear();
-									// Clear savepoint stack and undo journal
 									self.savepoint_stack.clear();
 									self.undo_journal.clear();
-									// Log the error for debug purposes
-									#[cfg(debug_assertions)]
-									debug!(target: LOG_TARGET_CONFLICTS, "KeyReadConflict involving {:?}", k);
-									// Return the error for this transaction
 									return Err(Error::KeyReadConflict);
 								}
 							}
@@ -2565,59 +2587,14 @@ impl TransactionInner {
 		})
 	}
 
-	/// Atomimcally inserts the transaction into the commit queue
+	/// Atomically inserts the transaction into the commit ring
 	#[inline(always)]
 	fn atomic_commit(&self, updates: Commit) -> (u64, Arc<Commit>) {
-		// Store the number of spins
-		let mut spins = 0;
-		// Store the commit in an Arc
 		let updates = Arc::new(updates);
-		// Get the database transaction commit queue
-		let queue = &self.database.transaction_commit_queue;
-		// Claim a unique commit slot from the allocation counter. A dense
-		// claim is always unique, so no collision retry is needed, unlike
-		// probing a queue whose entries can be removed and (if probed by
-		// value) re-claimed out from under a slow concurrent committer.
-		let slot = self.database.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1;
-		// Insert the commit entry at the claimed slot
-		let entry = queue.insert(slot, Arc::clone(&updates));
-		// Publish strictly in claim order: wait until every lower slot
-		// has been published, then advance the inserted-prefix bound to
-		// cover our own. This is NOT purely a courtesy to others — a
-		// subsequent transaction on this same thread relies on being
-		// able to see this commit's effects via the published bound
-		// alone (it has no other source of "how recent" information),
-		// so our own slot must be reflected before we return.
-		loop {
-			// Reload the current bound rather than retrying a fixed CAS:
-			// a concurrent opportunistic helper (`try_advance_commit_prefix`,
-			// used by the cleanup/GC paths) can advance this same bound on
-			// our behalf once our entry is inserted, using only presence
-			// in the queue as its criterion. If we kept retrying a stale
-			// `compare_exchange(slot - 1, slot)` after that happens, the
-			// bound can never return to `slot - 1` (it is monotonic), so
-			// our CAS would never succeed again — a livelock. Treat the
-			// bound already having reached our slot as success.
-			let cur = self.database.transaction_commit_id.load(Ordering::SeqCst);
-			if cur >= slot {
-				return (slot, Arc::clone(entry.value()));
-			}
-			if cur == slot - 1
-				&& self
-					.database
-					.transaction_commit_id
-					.compare_exchange_weak(cur, slot, Ordering::SeqCst, Ordering::Acquire)
-					.is_ok()
-			{
-				return (slot, Arc::clone(entry.value()));
-			}
-			// Help advance the contiguous published prefix
-			self.database.try_advance_commit_prefix();
-			// Ensure the thread backs off when under contention
-			backoff(spins);
-			// Increase the number loop spins we have attempted
-			spins += 1;
-		}
+		let slot = self.database.commit_ring.claim();
+		self.database.commit_ring.publish(slot, Arc::clone(&updates));
+		self.database.commit_ring.advance_published_prefix();
+		(slot, updates)
 	}
 
 	/// Atomimcally inserts the transaction into the merge queue
@@ -4611,12 +4588,12 @@ mod tests {
 		}
 
 		// Every commit is still queued for conflict detection
-		assert_eq!(db.transaction_commit_queue.len(), 10);
+		assert_eq!(db.unretired_commits(), 10);
 
 		// With no transaction registered, cleanup trims everything below
 		// the current commit id, leaving only the most recent entry
 		db.run_cleanup();
-		assert_eq!(db.transaction_commit_queue.len(), 1);
+		assert_eq!(db.unretired_commits(), 1);
 
 		// The datastore itself is untouched by the queue trim. Scope the
 		// reader so it is dropped: counters are released on Drop, not on
@@ -4637,14 +4614,14 @@ mod tests {
 			tx.set(format!("extra_{i}"), "value").unwrap();
 			tx.commit().unwrap();
 		}
-		assert_eq!(db.transaction_commit_queue.len(), 6);
+		assert_eq!(db.unretired_commits(), 6);
 		db.run_cleanup();
-		assert_eq!(db.transaction_commit_queue.len(), 6);
+		assert_eq!(db.unretired_commits(), 6);
 
 		// Once the pinning transaction is dropped, cleanup trims fully
 		drop(pin);
 		db.run_cleanup();
-		assert_eq!(db.transaction_commit_queue.len(), 1);
+		assert_eq!(db.unretired_commits(), 1);
 	}
 
 	#[test]

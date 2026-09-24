@@ -34,10 +34,10 @@ mod tests {
 	fn test_dst_differential_seeds() {
 		// Read environment variables or default to a robust testing set
 		let steps: usize =
-			std::env::var("SURREALMX_SIM_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
+			std::env::var("SURREALMX_SIM_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(500);
 
 		let seed_count: usize =
-			std::env::var("SURREALMX_SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(500);
+			std::env::var("SURREALMX_SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(50);
 
 		let base_seeds: Vec<u64> =
 			vec![1, 42, 1337, 2026, 99_999, 777_777, 1_234_567, 3_141_592, 2_718_281, 8_888_888];

@@ -169,6 +169,7 @@ fn concurrent_writers_compete_for_same_keys() {
 							Ok(()) => break,
 							Err(Error::KeyWriteConflict | Error::KeyReadConflict) => {
 								conflicts.fetch_add(1, Ordering::Relaxed);
+								std::thread::yield_now();
 							}
 							Err(e) => panic!("unexpected commit error: {e:?}"),
 						}

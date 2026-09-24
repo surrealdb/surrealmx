@@ -43,6 +43,7 @@ mod persistence;
 mod pool;
 mod queue;
 mod readers;
+mod ring;
 mod tx;
 mod version;
 mod versions;

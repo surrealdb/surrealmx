@@ -210,12 +210,12 @@ The commit pipeline previously suffered from lockstep CAS loops waiting for pred
 - [x] Eliminate lockstep CAS spinning: implement cooperative prefix advancement in `atomic_commit` and `atomic_merge` via `try_advance_commit_prefix()` and `try_advance_merge_clock()`.
 - [x] Reduce commit queue allocation footprint: `Commit` shrunk from 544B down to 32B with adaptive writeset filtering (0 bytes bloom allocation for $\le 2$ keys).
 - [x] Partition active reader map: replace single global skiplist with 32 cache-padded shards and TLS striping, eliminating reader registration atomic CAS contention across multi-core CPUs.
-- [ ] Scaffold the fixed-size power-of-two `Ring` buffer (16,384 slots) inspired by ShaleDB D29 and SurrealKV V2.
-- [ ] Replace `transaction_queue_id` and `transaction_commit_id` lockstep spinning with single atomic `claim()` via `fetch_add(1)`.
-- [ ] Pre-allocate slot buffers with reusable `Commit` structures to eliminate per-commit `Arc<Commit>` allocations.
-- [ ] Implement lock-free slot publication (`state.store(seq, Ordering::Release)`).
-- [ ] Implement lock-free continuous watermark advancement (`commit_watermark` and `merge_retire_id`).
-- [ ] Remove `cleanup_commit_queue` and skiplist node unlinking (`entry.remove()`).
+- [x] Scaffold the fixed-size power-of-two circular `CommitRing` buffer (65,536 slots) inspired by ShaleDB D29 and SurrealKV V2.
+- [x] Replace `transaction_queue_id` lockstep spinning with single atomic `claim()` via `fetch_add(1)`.
+- [x] Implement lock-free slot publication (`seq.store(seq, Ordering::Release)`).
+- [x] Implement continuous lock-free watermark advancement (`commit_watermark` and `merge_retire_id`).
+- [x] Replace dynamic skiplist `transaction_commit_queue` and node unlinking with array-indexed ring slots.
+- [x] Implement lapping detection in conflict validation loop (`cur_seq > s || taken >= s`) returning `KeyWriteConflict`.
 - [x] Verify linearizability and conflict detection correctness against `SimRunner`.
 - [x] Benchmark high-concurrency commit throughput across multi-threaded writer suites.
 
