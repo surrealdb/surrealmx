@@ -1859,27 +1859,43 @@ impl TransactionInner {
 		Ok(())
 	}
 
-	/// Helper to track a scan range in the scanset (optimized to minimize
-	/// clones)
-	#[inline(always)]
+	/// Helper to track a scan range in the scanset, keeping ranges disjoint
+	/// and merged so that:
+	/// 1. `scanset.front()` is the minimum start bound.
+	/// 2. `scanset.back()` is the maximum end bound.
+	/// 3. `range(..=k).next_back()` finds the unique enclosing range.
 	fn track_scan_range(&self, beg: &Bytes, end: &Bytes) {
-		// Add this range scan entry to the saved scans
-		match self.scanset.range::<Bytes, _>(..=beg).next_back() {
-			// There is no entry for this range scan
-			None => {
-				self.scanset.insert(beg.clone(), ArcSwap::from_pointee(end.clone()));
+		let mut effective_beg = beg.clone();
+		let mut effective_end = end.clone();
+
+		// Check if a predecessor range covers or overlaps `beg`
+		if let Some(entry) = self.scanset.range::<Bytes, _>(..=beg).next_back() {
+			let prev_end = entry.value().load();
+			if **prev_end >= *beg {
+				// Overlaps with predecessor
+				if **prev_end >= *end {
+					// Already fully covered by predecessor
+					return;
+				}
+				effective_beg = entry.key().clone();
+				effective_end = end.clone();
 			}
-			// The saved scan stops before this range
-			Some(entry) if **entry.value().load() < *beg => {
-				self.scanset.insert(beg.clone(), ArcSwap::from_pointee(end.clone()));
-			}
-			// The saved scan does not extend far enough - atomically update the end
-			Some(entry) if **entry.value().load() < *end => {
-				entry.value().store(Arc::new(end.clone()));
-			}
-			// This range scan is already covered
-			_ => (),
 		}
+
+		// Clean up and merge any subsequent ranges that overlap [effective_beg, effective_end]
+		// Any range starting <= effective_end overlaps with us
+		let overlapping: Vec<_> =
+			self.scanset.range::<Bytes, _>(&effective_beg..=&effective_end).collect();
+
+		for entry in overlapping {
+			let entry_end = entry.value().load();
+			if **entry_end > effective_end {
+				effective_end = (**entry_end).clone();
+			}
+			entry.remove();
+		}
+
+		self.scanset.insert(effective_beg, ArcSwap::from_pointee(effective_end));
 	}
 
 	/// Snapshot the merge-queue writesets visible at `version` as a vector of
