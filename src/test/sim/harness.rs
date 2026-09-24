@@ -16,7 +16,7 @@
 
 use byteslice::ByteSlice;
 use std::collections::HashMap;
-use surrealmx::{Database, DatabaseOptions, Transaction};
+use crate::{Database, DatabaseOptions, Transaction};
 
 use super::generator::{SimAction, WorkloadGenerator};
 use super::model::{ModelDb, ModelIsolation, ModelTxn};
@@ -32,7 +32,7 @@ pub struct SimRunner {
 	#[cfg(not(target_arch = "wasm32"))]
 	_temp_dir: Option<tempfile::TempDir>,
 	#[cfg(not(target_arch = "wasm32"))]
-	persistence_opts: Option<surrealmx::PersistenceOptions>,
+	persistence_opts: Option<crate::PersistenceOptions>,
 }
 
 impl SimRunner {
@@ -57,11 +57,11 @@ impl SimRunner {
 	#[cfg(not(target_arch = "wasm32"))]
 	pub fn new_persistent(
 		seed: u64,
-		aol_mode: surrealmx::AolMode,
-		fsync_mode: surrealmx::FsyncMode,
+		aol_mode: crate::AolMode,
+		fsync_mode: crate::FsyncMode,
 	) -> Self {
-		let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
-		let persistence_opts = surrealmx::PersistenceOptions::new(temp_dir.path())
+		let temp_dir = tempfile::tempdir().expect("failed to create temp dir for persistence");
+		let persistence_opts = crate::PersistenceOptions::new(temp_dir.path())
 			.with_aol_mode(aol_mode)
 			.with_fsync_mode(fsync_mode);
 		let db = Database::new_with_persistence(

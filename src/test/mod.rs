@@ -12,18 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Deterministic simulation and differential testing framework.
+//! Testing utilities and deterministic simulation testing (DST) framework.
 
-#[allow(unused_imports)]
-pub mod generator;
-#[allow(unused_imports)]
-pub mod harness;
-#[allow(unused_imports)]
-pub mod model;
-
-#[allow(unused_imports)]
-pub use generator::{SimAction, WorkloadGenerator};
-#[allow(unused_imports)]
-pub use harness::SimRunner;
-#[allow(unused_imports)]
-pub use model::{ModelDb, ModelError, ModelIsolation, ModelTxn};
+pub mod sim;

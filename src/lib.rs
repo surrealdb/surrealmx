@@ -49,6 +49,9 @@ mod versions;
 #[doc(hidden)]
 pub mod bench_internals;
 
+#[cfg(test)]
+pub mod test;
+
 #[doc(inline)]
 pub use bytes::Bytes;
 #[doc(inline)]

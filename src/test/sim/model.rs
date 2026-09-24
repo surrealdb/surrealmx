@@ -25,7 +25,7 @@
 use byteslice::ByteSlice;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
-use surrealmx::Error;
+use crate::Error;
 
 /// Isolation level supported by the reference model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
