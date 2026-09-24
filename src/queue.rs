@@ -156,6 +156,16 @@ impl Commit {
 		}
 	}
 
+	/// Create a new commit queue entry for a single-key direct write.
+	#[inline]
+	pub(crate) fn new_single(key: ByteSlice, merge_version: u64) -> Self {
+		Self {
+			keys: Arc::from([key]),
+			writeset_bloom: None,
+			merge_version: AtomicU64::new(merge_version),
+		}
+	}
+
 	/// The smallest key in the writeset (for range overlap checks)
 	#[inline]
 	fn min_key(&self) -> Option<&ByteSlice> {

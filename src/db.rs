@@ -24,7 +24,10 @@ use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
 use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
+use crate::queue::Commit;
 use crate::tx::Transaction;
+use crate::version::Version;
+use crate::versions::Versions;
 use byteslice::ByteSlice;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
@@ -247,9 +250,45 @@ impl Database {
 	/// Overwrites any existing value at the key.
 	#[inline]
 	pub fn set<K: IntoBytes, V: IntoBytes>(&self, key: K, val: V) -> Result<(), Error> {
-		let mut tx = self.transaction(true);
-		tx.set(key, val)?;
-		tx.commit()
+		let key = key.into_bytes();
+		let val = val.into_bytes();
+
+		let commit_slot = self.inner.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1;
+		let version = self.inner.oracle.timestamp.fetch_add(1, Ordering::SeqCst) + 1;
+
+		let commit = Commit::new_single(key.clone(), version);
+		self.inner.transaction_commit_queue.insert(commit_slot, Arc::new(commit));
+		self.inner.try_advance_commit_prefix();
+		self.inner.advance_commit_watermark();
+
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			let persistence = self.inner.persistence.read().clone();
+			if let Some(p) = persistence {
+				let mut map = std::collections::BTreeMap::new();
+				map.insert(key.clone(), Some(val.clone()));
+				p.append(version, &map).map_err(Error::TxCommitNotPersisted)?;
+			}
+		}
+
+		let entry = self.inner.datastore.get_or_insert_with(key, || {
+			parking_lot::RwLock::new(Versions::from(Version {
+				version,
+				value: Some(val.clone()),
+			}))
+		});
+		let mut versions = entry.value().write();
+		if !entry.is_removed() {
+			let is_new_insert = matches!(*versions, Versions::Single(ref v) if v.version == version);
+			if !is_new_insert {
+				versions.push(Version {
+					version,
+					value: Some(val),
+				});
+			}
+		}
+		drop(versions);
+		Ok(())
 	}
 
 	/// Put a key to a value in an auto-committed write transaction.
@@ -284,9 +323,44 @@ impl Database {
 	/// Atomically creates a tombstone at the key and commits the deletion.
 	#[inline]
 	pub fn del<K: IntoBytes>(&self, key: K) -> Result<(), Error> {
-		let mut tx = self.transaction(true);
-		tx.del(key)?;
-		tx.commit()
+		let key = key.into_bytes();
+
+		let commit_slot = self.inner.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1;
+		let version = self.inner.oracle.timestamp.fetch_add(1, Ordering::SeqCst) + 1;
+
+		let commit = Commit::new_single(key.clone(), version);
+		self.inner.transaction_commit_queue.insert(commit_slot, Arc::new(commit));
+		self.inner.try_advance_commit_prefix();
+		self.inner.advance_commit_watermark();
+
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			let persistence = self.inner.persistence.read().clone();
+			if let Some(p) = persistence {
+				let mut map = std::collections::BTreeMap::new();
+				map.insert(key.clone(), None);
+				p.append(version, &map).map_err(Error::TxCommitNotPersisted)?;
+			}
+		}
+
+		let entry = self.inner.datastore.get_or_insert_with(key, || {
+			parking_lot::RwLock::new(Versions::from(Version {
+				version,
+				value: None,
+			}))
+		});
+		let mut versions = entry.value().write();
+		if !entry.is_removed() {
+			let is_new_insert = matches!(*versions, Versions::Single(ref v) if v.version == version);
+			if !is_new_insert {
+				versions.push(Version {
+					version,
+					value: None,
+				});
+			}
+		}
+		drop(versions);
+		Ok(())
 	}
 
 	/// Conditionally delete a key in an auto-committed write transaction.
