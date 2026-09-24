@@ -85,6 +85,13 @@ pub enum SimAction {
 	DirectPointRead {
 		key: ByteSlice,
 	},
+	DirectSet {
+		key: ByteSlice,
+		val: ByteSlice,
+	},
+	DirectDel {
+		key: ByteSlice,
+	},
 	DirectScan {
 		start: ByteSlice,
 		end: ByteSlice,
@@ -215,6 +222,22 @@ impl WorkloadGenerator {
 				skip,
 				limit,
 				reverse,
+			};
+		}
+
+		// 5% chance of direct single-key auto-commit writes
+		if choice < 28 {
+			let key = self.random_key();
+			let val = self.random_value();
+			return SimAction::DirectSet {
+				key,
+				val,
+			};
+		}
+		if choice < 30 {
+			let key = self.random_key();
+			return SimAction::DirectDel {
+				key,
 			};
 		}
 

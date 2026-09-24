@@ -359,14 +359,49 @@ impl SimRunner {
 			SimAction::DirectPointRead {
 				key,
 			} => {
-				let tx = self.db().transaction(false);
-				let db_val = tx.get(&key).expect("direct get failed");
+				let db_val = self.db().get(&key).expect("direct get failed");
 				let model_val = self.model.get_at_version(key.as_ref(), self.model.current_version);
 
 				assert_eq!(
 					db_val,
 					model_val,
 					"Divergence in DirectPointRead at seed {seed}, step {step} for key {:?}",
+					String::from_utf8_lossy(&key)
+				);
+
+				let with_val = self
+					.db()
+					.with_value(&key, |b| ByteSlice::from(b))
+					.expect("direct with_value failed");
+				assert_eq!(
+					with_val,
+					model_val,
+					"Divergence in DirectPointRead with_value at seed {seed}, step {step} for key {:?}",
+					String::from_utf8_lossy(&key)
+				);
+			}
+
+			SimAction::DirectSet {
+				key,
+				val,
+			} => {
+				let db_res = self.db().set(&key, &val);
+				self.model.set_direct(key.clone(), val);
+				assert!(
+					db_res.is_ok(),
+					"DirectSet failed at seed {seed}, step {step} for key {:?}",
+					String::from_utf8_lossy(&key)
+				);
+			}
+
+			SimAction::DirectDel {
+				key,
+			} => {
+				let db_res = self.db().del(&key);
+				self.model.del_direct(key.clone());
+				assert!(
+					db_res.is_ok(),
+					"DirectDel failed at seed {seed}, step {step} for key {:?}",
 					String::from_utf8_lossy(&key)
 				);
 			}

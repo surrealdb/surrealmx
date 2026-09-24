@@ -144,6 +144,43 @@ impl ModelDb {
 		results
 	}
 
+	/// Directly sets a key to a value in an auto-committed write.
+	pub fn set_direct(&mut self, key: ByteSlice, val: ByteSlice) {
+		self.current_commit_id += 1;
+		self.current_version += 1;
+
+		self.key_history
+			.entry(key.clone())
+			.or_default()
+			.push((self.current_version, Some(val.clone())));
+
+		let mut writeset = BTreeMap::new();
+		writeset.insert(key, Some(val));
+
+		self.commit_history.push(ModelCommitRecord {
+			commit_id: self.current_commit_id,
+			version: self.current_version,
+			writeset,
+		});
+	}
+
+	/// Directly deletes a key in an auto-committed write.
+	pub fn del_direct(&mut self, key: ByteSlice) {
+		self.current_commit_id += 1;
+		self.current_version += 1;
+
+		self.key_history.entry(key.clone()).or_default().push((self.current_version, None));
+
+		let mut writeset = BTreeMap::new();
+		writeset.insert(key, None);
+
+		self.commit_history.push(ModelCommitRecord {
+			commit_id: self.current_commit_id,
+			version: self.current_version,
+			writeset,
+		});
+	}
+
 	/// Commits a model transaction using strict first-committer-wins
 	/// validation.
 	pub fn commit(&mut self, mut txn: ModelTxn) -> Result<(), ModelError> {
