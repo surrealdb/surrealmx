@@ -14,7 +14,7 @@
 
 //! This module stores the database transaction logic.
 
-use crate::bloom::BloomFilter;
+use crate::bloom::AtomicBloomFilter;
 use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
@@ -31,11 +31,11 @@ use arc_swap::ArcSwap;
 use byteslice::ByteSlice;
 use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::Range;
-use std::sync::atomic::{fence, AtomicU64, Ordering};
+use std::sync::atomic::{fence, Ordering};
 use std::sync::Arc;
 #[cfg(debug_assertions)]
 use tracing::debug;
@@ -476,11 +476,8 @@ pub(crate) struct TransactionInner {
 	pub(crate) locked: bool,
 	/// The local set of key reads
 	pub(crate) readset: HashSet<ByteSlice>,
-	/// Bloom filter over the readset for fast conflict pre-checks. Boxed
-	/// so that the filter's bit array lives off the transaction struct:
-	/// pooled transactions are stored and returned by value, so every
-	/// byte here is copied on each pool checkout and release
-	pub(crate) readset_bloom: Mutex<Box<BloomFilter>>,
+	/// Lock-free atomic bloom filter over the readset for fast conflict pre-checks.
+	pub(crate) readset_bloom: AtomicBloomFilter,
 	/// The local set of keys locked with `get_for_update`. Locked keys
 	/// are tracked separately from the readset so they can be validated
 	/// at commit in every isolation mode — even when the writeset is
@@ -488,9 +485,8 @@ pub(crate) struct TransactionInner {
 	/// validated: locking a key never widens the abort surface of the
 	/// transaction's other reads
 	pub(crate) lockset: HashSet<ByteSlice>,
-	/// Bloom filter over the lockset for fast conflict pre-checks. Boxed
-	/// for the same reason as `readset_bloom`
-	pub(crate) lockset_bloom: Mutex<Box<BloomFilter>>,
+	/// Lock-free atomic bloom filter over the lockset for fast conflict pre-checks.
+	pub(crate) lockset_bloom: AtomicBloomFilter,
 	/// The local set of key scans
 	pub(crate) scanset: SkipMap<ByteSlice, ArcSwap<ByteSlice>>,
 	/// The local set of updates and deletes
@@ -571,9 +567,9 @@ impl TransactionInner {
 			version,
 			locked: false,
 			readset: HashSet::new(),
-			readset_bloom: Mutex::new(Box::new(BloomFilter::new())),
+			readset_bloom: AtomicBloomFilter::new(),
 			lockset: HashSet::new(),
-			lockset_bloom: Mutex::new(Box::new(BloomFilter::new())),
+			lockset_bloom: AtomicBloomFilter::new(),
 			scanset: SkipMap::new(),
 			writeset: BTreeMap::new(),
 			database: db,
@@ -599,14 +595,14 @@ impl TransactionInner {
 		// Clear the transaction readset
 		self.readset.pin().clear();
 		// Clear the readset bloom filter
-		self.readset_bloom.lock().clear();
+		self.readset_bloom.clear();
 		// Clear the transaction lockset. `locked` still describes the
 		// previous use of this pooled transaction here, so the clear is
 		// skipped for the transactions that never locked a key and whose
 		// lockset is therefore already empty
 		if self.locked {
 			self.lockset.pin().clear();
-			self.lockset_bloom.lock().clear();
+			self.lockset_bloom.clear();
 		}
 		// Clear or completely reset the allocated writeset
 		if self.writeset.len() > threshold {
@@ -648,11 +644,11 @@ impl TransactionInner {
 		self.scanset.clear();
 		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.readset.pin().clear();
-			self.readset_bloom.lock().clear();
+			self.readset_bloom.clear();
 		}
 		if self.locked {
 			self.lockset.pin().clear();
-			self.lockset_bloom.lock().clear();
+			self.lockset_bloom.clear();
 		}
 	}
 
@@ -758,17 +754,8 @@ impl TransactionInner {
 		// never reads values, and the entry outlives the merge queue's
 		// value-bearing writeset by the whole cleanup window.
 		let keys: Arc<[ByteSlice]> = writeset.keys().cloned().collect();
-		// Build a bloom filter over the writeset keys
-		let mut writeset_bloom = BloomFilter::new();
-		for key in keys.iter() {
-			writeset_bloom.insert(key);
-		}
-		// Insert this transaction into the commit queue
-		let (commit_slot, commit_entry) = self.atomic_commit(Commit {
-			keys,
-			writeset_bloom,
-			merge_version: AtomicU64::new(0),
-		});
+		// Insert this transaction into the commit queue with an adaptive writeset filter
+		let (commit_slot, commit_entry) = self.atomic_commit(Commit::new(keys));
 		// Unwind guard: if this transaction panics after publishing its
 		// commit slot, mark the entry aborted and advance the completed
 		// watermark, so an abandoned in-flight entry can never wedge the
@@ -834,7 +821,7 @@ impl TransactionInner {
 				if self.locked
 					&& !tx
 						.value()
-						.is_disjoint_readset_bloom(&self.lockset, &self.lockset_bloom.lock())
+						.is_disjoint_readset_bloom(&self.lockset, &self.lockset_bloom)
 				{
 					// Do not remove the entry here — see the comment
 					// on the writeset-conflict branch above. The
@@ -857,7 +844,7 @@ impl TransactionInner {
 					// Check if a previous transaction conflicts against reads
 					if !tx
 						.value()
-						.is_disjoint_readset_bloom(&self.readset, &self.readset_bloom.lock())
+						.is_disjoint_readset_bloom(&self.readset, &self.readset_bloom)
 					{
 						// Do not remove the entry here — see the comment
 						// on the writeset-conflict branch above. The
@@ -1126,7 +1113,7 @@ impl TransactionInner {
 				let res = self.exists_in_datastore(lookup, self.version);
 				// Check whether we should track key reads
 				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-					self.readset_bloom.lock().insert(lookup);
+					self.readset_bloom.insert(lookup);
 					self.readset.pin().insert(key.into_bytes());
 				}
 				// Return the result
@@ -1163,7 +1150,7 @@ impl TransactionInner {
 				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 					let guard = self.readset.pin();
 					if !guard.contains(lookup) {
-						self.readset_bloom.lock().insert(lookup);
+						self.readset_bloom.insert(lookup);
 						guard.insert(key.into_bytes());
 					}
 				}
@@ -1205,7 +1192,7 @@ impl TransactionInner {
 					if self.mode >= IsolationLevel::SerializableSnapshotIsolation
 						&& !self.readset.pin().contains(lookup)
 					{
-						self.readset_bloom.lock().insert(lookup);
+						self.readset_bloom.insert(lookup);
 						self.readset.pin().insert(key.into_bytes());
 					}
 					// Return the result
@@ -1257,7 +1244,7 @@ impl TransactionInner {
 		{
 			let guard = self.lockset.pin();
 			if !guard.contains(lookup) {
-				self.lockset_bloom.lock().insert(lookup);
+				self.lockset_bloom.insert(lookup);
 				guard.insert(key.into_bytes());
 			}
 		}

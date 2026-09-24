@@ -22,7 +22,6 @@ use crate::queue::{Commit, Merge};
 use byteslice::ByteSlice;
 use papaya::HashSet;
 use std::collections::BTreeMap;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 /// A prepared readset conflict scenario for benchmarking
@@ -43,17 +42,8 @@ impl ReadsetConflictScenario {
 		ws.sort();
 		ws.dedup();
 		let keys: Arc<[ByteSlice]> = ws.into();
-		// Build the writeset bloom filter
-		let mut writeset_bloom = BloomFilter::new();
-		for k in keys.iter() {
-			writeset_bloom.insert(k);
-		}
-		// Build the commit entry
-		let commit = Arc::new(Commit {
-			keys,
-			writeset_bloom,
-			merge_version: AtomicU64::new(0),
-		});
+		// Build the commit entry with adaptive bloom filter
+		let commit = Arc::new(Commit::new(keys));
 		// Build the readset and bloom filter
 		let readset = HashSet::new();
 		let mut readset_bloom = BloomFilter::new();
@@ -116,16 +106,7 @@ impl WritesetConflictScenario {
 		ws.sort();
 		ws.dedup();
 		let keys: Arc<[ByteSlice]> = ws.into();
-		// Build the writeset bloom filter
-		let mut writeset_bloom = BloomFilter::new();
-		for k in keys.iter() {
-			writeset_bloom.insert(k);
-		}
-		Commit {
-			keys,
-			writeset_bloom,
-			merge_version: AtomicU64::new(0),
-		}
+		Commit::new(keys)
 	}
 }
 

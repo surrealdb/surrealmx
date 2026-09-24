@@ -12,92 +12,165 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A lightweight bloom filter for probabilistic set membership testing.
+//! High-performance bloom filters for probabilistic set membership testing.
+//!
+//! Powered by SIMD-accelerated xxHash3 and lock-free atomic bit array operations
+//! for zero-contention SSI readset tracking.
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const BLOOM_BITS: usize = 4096;
-const BLOOM_BYTES: usize = BLOOM_BITS / 8;
+const BLOOM_WORDS: usize = BLOOM_BITS / 64; // 64 words of u64 = 512 bytes
 const NUM_HASHES: u32 = 3;
 
+/// A lightweight 512-byte bloom filter powered by xxHash3.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BloomFilter {
-	/// The bit array backing the bloom filter
-	bits: [u8; BLOOM_BYTES],
+	/// 64 words of 64-bit integers backing 4096 bits
+	bits: [u64; BLOOM_WORDS],
 	/// The number of keys inserted into the filter
 	count: usize,
+}
+
+impl Default for BloomFilter {
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 impl BloomFilter {
 	/// Create a new empty bloom filter
 	pub const fn new() -> Self {
 		Self {
-			bits: [0; BLOOM_BYTES],
+			bits: [0; BLOOM_WORDS],
 			count: 0,
 		}
 	}
 
-	/// Insert a key into the bloom filter
+	/// Insert a key into the bloom filter using xxHash3
 	#[inline]
 	pub fn insert(&mut self, key: &[u8]) {
-		// Compute the dual hash for this key
-		let h = Self::hash(key);
-		// Set all k hash positions in the bit array
+		let (h1, h2) = Self::hash(key);
 		for i in 0..NUM_HASHES {
-			let bit = Self::nth_hash(h, i) % (BLOOM_BITS as u64);
-			self.bits[(bit / 8) as usize] |= 1 << (bit % 8);
+			let bit = Self::nth_hash((h1, h2), i) % (BLOOM_BITS as u64);
+			let word = (bit / 64) as usize;
+			let mask = 1u64 << (bit % 64);
+			self.bits[word] |= mask;
 		}
-		// Increment the insert counter
 		self.count += 1;
 	}
 
 	/// Check whether a key may be present in the filter
 	#[inline]
 	pub fn may_contain(&self, key: &[u8]) -> bool {
-		// Fast path: empty filter contains nothing
 		if self.count == 0 {
 			return false;
 		}
-		// Compute the dual hash for this key
-		let h = Self::hash(key);
-		// Check all k hash positions in the bit array
+		let (h1, h2) = Self::hash(key);
 		for i in 0..NUM_HASHES {
-			let bit = Self::nth_hash(h, i) % (BLOOM_BITS as u64);
-			if self.bits[(bit / 8) as usize] & (1 << (bit % 8)) == 0 {
+			let bit = Self::nth_hash((h1, h2), i) % (BLOOM_BITS as u64);
+			let word = (bit / 64) as usize;
+			let mask = 1u64 << (bit % 64);
+			if (self.bits[word] & mask) == 0 {
 				return false;
 			}
 		}
-		// All bits are set, so the key may be present
 		true
 	}
 
 	/// Check whether the filter is empty
+	#[inline]
 	pub const fn is_empty(&self) -> bool {
 		self.count == 0
 	}
 
 	/// Reset the filter to its initial empty state
+	#[allow(dead_code)]
 	pub const fn clear(&mut self) {
-		self.bits = [0; BLOOM_BYTES];
+		self.bits = [0; BLOOM_WORDS];
 		self.count = 0;
 	}
 
-	/// Compute a dual FNV-1a hash for double hashing
+	/// Compute a dual hash pair using 128-bit xxHash3
 	#[inline]
-	fn hash(key: &[u8]) -> (u64, u64) {
-		// Compute the primary FNV-1a hash
-		let mut h1: u64 = 0xcbf2_9ce4_8422_2325;
-		for &b in key {
-			h1 ^= u64::from(b);
-			h1 = h1.wrapping_mul(0x0100_0000_01b3);
-		}
-		// Derive the secondary hash via multiplication and rotation
-		let h2 = h1.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(31);
-		// Return the dual hash pair
-		(h1, h2)
+	pub(crate) fn hash(key: &[u8]) -> (u64, u64) {
+		let h128 = xxhash_rust::xxh3::xxh3_128(key);
+		(h128 as u64, (h128 >> 64) as u64)
 	}
 
 	/// Compute the nth hash from the dual hash pair
 	#[inline]
-	fn nth_hash(hashes: (u64, u64), n: u32) -> u64 {
-		hashes.0.wrapping_add(u64::from(n).wrapping_mul(hashes.1))
+	pub(crate) fn nth_hash((h1, h2): (u64, u64), n: u32) -> u64 {
+		h1.wrapping_add(u64::from(n).wrapping_mul(h2))
+	}
+}
+
+/// A lock-free, atomic 512-byte bloom filter for concurrent SSI readset tracking.
+///
+/// Uses relaxed atomic OR operations to set bits without locking any mutex.
+pub(crate) struct AtomicBloomFilter {
+	bits: [AtomicU64; BLOOM_WORDS],
+	count: AtomicU64,
+}
+
+impl Default for AtomicBloomFilter {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+impl AtomicBloomFilter {
+	/// Creates a new empty atomic bloom filter
+	pub fn new() -> Self {
+		Self {
+			bits: std::array::from_fn(|_| AtomicU64::new(0)),
+			count: AtomicU64::new(0),
+		}
+	}
+
+	/// Atomically sets the bloom filter bits using lock-free relaxed `fetch_or`
+	#[inline]
+	pub fn insert(&self, key: &[u8]) {
+		let (h1, h2) = BloomFilter::hash(key);
+		for i in 0..NUM_HASHES {
+			let bit = BloomFilter::nth_hash((h1, h2), i) % (BLOOM_BITS as u64);
+			let word = (bit / 64) as usize;
+			let mask = 1u64 << (bit % 64);
+			self.bits[word].fetch_or(mask, Ordering::Relaxed);
+		}
+		self.count.fetch_add(1, Ordering::Relaxed);
+	}
+
+	/// Checks if a key may be present in the filter without locking
+	#[inline]
+	pub fn may_contain(&self, key: &[u8]) -> bool {
+		if self.count.load(Ordering::Relaxed) == 0 {
+			return false;
+		}
+		let (h1, h2) = BloomFilter::hash(key);
+		for i in 0..NUM_HASHES {
+			let bit = BloomFilter::nth_hash((h1, h2), i) % (BLOOM_BITS as u64);
+			let word = (bit / 64) as usize;
+			let mask = 1u64 << (bit % 64);
+			if (self.bits[word].load(Ordering::Relaxed) & mask) == 0 {
+				return false;
+			}
+		}
+		true
+	}
+
+	/// Checks whether the filter is empty
+	#[inline]
+	pub fn is_empty(&self) -> bool {
+		self.count.load(Ordering::Relaxed) == 0
+	}
+
+	/// Clears all bits in the filter
+	pub fn clear(&self) {
+		for word in &self.bits {
+			word.store(0, Ordering::Relaxed);
+		}
+		self.count.store(0, Ordering::Relaxed);
 	}
 }
 
@@ -146,5 +219,21 @@ mod tests {
 		bf.clear();
 		assert!(bf.is_empty());
 		assert!(!bf.may_contain(b"hello"));
+	}
+
+	#[test]
+	fn atomic_bloom_filter_operations() {
+		let abf = AtomicBloomFilter::new();
+		assert!(abf.is_empty());
+		assert!(!abf.may_contain(b"test_key"));
+
+		abf.insert(b"test_key");
+		assert!(!abf.is_empty());
+		assert!(abf.may_contain(b"test_key"));
+		assert!(!abf.may_contain(b"other_key"));
+
+		abf.clear();
+		assert!(abf.is_empty());
+		assert!(!abf.may_contain(b"test_key"));
 	}
 }

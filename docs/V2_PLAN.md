@@ -293,20 +293,20 @@ Inline commit-time GC ensures that in steady state, over 95% of keys have exactl
 
 Under Serializable Snapshot Isolation (SSI), read tracking currently acquires a `parking_lot::Mutex` on `readset_bloom` on **every single `get()`** call. Furthermore, bloom filters use scalar byte-at-a-time FNV-1a, and every `Commit` embeds a full 512-byte filter even for transactions modifying a single key.
 
-- [ ] Replace `BloomFilter::hash` (scalar FNV-1a) with SIMD-accelerated **xxHash3** (via `xxhash-rust`).
-- [ ] Implement lock-free atomic bloom filter for SSI read tracking:
+- [x] Replace `BloomFilter::hash` (scalar FNV-1a) with SIMD-accelerated **xxHash3** (via `xxhash-rust`).
+- [x] Implement lock-free atomic bloom filter for SSI read tracking:
   ```rust
   pub struct AtomicBloomFilter {
       bits: [AtomicU64; 64], // 4096 bits, exactly 512 bytes
   }
   ```
-- [ ] Replace `readset_bloom: Mutex<Box<BloomFilter>>` with `AtomicBloomFilter`, updating bits via lock-free `fetch_or(mask, Ordering::Relaxed)`.
-- [ ] Remove `Mutex` lock acquisition from `tx.get()` and `tx.exists()` in SSI mode.
-- [ ] Implement Adaptive Filter for `Commit`:
-  - 0 keys: $0$ bytes.
-  - 1–2 keys: store keys inline in `[ByteSlice; 2]` and check direct equality in $\sim 2\text{ ns}$.
-  - $> 2$ keys: use the 512-byte Bloom filter (or Ribbon filter).
-- [ ] Verify SSI serializability guarantees against `SimRunner`.
+- [x] Replace `readset_bloom: Mutex<Box<BloomFilter>>` with `AtomicBloomFilter`, updating bits via lock-free `fetch_or(mask, Ordering::Relaxed)`.
+- [x] Remove `Mutex` lock acquisition from `tx.get()`, `tx.getm()`, `tx.get_for_update()`, and `tx.exists()` in SSI mode.
+- [x] Implement Adaptive Filter for `Commit`:
+  - 0–2 keys: $0$ bloom bytes allocated; relies on key bounds and direct key comparisons in $\sim 2\text{ ns}$.
+  - $> 2$ keys: allocates 512-byte xxHash3 Bloom filter.
+  - Reduced `size_of::<Commit>()` from 544 bytes down to **32 bytes** (94% memory reduction).
+- [x] Verify SSI serializability guarantees against `SimRunner`.
 - [ ] Benchmark SSI read throughput and conflict detection speed.
 
 ---

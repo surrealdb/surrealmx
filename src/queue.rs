@@ -14,7 +14,7 @@
 
 //! This module stores the transaction commit and merge queues.
 
-use crate::bloom::BloomFilter;
+use crate::bloom::{AtomicBloomFilter, BloomFilter};
 #[cfg(debug_assertions)]
 use crate::LOG_TARGET_CONFLICTS;
 use byteslice::ByteSlice;
@@ -25,6 +25,36 @@ use std::sync::Arc;
 #[cfg(debug_assertions)]
 use tracing::debug;
 
+/// Trait abstracting over `BloomFilter` and `AtomicBloomFilter` checks.
+pub(crate) trait BloomCheck {
+	fn is_empty(&self) -> bool;
+	fn may_contain(&self, key: &[u8]) -> bool;
+}
+
+impl BloomCheck for BloomFilter {
+	#[inline]
+	fn is_empty(&self) -> bool {
+		self.is_empty()
+	}
+
+	#[inline]
+	fn may_contain(&self, key: &[u8]) -> bool {
+		self.may_contain(key)
+	}
+}
+
+impl BloomCheck for AtomicBloomFilter {
+	#[inline]
+	fn is_empty(&self) -> bool {
+		self.is_empty()
+	}
+
+	#[inline]
+	fn may_contain(&self, key: &[u8]) -> bool {
+		self.may_contain(key)
+	}
+}
+
 /// A transaction entry in the transaction commit queue
 pub struct Commit {
 	/// The sorted writeset keys. Values are never read during conflict
@@ -32,8 +62,11 @@ pub struct Commit {
 	/// the full writeset only until the commit is applied, while this
 	/// entry survives until queue cleanup without pinning value memory.
 	pub(crate) keys: Arc<[ByteSlice]>,
-	/// Bloom filter over writeset keys for fast conflict pre-checks
-	pub(crate) writeset_bloom: BloomFilter,
+	/// Bloom filter over writeset keys for fast conflict pre-checks.
+	/// Kept as `Option<Box<BloomFilter>>` so that `size_of::<Commit>()`
+	/// is only 32 bytes and small writesets (<= 2 keys) avoid allocating
+	/// the 512-byte filter entirely.
+	pub(crate) writeset_bloom: Option<Box<BloomFilter>>,
 	/// The merge version this commit published, zero while the commit is
 	/// still in flight, or [`crate::inner::COMMIT_ABORTED`] when the
 	/// owning transaction unwound without completing. Set by the owning
@@ -90,6 +123,27 @@ impl Merge {
 }
 
 impl Commit {
+	/// Create a new commit queue entry with adaptive bloom filtering.
+	///
+	/// For writesets with <= 2 keys, skips allocating the 512-byte bloom filter
+	/// entirely and relies on key range bounds and direct key comparisons.
+	pub(crate) fn new(keys: Arc<[ByteSlice]>) -> Self {
+		let writeset_bloom = if keys.len() > 2 {
+			let mut bloom = Box::new(BloomFilter::new());
+			for key in keys.iter() {
+				bloom.insert(key);
+			}
+			Some(bloom)
+		} else {
+			None
+		};
+		Self {
+			keys,
+			writeset_bloom,
+			merge_version: AtomicU64::new(0),
+		}
+	}
+
 	/// The smallest key in the writeset (for range overlap checks)
 	#[inline]
 	fn min_key(&self) -> Option<&ByteSlice> {
@@ -110,16 +164,20 @@ impl Commit {
 
 	/// Returns true if self has no elements in common with other.
 	/// Uses a bloom filter for a fast pre-check before the exact intersection.
-	pub fn is_disjoint_readset_bloom(
+	pub fn is_disjoint_readset_bloom<B: BloomCheck>(
 		&self,
 		other: &HashSet<ByteSlice>,
-		bloom: &BloomFilter,
+		bloom: &B,
 	) -> bool {
-		// Fast path: if the bloom filter is empty, there are no reads to conflict with
+		// Fast path 1: if the bloom filter is empty, there are no reads to conflict with
 		if bloom.is_empty() {
 			return true;
 		}
-		// Check writeset keys against the bloom filter first
+		// Fast path 2: small writesets (<= 2 keys) check exact readset membership directly
+		if self.keys.len() <= 2 {
+			return self.is_disjoint_readset(other);
+		}
+		// Fast path 3: check writeset keys against the bloom filter
 		let mut any_possible = false;
 		for key in self.keys.iter() {
 			if bloom.may_contain(key) {
@@ -172,7 +230,7 @@ impl Commit {
 	/// Uses bloom filters and key bounds for fast pre-checks before the
 	/// exact sorted merge.
 	pub fn is_disjoint_writeset_bloom(&self, other: &Arc<Self>) -> bool {
-		// Fast path: check if the key ranges overlap at all
+		// Fast path 1: check if the key ranges overlap at all
 		match (self.min_key(), self.max_key(), other.min_key(), other.max_key()) {
 			(Some(self_min), Some(self_max), Some(other_min), Some(other_max)) => {
 				if self_max < other_min || other_max < self_min {
@@ -182,17 +240,24 @@ impl Commit {
 			// An empty writeset cannot conflict
 			_ => return true,
 		}
-		// Check our writeset keys against the other's bloom filter
-		let mut any_possible = false;
-		for key in self.keys.iter() {
-			if other.writeset_bloom.may_contain(key) {
-				any_possible = true;
-				break;
-			}
+
+		// Fast path 2: small writesets (<= 2 keys) check direct sorted comparison faster than hashing
+		if self.keys.len() <= 2 || other.keys.len() <= 2 {
+			return self.is_disjoint_writeset(other);
 		}
-		// If no key passes the bloom filter, there is definitely no overlap
-		if !any_possible {
-			return true;
+
+		// Fast path 3: check other's bloom filter
+		if let Some(ref bloom) = other.writeset_bloom {
+			let mut any_possible = false;
+			for key in self.keys.iter() {
+				if bloom.may_contain(key) {
+					any_possible = true;
+					break;
+				}
+			}
+			if !any_possible {
+				return true;
+			}
 		}
 		// Fall through to exact check
 		self.is_disjoint_writeset(other)
@@ -246,15 +311,7 @@ mod tests {
 		v.sort();
 		v.dedup();
 		let keys: Arc<[ByteSlice]> = v.into();
-		let mut writeset_bloom = BloomFilter::new();
-		for k in keys.iter() {
-			writeset_bloom.insert(k);
-		}
-		Arc::new(Commit {
-			keys,
-			writeset_bloom,
-			merge_version: AtomicU64::new(0),
-		})
+		Arc::new(Commit::new(keys))
 	}
 
 	/// Build a readset from a set of string keys
@@ -307,5 +364,19 @@ mod tests {
 		let lo = commit(&["a", "b"]);
 		let hi = commit(&["x", "y"]);
 		assert!(lo.is_disjoint_writeset_bloom(&hi));
+	}
+
+	#[test]
+	fn commit_memory_footprint_and_adaptive_bloom() {
+		// Commit struct is strictly 32 bytes (Arc<[ByteSlice]>: 16B + Option<Box<BloomFilter>>: 8B + AtomicU64: 8B)
+		assert_eq!(std::mem::size_of::<Commit>(), 32);
+
+		// <= 2 keys skips bloom allocation entirely
+		let small = commit(&["a", "b"]);
+		assert!(small.writeset_bloom.is_none());
+
+		// > 2 keys allocates bloom filter
+		let larger = commit(&["a", "b", "c"]);
+		assert!(larger.writeset_bloom.is_some());
 	}
 }
