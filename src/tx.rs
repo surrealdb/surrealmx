@@ -1068,10 +1068,8 @@ impl TransactionInner {
 					continue;
 				}
 				// Check if the node was just seeded with this version
-				let is_new_insert = match *versions {
-					Versions::Single(ref v) if v.version == version => true,
-					_ => false,
-				};
+				let is_new_insert =
+					matches!(*versions, Versions::Single(ref v) if v.version == version);
 				if !is_new_insert {
 					// An update or insert into an existing chain
 					versions.push(Version {

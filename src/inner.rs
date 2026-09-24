@@ -320,34 +320,19 @@ impl Inner {
 	/// `commit_watermark` back, never advances it past an unconfirmed
 	/// slot).
 	pub(crate) fn try_advance_commit_prefix(&self) {
-		let mut spins = 0;
-		loop {
-			// Load the current bound and the claimed-slot ceiling
-			let cur = self.transaction_commit_id.load(Ordering::SeqCst);
-			let next = cur + 1;
-			// Nothing has claimed this slot yet
-			if next > self.transaction_queue_id.load(Ordering::SeqCst) {
-				break;
-			}
-			// Claimed but not yet inserted: stop, don't wait for it
-			if self.transaction_commit_queue.get(&next).is_none() {
-				break;
-			}
-			// Advance by one step; on CAS failure another caller advanced
-			// past us, so reload and continue from the fresh bound. Back
-			// off on contention: a caller of this function (e.g. a
-			// cleanup sweep with no delay between iterations) can end up
-			// calling it far more often than intended, and retrying here
-			// without a delay would otherwise hammer this cache line
-			// against every other thread doing the same.
-			if self
-				.transaction_commit_id
-				.compare_exchange_weak(cur, next, Ordering::SeqCst, Ordering::SeqCst)
-				.is_err()
-			{
-				crate::tx::backoff(spins);
-				spins += 1;
-			}
+		let max_claimed = self.transaction_queue_id.load(Ordering::SeqCst);
+		let cur = self.transaction_commit_id.load(Ordering::SeqCst);
+		let mut target = cur;
+		while target < max_claimed && self.transaction_commit_queue.get(&(target + 1)).is_some() {
+			target += 1;
+		}
+		if target > cur {
+			let _ = self.transaction_commit_id.compare_exchange(
+				cur,
+				target,
+				Ordering::SeqCst,
+				Ordering::SeqCst,
+			);
 		}
 	}
 
@@ -361,27 +346,19 @@ impl Inner {
 	/// persistence-failure path, which marks rather than removes) before
 	/// the clock has confirmably passed it.
 	pub(crate) fn try_advance_merge_clock(&self) {
-		let mut spins = 0;
-		loop {
-			let cur = self.oracle.timestamp.load(Ordering::SeqCst);
-			let next = cur + 1;
-			if next > self.oracle.alloc.load(Ordering::SeqCst) {
-				break;
-			}
-			if self.transaction_merge_queue.get(&next).is_none() {
-				break;
-			}
-			// Back off on contention — see the equivalent comment in
-			// `try_advance_commit_prefix`.
-			if self
-				.oracle
-				.timestamp
-				.compare_exchange_weak(cur, next, Ordering::SeqCst, Ordering::SeqCst)
-				.is_err()
-			{
-				crate::tx::backoff(spins);
-				spins += 1;
-			}
+		let max_claimed = self.oracle.alloc.load(Ordering::SeqCst);
+		let cur = self.oracle.timestamp.load(Ordering::SeqCst);
+		let mut target = cur;
+		while target < max_claimed && self.transaction_merge_queue.get(&(target + 1)).is_some() {
+			target += 1;
+		}
+		if target > cur {
+			let _ = self.oracle.timestamp.compare_exchange(
+				cur,
+				target,
+				Ordering::SeqCst,
+				Ordering::SeqCst,
+			);
 		}
 	}
 
@@ -421,15 +398,11 @@ impl Inner {
 	/// stepped over exactly once across all callers, and the CAS simply
 	/// resolves which caller performs each step.
 	pub(crate) fn advance_commit_watermark(&self) {
-		loop {
-			// Load the current watermark and the inserted prefix bound
-			let wm = self.commit_watermark.load(Ordering::SeqCst);
-			let next = wm + 1;
-			// Stop at the end of the inserted commit slot prefix
-			if next > self.transaction_commit_id.load(Ordering::SeqCst) {
-				break;
-			}
-			// Check whether the next commit in sequence has completed
+		let max_prefix = self.transaction_commit_id.load(Ordering::SeqCst);
+		let wm = self.commit_watermark.load(Ordering::SeqCst);
+		let mut target = wm;
+		while target < max_prefix {
+			let next = target + 1;
 			let complete = match self.transaction_commit_queue.get(&next) {
 				Some(entry) => entry.value().merge_version.load(Ordering::SeqCst) != 0,
 				None => true,
@@ -437,11 +410,12 @@ impl Inner {
 			if !complete {
 				break;
 			}
-			// Advance by one step; on CAS failure another caller advanced
-			// past us, so reload and continue from the fresh watermark
+			target = next;
+		}
+		if target > wm {
 			let _ = self.commit_watermark.compare_exchange(
 				wm,
-				next,
+				target,
 				Ordering::SeqCst,
 				Ordering::SeqCst,
 			);
@@ -459,26 +433,26 @@ impl Inner {
 	/// removed early on the persistence-failure path — in either case its
 	/// data is in the datastore chains, so the watermark may pass it.
 	pub(crate) fn advance_merge_retirement(&self) {
-		loop {
-			// Load the current watermark and the published prefix bound
-			let wm = self.merge_retire_id.load(Ordering::SeqCst);
-			let next = wm + 1;
-			// Stop at the end of the published merge version prefix
-			if next > self.oracle.timestamp.load(Ordering::SeqCst) {
-				break;
-			}
-			// Check whether the next merge in sequence has been applied
+		let max_published = self.oracle.timestamp.load(Ordering::SeqCst);
+		let wm = self.merge_retire_id.load(Ordering::SeqCst);
+		let mut target = wm;
+		while target < max_published {
+			let next = target + 1;
 			if let Some(entry) = self.transaction_merge_queue.get(&next) {
 				if !entry.value().applied.load(Ordering::SeqCst) {
 					break;
 				}
-				// Remove the applied entry as the watermark passes it
 				entry.remove();
 			}
-			// Advance by one step; on CAS failure another caller advanced
-			// past us, so reload and continue from the fresh watermark
-			let _ =
-				self.merge_retire_id.compare_exchange(wm, next, Ordering::SeqCst, Ordering::SeqCst);
+			target = next;
+		}
+		if target > wm {
+			let _ = self.merge_retire_id.compare_exchange(
+				wm,
+				target,
+				Ordering::SeqCst,
+				Ordering::SeqCst,
+			);
 		}
 	}
 
