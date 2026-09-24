@@ -26,18 +26,20 @@
 #### Features
 
 - In-memory database
-- Multi-version concurrency control
-- Rich transaction support with rollbacks
-- Stackable savepoints with partial rollback and release
-- Multiple concurrent readers without locking
-- Multiple concurrent writers without locking
-- Support for serializable, snapshot isolated transactions
+- Multi-version concurrency control (MVCC)
+- Lock-free circular commit ring buffer with $O(1)$ atomic slot claiming
+- Sharded active reader registry eliminating atomic cache-line contention across multi-core CPUs
+- High-performance zero-copy byte primitives (`ByteSlice`) with 20-byte SSO and 4-byte prefix comparison
+- Rich transaction support with rollbacks and stackable savepoints
+- Direct auto-committing point operations (`db.get`, `db.set`, `db.del`, `db.put`, `db.exists`)
+- True zero-allocation range scanning (`scan_with`, `scan_into`, `keys_for_each`, `keys_into`)
+- Multiple concurrent readers and writers without global locks
+- Support for serializable and snapshot-isolated transactions
 - Atomicity, Consistency, Isolation, and optional Durability from ACID
 - Optional persistence with configurable modes:
-  - Support for synchronous and asynchronous append-only logging
-  - Support for periodic full-datastore snapshots
-  - Support for fsync on every commit, or periodically in the background
-  - Support for LZ4 snapshot file compression
+  - High-throughput Group Commit flusher for synchronous append-only logging
+  - Asynchronous background logging and periodic full-datastore snapshots
+  - Configurable fsync modes and fast LZ4 snapshot file compression
 
 #### Quick start
 
@@ -58,6 +60,35 @@ fn main() {
     let mut tx = db.transaction(false);
     assert_eq!(tx.get("key").unwrap(), Some("value".into()));
     tx.cancel().unwrap();
+}
+```
+
+#### Direct database operations
+
+For single-key reads, writes, and scans, `Database` exposes direct methods that execute with full ACID snapshot isolation while bypassing transaction pool checkout and reader slot registration:
+
+```rust
+use surrealmx::Database;
+
+fn main() {
+    let db = Database::new();
+
+    // Direct auto-committed writes
+    db.set("user:01", "alice").unwrap();
+    db.put("user:02", "bob").unwrap(); // Fails if key already exists
+
+    // Direct point reads
+    assert!(db.exists("user:01").unwrap());
+    assert_eq!(db.get("user:01").unwrap(), Some("alice".into()));
+
+    // Zero-copy value inspection via closure without cloning
+    db.with_value("user:01", |bytes| {
+        assert_eq!(bytes, b"alice");
+    }).unwrap();
+
+    // Direct deletion
+    db.del("user:02").unwrap();
+    assert!(!db.exists("user:02").unwrap());
 }
 ```
 
@@ -450,7 +481,9 @@ SurrealMX provides powerful range-based operations for scanning, counting, and i
 
 - **Forward and reverse iteration**
 - **Skip and limit parameters** for pagination  
-- **Efficient range scans** using the underlying B+ tree structure
+- **Efficient range scans** using the underlying lock-free skiplist structure
+- **Zero-allocation closure scans** (`scan_with`, `keys_for_each`) inspecting borrowed slices directly without vector allocations or value clones
+- **Buffer-reusing scans** (`scan_into`, `keys_into`) avoiding repeated vector reallocations across query loops
 
 ##### Basic range scanning
 
@@ -522,17 +555,48 @@ fn main() {
 }
 ```
 
+##### Zero-allocation range scanning
+
+```rust
+use surrealmx::Database;
+
+fn main() {
+    let db = Database::new();
+
+    for i in 0..100 {
+        db.set(format!("doc:{i:04}"), format!("val_{i}")).unwrap();
+    }
+
+    // Inspect borrowed key (&ByteSlice) and value (&[u8]) directly with zero allocations
+    db.scan_with("doc:0000".."doc:9999", None, Some(10), |key, val| {
+        println!("{key:?} => {:?}", std::str::from_utf8(val).unwrap());
+        true // Return false to stop iteration early
+    }).unwrap();
+
+    // Scan keys with zero allocation
+    db.keys_for_each("doc:0000".."doc:9999", None, Some(10), |key| {
+        println!("Key: {key:?}");
+        true
+    }).unwrap();
+
+    // Reuse a pre-allocated vector buffer across repeated scans
+    let mut buffer = Vec::new();
+    db.scan_into("doc:0000".."doc:0050", None, None, &mut buffer).unwrap();
+    assert_eq!(buffer.len(), 50);
+}
+```
+
 **Available range operation methods:**
 
-- `keys(range, skip, limit)` / `keys_reverse(...)`: Get keys in range
-- `scan(range, skip, limit)` / `scan_reverse(...)`: Get key-value pairs in range
+- `scan_with(range, skip, limit, closure)`: Zero-allocation closure inspection over borrowed `(&ByteSlice, &[u8])`
+- `keys_for_each(range, skip, limit, closure)`: Zero-allocation closure iteration over borrowed `&ByteSlice` keys
+- `scan_into(range, skip, limit, &mut buffer)`: Reuses pre-allocated buffer for key-value pairs
+- `keys_into(range, skip, limit, &mut buffer)`: Reuses pre-allocated buffer for keys
+- `keys(range, skip, limit)` / `keys_reverse(...)`: Get keys in range as `Vec<ByteSlice>`
+- `scan(range, skip, limit)` / `scan_reverse(...)`: Get key-value pairs in range as `Vec<(ByteSlice, ByteSlice)>`
 - `total(range, skip, limit)`: Count keys in range
 
 **Range parameters:**
 - `range`: Rust range syntax (`"start".."end"`) - start inclusive, end exclusive
 - `skip`: Optional number of items to skip (for pagination)
 - `limit`: Optional maximum number of items to return
-
-#### Project History
-
-**Note:** This project was originally developed under the name `memodb`. It has been renamed to `surrealmx` to better reflect its evolution and alignment with the SurrealDB ecosystem.
