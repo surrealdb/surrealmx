@@ -174,6 +174,15 @@ impl Transaction {
 		self.inner.as_ref().expect(INNER_TAKEN).get(key)
 	}
 
+	/// Fetch a key from the database and inspect its value with a closure without cloning.
+	pub fn with_value<K, F, R>(&self, key: K, f: F) -> Result<Option<R>, Error>
+	where
+		K: IntoBytes,
+		F: FnOnce(&[u8]) -> R,
+	{
+		self.inner.as_ref().expect(INNER_TAKEN).with_value(key, f)
+	}
+
 	/// Fetch multiple keys from the database
 	pub fn getm<K>(&self, keys: Vec<K>) -> Result<Vec<Option<ByteSlice>>, Error>
 	where
@@ -1236,6 +1245,44 @@ impl TransactionInner {
 			}
 		} else {
 			self.fetch_in_datastore(lookup, self.version)
+		};
+		// Return result
+		Ok(res)
+	}
+
+	/// Fetch a key from the database and inspect its value with a closure without cloning
+	pub fn with_value<K, F, R>(&self, key: K, f: F) -> Result<Option<R>, Error>
+	where
+		K: IntoBytes,
+		F: FnOnce(&[u8]) -> R,
+	{
+		// Get the key reference
+		let lookup = key.as_slice();
+		// Check to see if transaction is closed
+		if self.done {
+			return Err(Error::TxClosed);
+		}
+		// Check the transaction type
+		let res = if self.write {
+			// The key exists in the writeset
+			if let Some(v) = self.writeset.get(lookup) {
+				v.as_deref().map(f)
+			} else {
+				// Fetch for the key from the datastore
+				let res = self.with_value_in_datastore(lookup, self.version, f);
+				// Check whether we should track key reads
+				if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+					let guard = self.readset.pin();
+					if !guard.contains(lookup) {
+						self.readset_bloom.insert(lookup);
+						guard.insert(key.into_bytes());
+					}
+				}
+				// Return the result
+				res
+			}
+		} else {
+			self.with_value_in_datastore(lookup, self.version, f)
 		};
 		// Return result
 		Ok(res)
@@ -2431,6 +2478,34 @@ impl TransactionInner {
 			self.database.datastore.get(k).and_then(|e| match e.value().try_read() {
 				Some(guard) => guard.fetch_version(version),
 				None => e.value().read().fetch_version(version),
+			})
+		})
+	}
+
+	/// Fetch a key and inspect its value via closure without cloning
+	#[inline(always)]
+	fn with_value_in_datastore<K, F, R>(&self, key: K, version: u64, f: F) -> Option<R>
+	where
+		K: IntoBytes,
+		F: FnOnce(&[u8]) -> R,
+	{
+		let key = key.as_slice();
+		if !self.database.transaction_merge_queue.is_empty()
+			&& version > self.database.merge_retire_id.load(Ordering::Acquire)
+		{
+			let iter = self.database.transaction_merge_queue.range(..=version);
+			for entry in iter.rev() {
+				if !entry.is_removed() && entry.value().may_contain_key(key) {
+					if let Some(v) = entry.value().writeset.get(key) {
+						return v.as_deref().map(f);
+					}
+				}
+			}
+		}
+		ByteSlice::with_borrowed(key, |k| {
+			self.database.datastore.get(k).and_then(|e| match e.value().try_read() {
+				Some(guard) => guard.with_version(version, f),
+				None => e.value().read().with_version(version, f),
 			})
 		})
 	}
@@ -4907,6 +4982,21 @@ mod tests {
 
 			tx.cancel().unwrap();
 		}
+	}
+
+	#[test]
+	fn test_with_value_zero_copy() {
+		let db = Database::new();
+		let mut tx = db.transaction(true);
+		tx.set("key", "hello world").unwrap();
+		tx.commit().unwrap();
+
+		let tx2 = db.transaction(false);
+		let len = tx2.with_value("key", |bytes| bytes.len()).unwrap();
+		assert_eq!(len, Some(11));
+
+		let missing = tx2.with_value("missing", |_| 42).unwrap();
+		assert_eq!(missing, None);
 	}
 
 	#[test]

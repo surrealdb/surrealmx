@@ -208,6 +208,32 @@ impl Versions {
 		}
 	}
 
+	/// Access the value at a specific version via closure without cloning.
+	#[inline]
+	pub(crate) fn with_version<F, R>(&self, version: u64, f: F) -> Option<R>
+	where
+		F: FnOnce(&[u8]) -> R,
+	{
+		match self {
+			Self::Empty => None,
+			Self::Single(ref v) => {
+				if v.version <= version {
+					v.value.as_deref().map(f)
+				} else {
+					None
+				}
+			}
+			Self::Chain(ref chain) => {
+				let idx = self.find_index_lte_version(version);
+				if idx > 0 {
+					chain.get(idx - 1).and_then(|v| v.value.as_deref().map(f))
+				} else {
+					None
+				}
+			}
+		}
+	}
+
 	/// Check if an entry at a specific version exists and is not a delete.
 	#[inline]
 	pub(crate) fn exists_version(&self, version: u64) -> bool {
