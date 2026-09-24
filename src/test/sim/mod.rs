@@ -47,21 +47,22 @@ mod tests {
 		let seed_count: usize = std::env::var("SURREALMX_SIM_SEEDS")
 			.ok()
 			.and_then(|s| s.parse().ok())
-			.unwrap_or(100);
+			.unwrap_or(500);
 
 		let base_seeds: Vec<u64> =
-			vec![1, 42, 1337, 2026, 99999, 777777, 1234567, 3141592, 2718281, 8888888];
+			vec![1, 42, 1337, 2026, 99_999, 777_777, 1_234_567, 3_141_592, 2_718_281, 8_888_888];
 		let seeds: Vec<u64> = if seed_count <= base_seeds.len() {
 			base_seeds[..seed_count].to_vec()
 		} else {
 			let mut extended = base_seeds;
 			for i in 10..seed_count {
-				extended.push((i as u64).wrapping_mul(6364136223846793005).wrapping_add(1));
+				extended.push((i as u64).wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1));
 			}
 			extended
 		};
 
-		let parallelism = std::thread::available_parallelism().map_or(4, |n| n.get()).min(64);
+		let parallelism =
+			std::thread::available_parallelism().map_or(4, std::num::NonZero::get).min(64);
 		let seeds = Arc::new(seeds);
 		let index = Arc::new(AtomicUsize::new(0));
 		let mut handles = Vec::with_capacity(parallelism);
@@ -139,7 +140,7 @@ mod tests {
 		if let Ok(seed_str) =
 			std::env::var("SURREALMX_SIM_SEED").or_else(|_| std::env::var("SIM_SEED"))
 		{
-			let seed: u64 = seed_str.parse().expect("SIM_SEED must be a valid u64");
+			let seed: u64 = seed_str.parse().expect("SURREALMX_SIM_SEED must be a valid u64");
 			let steps: usize = std::env::var("SURREALMX_SIM_STEPS")
 				.or_else(|_| std::env::var("SIM_STEPS"))
 				.ok()

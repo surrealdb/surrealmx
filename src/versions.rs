@@ -51,6 +51,7 @@ impl From<Version> for Versions {
 impl Versions {
 	/// Create a new empty versions object.
 	#[inline]
+	#[allow(dead_code)]
 	pub(crate) const fn new() -> Self {
 		Self::Empty
 	}
@@ -83,6 +84,7 @@ impl Versions {
 
 	/// Returns a reference to the latest version, if any.
 	#[inline]
+	#[allow(dead_code)]
 	pub(crate) fn last(&self) -> Option<&Version> {
 		match self {
 			Self::Empty => None,
@@ -299,7 +301,7 @@ impl Versions {
 				}
 
 				if chain.len() == 1 {
-					let single = chain.pop().unwrap();
+					let single = chain.pop().expect("chain length verified to be 1");
 					*self = Self::Single(single);
 					1
 				} else if chain.is_empty() {

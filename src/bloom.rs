@@ -93,6 +93,7 @@ impl BloomFilter {
 
 	/// Compute a dual hash pair using 128-bit xxHash3
 	#[inline]
+	#[allow(clippy::cast_possible_truncation)]
 	pub(crate) fn hash(key: &[u8]) -> (u64, u64) {
 		let h128 = xxhash_rust::xxh3::xxh3_128(key);
 		(h128 as u64, (h128 >> 64) as u64)

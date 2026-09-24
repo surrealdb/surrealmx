@@ -4,10 +4,11 @@ permissions:
   contents: read
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, next ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, next ]
 
 jobs:
   test:
@@ -28,6 +29,25 @@ jobs:
 
       - name: Run tests
         run: cargo test --all-features --verbose
+
+  dst:
+    name: Deterministic Simulation (DST)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Run DST simulation (5,000 seeds × 5,000 steps = 25M operations)
+        env:
+          SURREALMX_SIM_SEEDS: 5000
+          SURREALMX_SIM_STEPS: 5000
+        run: cargo test --release -p surrealmx --lib test::sim -- --nocapture
 
   wasm:
     name: WASM
