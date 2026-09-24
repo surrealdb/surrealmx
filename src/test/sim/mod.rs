@@ -14,18 +14,12 @@
 
 //! Deterministic simulation and differential testing framework.
 
-#[allow(unused_imports)]
 pub mod generator;
-#[allow(unused_imports)]
 pub mod harness;
-#[allow(unused_imports)]
 pub mod model;
 
-#[allow(unused_imports)]
 pub use generator::{SimAction, WorkloadGenerator};
-#[allow(unused_imports)]
 pub use harness::SimRunner;
-#[allow(unused_imports)]
 pub use model::{ModelDb, ModelError, ModelIsolation, ModelTxn};
 
 #[cfg(test)]
@@ -39,15 +33,11 @@ mod tests {
 	#[test]
 	fn test_dst_differential_seeds() {
 		// Read environment variables or default to a robust testing set
-		let steps: usize = std::env::var("SURREALMX_SIM_STEPS")
-			.ok()
-			.and_then(|s| s.parse().ok())
-			.unwrap_or(1000);
+		let steps: usize =
+			std::env::var("SURREALMX_SIM_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
 
-		let seed_count: usize = std::env::var("SURREALMX_SIM_SEEDS")
-			.ok()
-			.and_then(|s| s.parse().ok())
-			.unwrap_or(500);
+		let seed_count: usize =
+			std::env::var("SURREALMX_SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(500);
 
 		let base_seeds: Vec<u64> =
 			vec![1, 42, 1337, 2026, 99_999, 777_777, 1_234_567, 3_141_592, 2_718_281, 8_888_888];
@@ -70,17 +60,15 @@ mod tests {
 		for _ in 0..parallelism {
 			let seeds = Arc::clone(&seeds);
 			let index = Arc::clone(&index);
-			handles.push(std::thread::spawn(move || {
-				loop {
-					let idx = index.fetch_add(1, Ordering::Relaxed);
-					if idx >= seeds.len() {
-						break;
-					}
-					let seed = seeds[idx];
-					let mut runner = SimRunner::new_in_memory(seed);
-					let gen = WorkloadGenerator::new(seed, 30).with_max_concurrent_txns(12);
-					runner.run(gen, steps);
+			handles.push(std::thread::spawn(move || loop {
+				let idx = index.fetch_add(1, Ordering::Relaxed);
+				if idx >= seeds.len() {
+					break;
 				}
+				let seed = seeds[idx];
+				let mut runner = SimRunner::new_in_memory(seed);
+				let gen = WorkloadGenerator::new(seed, 30).with_max_concurrent_txns(12);
+				runner.run(gen, steps);
 			}));
 		}
 

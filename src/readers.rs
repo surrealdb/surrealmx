@@ -27,7 +27,7 @@
 //! allowing $O(1)$ routing on `remove(&slot_id)` even if a transaction is
 //! unpinned from a different thread (e.g. in multi-threaded async executors).
 
-use crate::inner::{SLOT_PINNING, Slot};
+use crate::inner::{Slot, SLOT_PINNING};
 use crossbeam_skiplist::map::Entry;
 use crossbeam_skiplist::SkipMap;
 use crossbeam_utils::CachePadded;
@@ -109,7 +109,8 @@ impl Readers {
 
 	/// Remove a reader slot by `slot_id`.
 	///
-	/// Computes the owning shard directly from `slot_id & SHARD_MASK` in $O(1)$.
+	/// Computes the owning shard directly from `slot_id & SHARD_MASK` in
+	/// $O(1)$.
 	#[inline]
 	pub(crate) fn remove(&self, slot_id: u64) -> Option<Entry<'_, u64, Arc<Slot>>> {
 		let shard_idx = (slot_id & SHARD_MASK) as usize % NUM_SHARDS;
@@ -124,13 +125,13 @@ impl Readers {
 
 	/// Returns total number of active reader slots across all shards.
 	#[inline]
-	#[allow(dead_code)]
+	#[cfg(test)]
 	pub(crate) fn len(&self) -> usize {
 		self.shards.iter().map(|s| s.map.len()).sum()
 	}
 
 	/// Returns the entry with the smallest `slot_id` across all shards, if any.
-	#[allow(dead_code)]
+	#[cfg(test)]
 	pub(crate) fn front(&self) -> Option<Entry<'_, u64, Arc<Slot>>> {
 		let mut min_entry: Option<Entry<'_, u64, Arc<Slot>>> = None;
 		for shard in self.shards.iter() {

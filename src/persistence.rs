@@ -44,7 +44,8 @@ pub(crate) struct AsyncAppendOperation {
 	pub writeset: BTreeMap<ByteSlice, Option<ByteSlice>>,
 }
 
-/// A slot representing a synchronous commit request waiting in a group commit batch.
+/// A slot representing a synchronous commit request waiting in a group commit
+/// batch.
 struct SyncCommitSlot {
 	data: Vec<u8>,
 	done: AtomicBool,
@@ -52,7 +53,8 @@ struct SyncCommitSlot {
 	error: Mutex<Option<PersistenceError>>,
 }
 
-/// Coordinates group commits across concurrent threads for AOL synchronous persistence.
+/// Coordinates group commits across concurrent threads for AOL synchronous
+/// persistence.
 pub(crate) struct GroupCommitter {
 	queue: Mutex<Vec<Arc<SyncCommitSlot>>>,
 	flushing: AtomicBool,
@@ -72,11 +74,7 @@ impl GroupCommitter {
 		}
 	}
 
-	pub fn commit(
-		&self,
-		aol: &Mutex<File>,
-		data: Vec<u8>,
-	) -> Result<(), PersistenceError> {
+	pub fn commit(&self, aol: &Mutex<File>, data: Vec<u8>) -> Result<(), PersistenceError> {
 		let current_slot = Arc::new(SyncCommitSlot {
 			data,
 			done: AtomicBool::new(false),
@@ -441,8 +439,9 @@ impl Persistence {
 				// observable state. The encoded element type is unchanged, so
 				// snapshot files remain readable across releases in both
 				// directions.
-				// `latest` returns owned values, so the per-key version read guard is
-				// released at the end of this statement rather than being held across
+				// `latest` returns owned values, so the per-key version read
+				// guard is released at the end of this
+				// statement rather than being held across
 				// the encode and write below.
 				let latest = entry.value().read().latest();
 				if let Some((version, value)) = latest {
@@ -537,7 +536,7 @@ impl Persistence {
 								// Skip keys which were deleted
 								if value.is_some() {
 									// Create a new versions entry
-									let mut entries = Versions::new();
+									let mut entries = Versions::default();
 									// Add the latest version entry
 									entries.push(Version {
 										version,
@@ -815,10 +814,11 @@ impl Persistence {
 					let result = (|| -> Result<(), PersistenceError> {
 						// Create temporary file
 						let file = File::create(&temp_path)?;
-						// Create compressed writer (handles buffering internally)
+						// Create compressed writer (handles buffering
+						// internally)
 						let mut writer = CompressedWriter::new(file, compression)?;
-						// Get the current position in the AOL file before snapshotting (if AOL
-						// enabled)
+						// Get the current position in the AOL file before
+						// snapshotting (if AOL enabled)
 						let aol_cutoff_position = if let Some(ref aol) = aol {
 							aol.lock()?.metadata()?.len()
 						} else {
@@ -829,9 +829,11 @@ impl Persistence {
 							// Persist only the latest committed version of
 							// each key, omitting keys whose newest entry is
 							// a delete tombstone. See `snapshot()` above.
-							// `latest` returns owned values, so the per-key version read guard is
-							// released at the end of this statement rather than being held across
-							// the encode and write below.
+							// `latest` returns owned values, so the per-key
+							// version read guard is
+							// released at the end of this statement rather than
+							// being held across the
+							// encode and write below.
 							let latest = entry.value().read().latest();
 							if let Some((version, value)) = latest {
 								// Serialize and write this single entry
@@ -926,7 +928,8 @@ impl Persistence {
 									if !batch.is_empty() {
 										break;
 									}
-									// Park the thread to wait for work event notification
+									// Park the thread to wait for work event
+									// notification
 									thread::park();
 								}
 							}
@@ -938,7 +941,8 @@ impl Persistence {
 								// Lock the AOL file for writing
 								if let Ok(mut file) = aol.lock() {
 									scratch.clear();
-									// Write all operations in the batch into reusable scratch buffer
+									// Write all operations in the batch into
+									// reusable scratch buffer
 									for op in &batch {
 										for (k, v) in &op.writeset {
 											bincode::serde::encode_into_std_write(
@@ -955,7 +959,8 @@ impl Persistence {
 									match fsync_mode {
 										// Let the operating system handle syncing to disk
 										FsyncMode::Never => {
-											// No fsync, just increment pending counter
+											// No fsync, just increment pending
+											// counter
 											pending_syncs.fetch_add(1, Ordering::Release);
 										}
 										// Sync immediately to disk after every append
@@ -965,16 +970,20 @@ impl Persistence {
 										}
 										// Force sync to disk at a specified interval
 										FsyncMode::Interval(duration) => {
-											// Check if we should sync based on time
+											// Check if we should sync based on
+											// time
 											let now = Instant::now();
-											// Check if we should sync based on time
+											// Check if we should sync based on
+											// time
 											let should_sync = {
 												// Get the last fsync time
 												let mut last_fsync = last_fsync.lock()?;
-												// Check if the last fsync time is greater than the
+												// Check if the last fsync time
+												// is greater than the
 												// duration
 												if now.duration_since(*last_fsync) >= duration {
-													// Update the last fsync time
+													// Update the last fsync
+													// time
 													*last_fsync = now;
 													true
 												} else {
@@ -983,12 +992,15 @@ impl Persistence {
 											};
 											// Check if we should sync
 											if should_sync {
-												// Force sync the AOL file to disk
+												// Force sync the AOL file to
+												// disk
 												file.sync_all()?;
-												// Reset the pending syncs counter
+												// Reset the pending syncs
+												// counter
 												pending_syncs.store(0, Ordering::Release);
 											} else {
-												// Increment the pending syncs counter
+												// Increment the pending syncs
+												// counter
 												pending_syncs.fetch_add(1, Ordering::Release);
 											}
 										}
@@ -1048,7 +1060,8 @@ impl Persistence {
 				return Ok(());
 			}
 			if self.aol_mode == AolMode::SynchronousOnCommit {
-				// Pre-encode the writeset into a reusable thread-local scratch buffer
+				// Pre-encode the writeset into a reusable thread-local scratch
+				// buffer
 				let data = ENCODE_BUF.with(|buf| {
 					let mut b = buf.borrow_mut();
 					b.clear();
@@ -1062,7 +1075,8 @@ impl Persistence {
 					Ok::<_, PersistenceError>(b.clone())
 				})?;
 
-				// If fsync mode is EveryAppend, use the GroupCommitter to coalesce concurrent commits
+				// If fsync mode is EveryAppend, use the GroupCommitter to
+				// coalesce concurrent commits
 				if self.fsync_mode == FsyncMode::EveryAppend {
 					self.group_committer.commit(aol, data)?;
 					return Ok(());
@@ -1089,7 +1103,8 @@ impl Persistence {
 						let should_sync = {
 							// Get the last fsync time
 							let mut last_fsync = self.last_fsync.lock()?;
-							// Check if the last fsync time is greater than the duration
+							// Check if the last fsync time is greater than the
+							// duration
 							if now.duration_since(*last_fsync) >= duration {
 								// Update the last fsync time
 								*last_fsync = now;

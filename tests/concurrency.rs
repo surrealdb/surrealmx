@@ -160,7 +160,8 @@ fn multiple_writers_overlapping_keys_conflict() {
 	let num_writers = 4;
 	let barrier = Arc::new(Barrier::new(num_writers));
 
-	// All writers try to update the same key using SSI to ensure conflict detection
+	// All writers try to update the same key using SSI to ensure conflict
+	// detection
 	let handles: Vec<_> = (0..num_writers)
 		.map(|writer_id| {
 			let db = Arc::clone(&db);

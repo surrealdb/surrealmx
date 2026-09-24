@@ -18,14 +18,14 @@
 //! of a Multi-Version Concurrency Control (MVCC) key-value store using standard
 //! `BTreeMap` structures.
 //!
-//! Used for differential testing against `SurrealMX`: every point read, conditional
-//! write, range scan, savepoint rollback, and commit conflict is verified against
-//! `ModelDb` for exact equivalence.
+//! Used for differential testing against `SurrealMX`: every point read,
+//! conditional write, range scan, savepoint rollback, and commit conflict is
+//! verified against `ModelDb` for exact equivalence.
 
+use crate::Error;
 use byteslice::ByteSlice;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
-use crate::Error;
 
 /// Isolation level supported by the reference model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +75,8 @@ pub struct ModelDb {
 	pub current_commit_id: u64,
 	/// Monotonically increasing merge version / logical clock.
 	pub current_version: u64,
-	/// Full MVCC version history per key: sorted vector of (version, Option<value>).
+	/// Full MVCC version history per key: sorted vector of (version,
+	/// Option<value>).
 	pub key_history: BTreeMap<ByteSlice, Vec<(u64, Option<ByteSlice>)>>,
 	/// Ordered history of all committed transactions.
 	pub commit_history: Vec<ModelCommitRecord>,
@@ -119,7 +120,8 @@ impl ModelDb {
 		}
 	}
 
-	/// Checks whether a key exists (and is not deleted) at a specific version snapshot.
+	/// Checks whether a key exists (and is not deleted) at a specific version
+	/// snapshot.
 	pub fn exists_at_version(&self, key: &[u8], version: u64) -> bool {
 		self.get_at_version(key, version).is_some()
 	}
@@ -142,7 +144,8 @@ impl ModelDb {
 		results
 	}
 
-	/// Commits a model transaction using strict first-committer-wins validation.
+	/// Commits a model transaction using strict first-committer-wins
+	/// validation.
 	pub fn commit(&mut self, mut txn: ModelTxn) -> Result<(), ModelError> {
 		if txn.done {
 			return Err(ModelError::TxClosed);
@@ -156,7 +159,8 @@ impl ModelDb {
 
 		let has_writes = !txn.writeset.is_empty();
 
-		// Validate against all transactions committed concurrently since this transaction's snapshot
+		// Validate against all transactions committed concurrently since this
+		// transaction's snapshot
 		for record in &self.commit_history {
 			if record.commit_id <= txn.start_commit_id {
 				continue;
@@ -184,7 +188,8 @@ impl ModelDb {
 				}
 			}
 
-			// 3. Plain reads and scans conflict: validated only under SSI for transactions that write
+			// 3. Plain reads and scans conflict: validated only under SSI for
+			//    transactions that write
 			if has_writes && txn.mode == ModelIsolation::SerializableSnapshotIsolation {
 				for read_key in &txn.readset {
 					if record.writeset.contains_key(read_key) {
@@ -489,19 +494,5 @@ impl ModelTxn {
 
 		let result = pairs.into_iter().skip(skip_n).take(limit_n).collect();
 		Ok(result)
-	}
-
-	/// Counts keys in a range.
-	#[allow(dead_code)]
-	pub fn total(
-		&mut self,
-		model: &ModelDb,
-		start: &[u8],
-		end: &[u8],
-		skip: Option<usize>,
-		limit: Option<usize>,
-		reverse: bool,
-	) -> Result<usize, ModelError> {
-		Ok(self.scan(model, start, end, skip, limit, reverse)?.len())
 	}
 }

@@ -437,7 +437,8 @@ fn concurrent_deletes_no_phantom_within_snapshot() {
 				let hi = prefix_end("d:");
 				// Take a list of currently-visible keys
 				let visible = tx.keys(lo..hi.as_slice(), None, None).unwrap();
-				// For each, point-get within the same snapshot — must still exist
+				// For each, point-get within the same snapshot — must still
+				// exist
 				for k in &visible {
 					let v = tx.get(k.as_ref()).unwrap();
 					assert!(

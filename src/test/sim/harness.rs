@@ -14,9 +14,9 @@
 
 //! Deterministic Simulation & Differential Testing Runner.
 
+use crate::{Database, DatabaseOptions, Transaction};
 use byteslice::ByteSlice;
 use std::collections::HashMap;
-use crate::{Database, DatabaseOptions, Transaction};
 
 use super::generator::{SimAction, WorkloadGenerator};
 use super::model::{ModelDb, ModelIsolation, ModelTxn};
@@ -30,7 +30,7 @@ pub struct SimRunner {
 	seed: u64,
 	step: usize,
 	#[cfg(not(target_arch = "wasm32"))]
-	_temp_dir: Option<tempfile::TempDir>,
+	temp_dir: Option<tempfile::TempDir>,
 	#[cfg(not(target_arch = "wasm32"))]
 	persistence_opts: Option<crate::PersistenceOptions>,
 }
@@ -47,7 +47,7 @@ impl SimRunner {
 			seed,
 			step: 0,
 			#[cfg(not(target_arch = "wasm32"))]
-			_temp_dir: None,
+			temp_dir: None,
 			#[cfg(not(target_arch = "wasm32"))]
 			persistence_opts: None,
 		}
@@ -77,7 +77,7 @@ impl SimRunner {
 			active_model_txns: HashMap::new(),
 			seed,
 			step: 0,
-			_temp_dir: Some(temp_dir),
+			temp_dir: Some(temp_dir),
 			persistence_opts: Some(persistence_opts),
 		}
 	}
@@ -87,10 +87,10 @@ impl SimRunner {
 		self.db.as_ref().expect("database not open")
 	}
 
-	/// Returns a reference to the reference model.
-	#[allow(dead_code)]
-	pub const fn model(&self) -> &ModelDb {
-		&self.model
+	/// Returns the persistence temporary directory path if enabled.
+	#[cfg(not(target_arch = "wasm32"))]
+	pub fn temp_dir(&self) -> Option<&std::path::Path> {
+		self.temp_dir.as_ref().map(tempfile::TempDir::path)
 	}
 
 	/// Executes N simulation steps driven by the workload generator.
@@ -101,11 +101,13 @@ impl SimRunner {
 			self.execute_action(action);
 		}
 
-		// Final check: drain remaining active transactions and assert full datastore equivalence
+		// Final check: drain remaining active transactions and assert full
+		// datastore equivalence
 		self.finish_and_verify();
 	}
 
-	/// Executes a single simulation action against both systems and asserts equivalence.
+	/// Executes a single simulation action against both systems and asserts
+	/// equivalence.
 	pub fn execute_action(&mut self, action: SimAction) {
 		let seed = self.seed;
 		let step = self.step;
@@ -476,8 +478,9 @@ impl SimRunner {
 		}
 	}
 
-	/// Finishes the simulation run by committing/canceling remaining active transactions
-	/// and asserting complete datastore state equality against `ModelDb`.
+	/// Finishes the simulation run by committing/canceling remaining active
+	/// transactions and asserting complete datastore state equality against
+	/// `ModelDb`.
 	pub fn finish_and_verify(&mut self) {
 		// Cancel all remaining in-flight transactions
 		for (_, mut tx) in self.active_db_txns.drain() {

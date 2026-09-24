@@ -21,11 +21,12 @@ use thin_vec::{thin_vec, ThinVec};
 /// Specialized for the steady-state single-version case: inline commit-time
 /// garbage collection keeps over 95% of keys at a single live value.
 /// Representing `Versions` as an enum avoids any heap allocation and eliminates
-/// vector capacity overhead for single-version keys, shrinking `size_of::<Versions>()`
-/// to 40 bytes. When a reader pins older versions, a key temporarily spills to
-/// `Chain(ThinVec<Version>)`, which stores header and buffer in a single 8-byte pointer
-/// allocation. When GC trims the chain back to 1 live version, it transitions back
-/// to `Single(Version)`, immediately freeing heap memory.
+/// vector capacity overhead for single-version keys, shrinking
+/// `size_of::<Versions>()` to 40 bytes. When a reader pins older versions, a
+/// key temporarily spills to `Chain(ThinVec<Version>)`, which stores header and
+/// buffer in a single 8-byte pointer allocation. When GC trims the chain back
+/// to 1 live version, it transitions back to `Single(Version)`, immediately
+/// freeing heap memory.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Versions {
 	/// No versions stored (e.g. empty chain or collapsed tombstone).
@@ -51,13 +52,13 @@ impl From<Version> for Versions {
 impl Versions {
 	/// Create a new empty versions object.
 	#[inline]
-	#[allow(dead_code)]
+	#[cfg(test)]
 	pub(crate) const fn new() -> Self {
 		Self::Empty
 	}
 
 	/// Returns a borrowed slice of all versions in sorted order.
-	#[allow(dead_code)]
+	#[cfg(test)]
 	pub(crate) fn as_slice(&self) -> &[Version] {
 		match self {
 			Self::Empty => &[],
@@ -67,7 +68,7 @@ impl Versions {
 	}
 
 	/// Returns the number of versions stored.
-	#[allow(dead_code)]
+	#[cfg(test)]
 	pub(crate) fn len(&self) -> usize {
 		match self {
 			Self::Empty => 0,
@@ -76,15 +77,9 @@ impl Versions {
 		}
 	}
 
-	/// Returns true if there are no versions stored.
-	#[allow(dead_code)]
-	pub(crate) const fn is_empty(&self) -> bool {
-		matches!(self, Self::Empty)
-	}
-
 	/// Returns a reference to the latest version, if any.
 	#[inline]
-	#[allow(dead_code)]
+	#[cfg(any(test, not(target_arch = "wasm32")))]
 	pub(crate) fn last(&self) -> Option<&Version> {
 		match self {
 			Self::Empty => None,
@@ -261,7 +256,8 @@ impl Versions {
 		self.last().and_then(|v| v.value.clone().map(|val| (v.version, val)))
 	}
 
-	/// Whether a future garbage-collection pass could reclaim anything from this chain.
+	/// Whether a future garbage-collection pass could reclaim anything from
+	/// this chain.
 	#[inline]
 	pub(crate) const fn needs_gc(&self) -> bool {
 		match self {
@@ -319,7 +315,8 @@ impl Versions {
 mod tests {
 	use super::*;
 
-	/// Helper function to create a Version from a version number and optional value
+	/// Helper function to create a Version from a version number and optional
+	/// value
 	fn make_version(version: u64, value: Option<&str>) -> Version {
 		Version {
 			version,
@@ -327,7 +324,8 @@ mod tests {
 		}
 	}
 
-	/// Helper function to create a Versions instance with the given version tuples
+	/// Helper function to create a Versions instance with the given version
+	/// tuples
 	fn make_versions(versions: Vec<(u64, Option<&str>)>) -> Versions {
 		let mut v = Versions::new();
 		for (version, value) in versions {

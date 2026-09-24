@@ -134,7 +134,8 @@ impl WorkloadGenerator {
 		}
 	}
 
-	/// Enables or disables crash and reload actions (for persistent storage tests).
+	/// Enables or disables crash and reload actions (for persistent storage
+	/// tests).
 	pub const fn with_persistence_faults(mut self, enabled: bool) -> Self {
 		self.enable_persistence_faults = enabled;
 		self

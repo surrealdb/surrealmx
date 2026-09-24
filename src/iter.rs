@@ -33,10 +33,10 @@ pub(crate) type SkipBounds = (Bound<ByteSlice>, Bound<ByteSlice>);
 
 /// Lazy k-way merge iterator over committed merge-queue writesets.
 ///
-/// Yields `(ByteSlice, Option<ByteSlice>)` pairs in sorted order with newest-wins
-/// dedup. Sources must be passed in newest-first order (index 0 = newest).
-/// On a tie, the lowest-index source wins; older sources at the same key
-/// are advanced past it.
+/// Yields `(ByteSlice, Option<ByteSlice>)` pairs in sorted order with
+/// newest-wins dedup. Sources must be passed in newest-first order (index 0 =
+/// newest). On a tie, the lowest-index source wins; older sources at the same
+/// key are advanced past it.
 ///
 /// Holds an `Arc<Merge>` per source to keep the underlying `Arc<BTreeMap>`
 /// alive without storing any borrows from it; advancement re-seeks the
@@ -76,7 +76,8 @@ impl MergeQueueIter {
 }
 
 /// Seek the next entry within `[beg, end)` for `direction`, optionally past
-/// `after`. Returns owned `(ByteSlice, Option<ByteSlice>)` (refcount clones only).
+/// `after`. Returns owned `(ByteSlice, Option<ByteSlice>)` (refcount clones
+/// only).
 fn seek_in_writeset(
 	src: &Arc<Merge>,
 	direction: Direction,
@@ -84,7 +85,8 @@ fn seek_in_writeset(
 	end: &ByteSlice,
 	after: Option<&ByteSlice>,
 ) -> Option<(ByteSlice, Option<ByteSlice>)> {
-	// Fast path: if the writeset range does not overlap [beg, end), return None immediately
+	// Fast path: if the writeset range does not overlap [beg, end), return None
+	// immediately
 	match (&src.min_key, &src.max_key) {
 		(Some(min), Some(max)) => {
 			if max.as_slice() < beg.as_slice() || min.as_slice() >= end.as_slice() {
@@ -257,7 +259,8 @@ impl<'a> MergeIterator<'a> {
 	/// counting
 	pub fn next_count(&mut self) -> Option<bool> {
 		loop {
-			// Find the next key to process (smallest for Forward, largest for Reverse)
+			// Find the next key to process (smallest for Forward, largest for
+			// Reverse)
 			let mut next_key: Option<&ByteSlice> = None;
 			let mut next_source = KeySource::None;
 
@@ -328,7 +331,8 @@ impl<'a> MergeIterator<'a> {
 				KeySource::Committed => {
 					let exists = self.join_next.as_ref().expect(SELECTED_HEAD).1.is_some();
 
-					// Check if we need to skip same key in tree before advancing join
+					// Check if we need to skip same key in tree before
+					// advancing join
 					let should_skip_tree = if let Some(t_entry) = &self.tree_next {
 						if let Some((jk, _)) = &self.join_next {
 							t_entry.key() == jk
@@ -385,7 +389,8 @@ impl<'a> MergeIterator<'a> {
 	/// Get next entry with key (no value cloning) - optimized for key iteration
 	pub fn next_key(&mut self) -> Option<(ByteSlice, bool)> {
 		loop {
-			// Find the next key to process (smallest for Forward, largest for Reverse)
+			// Find the next key to process (smallest for Forward, largest for
+			// Reverse)
 			let mut next_key: Option<&ByteSlice> = None;
 			let mut next_source = KeySource::None;
 
@@ -468,7 +473,8 @@ impl<'a> MergeIterator<'a> {
 
 					// Check if we should skip (only skip existing entries)
 					if jv.is_some() && self.skip_remaining > 0 {
-						// Check if we need to skip same key in tree before advancing join
+						// Check if we need to skip same key in tree before
+						// advancing join
 						let should_skip_tree = if let Some(t_entry) = &self.tree_next {
 							t_entry.key() == jk
 						} else {
@@ -551,7 +557,8 @@ impl Iterator for MergeIterator<'_> {
 
 	fn next(&mut self) -> Option<Self::Item> {
 		loop {
-			// Find the next key to process (smallest for Forward, largest for Reverse)
+			// Find the next key to process (smallest for Forward, largest for
+			// Reverse)
 			let mut next_key: Option<&ByteSlice> = None;
 			let mut next_source = KeySource::None;
 
@@ -634,7 +641,8 @@ impl Iterator for MergeIterator<'_> {
 
 					// Check if we should skip (only skip existing entries)
 					if jv.is_some() && self.skip_remaining > 0 {
-						// Check if we need to skip same key in tree before advancing join
+						// Check if we need to skip same key in tree before
+						// advancing join
 						let should_skip_tree = if let Some(t_entry) = &self.tree_next {
 							t_entry.key() == jk
 						} else {

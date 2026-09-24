@@ -181,11 +181,13 @@ impl Commit {
 		other: &HashSet<ByteSlice>,
 		bloom: &B,
 	) -> bool {
-		// Fast path 1: if the bloom filter is empty, there are no reads to conflict with
+		// Fast path 1: if the bloom filter is empty, there are no reads to
+		// conflict with
 		if bloom.is_empty() {
 			return true;
 		}
-		// Fast path 2: small writesets (<= 2 keys) check exact readset membership directly
+		// Fast path 2: small writesets (<= 2 keys) check exact readset
+		// membership directly
 		if self.keys.len() <= 2 {
 			return self.is_disjoint_readset(other);
 		}
@@ -197,7 +199,8 @@ impl Commit {
 				break;
 			}
 		}
-		// If no writeset key passes the bloom filter, there is definitely no overlap
+		// If no writeset key passes the bloom filter, there is definitely no
+		// overlap
 		if !any_possible {
 			return true;
 		}
@@ -253,7 +256,8 @@ impl Commit {
 			_ => return true,
 		}
 
-		// Fast path 2: small writesets (<= 2 keys) check direct sorted comparison faster than hashing
+		// Fast path 2: small writesets (<= 2 keys) check direct sorted
+		// comparison faster than hashing
 		if self.keys.len() <= 2 || other.keys.len() <= 2 {
 			return self.is_disjoint_writeset(other);
 		}
@@ -380,7 +384,8 @@ mod tests {
 
 	#[test]
 	fn commit_memory_footprint_and_adaptive_bloom() {
-		// Commit struct is strictly 32 bytes (Arc<[ByteSlice]>: 16B + Option<Box<BloomFilter>>: 8B + AtomicU64: 8B)
+		// Commit struct is strictly 32 bytes (Arc<[ByteSlice]>: 16B +
+		// Option<Box<BloomFilter>>: 8B + AtomicU64: 8B)
 		assert_eq!(std::mem::size_of::<Commit>(), 32);
 
 		// <= 2 keys skips bloom allocation entirely

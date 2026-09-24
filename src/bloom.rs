@@ -14,8 +14,8 @@
 
 //! High-performance bloom filters for probabilistic set membership testing.
 //!
-//! Powered by SIMD-accelerated xxHash3 and lock-free atomic bit array operations
-//! for zero-contention SSI readset tracking.
+//! Powered by SIMD-accelerated xxHash3 and lock-free atomic bit array
+//! operations for zero-contention SSI readset tracking.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -85,7 +85,7 @@ impl BloomFilter {
 	}
 
 	/// Reset the filter to its initial empty state
-	#[allow(dead_code)]
+	#[cfg(test)]
 	pub const fn clear(&mut self) {
 		self.bits = [0; BLOOM_WORDS];
 		self.count = 0;
@@ -93,10 +93,15 @@ impl BloomFilter {
 
 	/// Compute a dual hash pair using 128-bit xxHash3
 	#[inline]
-	#[allow(clippy::cast_possible_truncation)]
 	pub(crate) fn hash(key: &[u8]) -> (u64, u64) {
-		let h128 = xxhash_rust::xxh3::xxh3_128(key);
-		(h128 as u64, (h128 >> 64) as u64)
+		let bytes = xxhash_rust::xxh3::xxh3_128(key).to_ne_bytes();
+		let h1 = u64::from_ne_bytes([
+			bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+		]);
+		let h2 = u64::from_ne_bytes([
+			bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+		]);
+		(h1, h2)
 	}
 
 	/// Compute the nth hash from the dual hash pair
@@ -106,7 +111,8 @@ impl BloomFilter {
 	}
 }
 
-/// A lock-free, atomic 512-byte bloom filter for concurrent SSI readset tracking.
+/// A lock-free, atomic 512-byte bloom filter for concurrent SSI readset
+/// tracking.
 ///
 /// Uses relaxed atomic OR operations to set bits without locking any mutex.
 pub(crate) struct AtomicBloomFilter {

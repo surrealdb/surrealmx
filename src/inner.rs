@@ -280,11 +280,9 @@ impl Inner {
 	/// A bounded number of retries absorbs the nanosecond-scale window
 	/// in which a registering transaction is still pinning.
 	pub(crate) fn compute_cleanup_ts(&self) -> Option<u64> {
-		// Retire whatever merge-queue entries are already fully applied
-		// before computing the bound; see the equivalent call in
-		// `cleanup_commit_queue`. The publish step itself is no longer
-		// opportunistic (see `TransactionInner::atomic_merge`), so this
-		// exists to free retired entries, not to advance the clock.
+		// Retire applied merge-queue entries to free memory before computing
+		// the cleanup bound. Clock advancement is handled continuously by
+		// TransactionInner::atomic_merge.
 		self.refresh_merge_watermark();
 		// Retry a bounded number of times while registrations are pinning
 		for _ in 0..3 {

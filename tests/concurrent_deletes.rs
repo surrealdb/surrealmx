@@ -109,7 +109,8 @@ fn delete_racing_with_update() {
 	let delete_result = delete_handle.join().unwrap();
 	let update_result = update_handle.join().unwrap();
 
-	// One should succeed, one should fail (or both might succeed in rare timing)
+	// One should succeed, one should fail (or both might succeed in rare
+	// timing)
 	let successes = [&delete_result, &update_result].iter().filter(|r| r.is_ok()).count();
 	assert!(successes >= 1, "At least one operation should succeed");
 
@@ -328,7 +329,8 @@ fn delete_then_recreate_under_gc_keeps_value() {
 	const KEYS_PER_WRITER: usize = 32;
 	const ROUNDS: usize = 150;
 
-	// Background GC is enabled by default; we also drive it synchronously below.
+	// Background GC is enabled by default; we also drive it synchronously
+	// below.
 	let db = Arc::new(Database::new());
 
 	// Seed every key so the first delete always has something to remove.
@@ -370,7 +372,8 @@ fn delete_then_recreate_under_gc_keeps_value() {
 					let mut tx = db.transaction(true);
 					tx.set(key.as_str(), val.as_str()).unwrap();
 					tx.commit().unwrap();
-					// A fresh snapshot (version above the recreate) must observe it.
+					// A fresh snapshot (version above the recreate) must
+					// observe it.
 					let mut tx = db.transaction(false);
 					let got = tx.get(key.as_str()).unwrap();
 					tx.cancel().unwrap();

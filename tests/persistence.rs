@@ -158,7 +158,8 @@ fn test_aol_recovery() {
 		tx.commit().unwrap();
 	} // Database drops here, releasing all resources
 
-	// Create second database instance from the same directory (simulates restart)
+	// Create second database instance from the same directory (simulates
+	// restart)
 	{
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 
@@ -403,7 +404,8 @@ fn test_snapshot_recovery() {
 		}
 	} // Database drops here
 
-	// Create second database instance from the same directory (simulates restart)
+	// Create second database instance from the same directory (simulates
+	// restart)
 	{
 		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
 

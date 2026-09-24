@@ -15,14 +15,14 @@
 //!
 //! - Several writer threads insert into multiple synthetic "indexes",
 //!   committing one key at a time, in tight loops. Each thread uses
-//!   `with_snapshot_isolation()` because that is what the in-mem engine
-//!   in surrealdb passes through.
-//! - A reader thread repeatedly opens a snapshot-isolation transaction
-//!   and scans a narrow range that should only ever contain keys with
-//!   a specific `(ix, category)` prefix.
-//! - On every scanned entry the reader verifies the returned key is
-//!   within the scan bounds; out-of-range keys (or values that don't
-//!   match the expected category-byte) are reported and counted.
+//!   `with_snapshot_isolation()` because that is what the in-mem engine in
+//!   surrealdb passes through.
+//! - A reader thread repeatedly opens a snapshot-isolation transaction and
+//!   scans a narrow range that should only ever contain keys with a specific
+//!   `(ix, category)` prefix.
+//! - On every scanned entry the reader verifies the returned key is within the
+//!   scan bounds; out-of-range keys (or values that don't match the expected
+//!   category-byte) are reported and counted.
 
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -33,9 +33,10 @@ use std::time::{Duration, Instant};
 use surrealmx::Database;
 
 /// Build a key shaped like `SurrealDB`'s index keys:
-///   `/ * 00 00 00 00 * 00 00 00 00 * aaa \0 + <ix:4 BE> ! <kind:2> <doc:8 BE> <nid:16> <uid:16>`
-/// `nid`/`uid` are filled with a counter so writers don't collide on the same
-/// key — every put is a fresh delta-style key, like the full-text index does.
+///   `/ * 00 00 00 00 * 00 00 00 00 * aaa \0 + <ix:4 BE> ! <kind:2> <doc:8 BE>
+/// <nid:16> <uid:16>` `nid`/`uid` are filled with a counter so writers don't
+/// collide on the same key — every put is a fresh delta-style key, like the
+/// full-text index does.
 fn make_key(ix: u32, kind: [u8; 2], doc: u64, nid_uid: u128) -> Vec<u8> {
 	let mut k = Vec::with_capacity(64);
 	k.extend_from_slice(b"/*\0\0\0\0*\0\0\0\0*aaa\0+");
@@ -112,7 +113,8 @@ fn run_once(budget: Duration) -> (usize, usize, usize) {
 						// Tt-style value: empty.
 						Vec::new()
 					} else {
-						// Dc-style value: revisioned-ish (1 byte revision + 24 payload).
+						// Dc-style value: revisioned-ish (1 byte revision + 24
+						// payload).
 						let mut v = vec![1u8];
 						v.extend_from_slice(&doc.to_be_bytes());
 						v.extend_from_slice(&doc.to_be_bytes());

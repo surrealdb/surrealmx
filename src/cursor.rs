@@ -278,12 +278,8 @@ impl<'a> Cursor<'a> {
 	/// Create a new merge iterator over the given range and direction.
 	/// Replaces any existing iterator.
 	fn create_iterator(&mut self, start: &ByteSlice, end: &ByteSlice, direction: Direction) {
-		let join_iter = MergeQueueIter::new(
-			self.merge_sources.clone(),
-			start.clone(),
-			end.clone(),
-			direction,
-		);
+		let join_iter =
+			MergeQueueIter::new(self.merge_sources.clone(), start.clone(), end.clone(), direction);
 
 		self.iter = Some(MergeIterator::new(
 			self.database

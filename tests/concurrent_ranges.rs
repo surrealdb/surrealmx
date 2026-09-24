@@ -121,7 +121,8 @@ fn delete_from_scanned_range() {
 	// Scan should see a consistent snapshot
 	assert!(scan_count >= 4, "Scan should see most keys in consistent snapshot");
 
-	// Delete should succeed (it doesn't conflict with read-only scan in SI mode)
+	// Delete should succeed (it doesn't conflict with read-only scan in SI
+	// mode)
 	assert!(delete_result.is_ok(), "Delete should succeed");
 }
 

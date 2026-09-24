@@ -445,8 +445,8 @@ fn bench_concurrent_readers(c: &mut Criterion) {
 		let db = Arc::new(setup_database_with_sequential_data(*entry_count, 100));
 		let mut rng = StdRng::seed_from_u64(SEED);
 
-		// Pre-generate keys for lookup (more keys for better distribution across
-		// threads)
+		// Pre-generate keys for lookup (more keys for better distribution
+		// across threads)
 		let lookup_keys: Vec<ByteSlice> =
 			(0..200).map(|_| generate_sequential_key(rng.random_range(0..*entry_count))).collect();
 
@@ -497,7 +497,8 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 
 	for entry_count in &[1000, 10_000] {
 		for &thread_count in &thread_counts {
-			let operations_per_thread = 50; // Each thread performs 50 operations
+			let operations_per_thread = 50; // Each thread performs 50
+											// operations
 
 			group.throughput(Throughput::Elements((operations_per_thread * thread_count) as u64));
 			group.bench_with_input(
@@ -513,14 +514,17 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 							let db =
 								Arc::new(setup_database_with_sequential_data(*entry_count, 100));
 
-							// Pre-generate operations for each thread to avoid RNG contention
+							// Pre-generate operations for each thread to avoid
+							// RNG contention
 							let mut all_operations = Vec::new();
 							let mut rng = StdRng::seed_from_u64(SEED);
 
 							for thread_id in 0..num_threads {
 								let mut thread_ops = Vec::new();
 								for op_id in 0..ops_per_thread {
-									let operation_type = op_id % 3; // 0=insert, 1=update, 2=upsert
+									let operation_type = op_id % 3; // 0=insert,
+																	// 1=update,
+																	// 2=upsert
 									let base_key_id = thread_id * 1000 + op_id; // Avoid key conflicts between threads
 
 									match operation_type {
@@ -540,9 +544,11 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 											thread_ops.push(("update", key, value));
 										}
 										2 => {
-											// Upsert (put - could be insert or update)
+											// Upsert (put - could be insert or
+											// update)
 											let key = if op_id % 2 == 0 {
-												generate_sequential_key(base_key_id % *entry_count) // Existing key
+												generate_sequential_key(base_key_id % *entry_count)
+											// Existing key
 											} else {
 												ByteSlice::from(format!(
 													"upsert_key_{thread_id}_{op_id}"
@@ -571,19 +577,22 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 										for (op_type, key, value) in thread_operations {
 											match op_type {
 												"insert" => {
-													// For inserts, use putc to ensure we're
+													// For inserts, use putc to
+													// ensure we're
 													// creating new entries
 													let result = tx.putc(key, value, None::<&[u8]>);
 													results.push(result.is_ok());
 												}
 												"update" => {
-													// For updates, we don't check if key exists
+													// For updates, we don't
+													// check if key exists
 													// (simpler)
 													let result = tx.put(key, value);
 													results.push(result.is_ok());
 												}
 												"upsert" => {
-													// Standard put operation (insert or update)
+													// Standard put operation
+													// (insert or update)
 													let result = tx.put(key, value);
 													results.push(result.is_ok());
 												}
@@ -754,7 +763,9 @@ fn bench_mixed_workload(c: &mut Criterion) {
 									tx.put(key.clone(), value).unwrap();
 								}
 								"delete" => {
-									let _ = tx.del(key.clone()); // Ignore error if key doesn't exist
+									let _ = tx.del(key.clone()); // Ignore error
+									                             // if key doesn'
+									                             // t exist
 								}
 								_ => unreachable!(),
 							}

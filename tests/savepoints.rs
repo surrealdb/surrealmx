@@ -247,8 +247,8 @@ fn savepoint_on_read_transaction() {
 	// Try savepoint on read-only transaction
 	let mut read_tx = db.transaction(false);
 
-	// Note: set_savepoint might succeed on read-only tx (depends on implementation)
-	// but rollback should work without issues
+	// Note: set_savepoint might succeed on read-only tx (depends on
+	// implementation) but rollback should work without issues
 	if read_tx.set_savepoint().is_ok() {
 		// Read some data
 		let _ = read_tx.get("key").unwrap();
@@ -674,8 +674,8 @@ fn savepoint_release_deep_then_rollback() {
 		assert!(tx.get(format!("key_{i}")).unwrap().is_some(), "key_{i} should exist");
 	}
 
-	// A single rollback unwinds to the deepest surviving savepoint, which is the
-	// one set before the first key of the released half
+	// A single rollback unwinds to the deepest surviving savepoint, which is
+	// the one set before the first key of the released half
 	tx.rollback_to_savepoint().unwrap();
 
 	// The first half's writes remain, minus the one made in the scope we just

@@ -174,7 +174,8 @@ impl Transaction {
 		self.inner.as_ref().expect(INNER_TAKEN).get(key)
 	}
 
-	/// Fetch a key from the database and inspect its value with a closure without cloning.
+	/// Fetch a key from the database and inspect its value with a closure
+	/// without cloning.
 	pub fn with_value<K, F, R>(&self, key: K, f: F) -> Result<Option<R>, Error>
 	where
 		K: IntoBytes,
@@ -472,9 +473,11 @@ impl Transaction {
 /// An operation to undo a writeset mutation upon savepoint rollback.
 #[derive(Debug)]
 pub(crate) enum UndoOp {
-	/// The key was not present in the writeset before; remove it on rollback.
+	/// The key did not exist in the writeset prior to the savepoint; remove on
+	/// rollback.
 	Remove,
-	/// The key was previously present in the writeset with the given value (or tombstone).
+	/// Restore the key to the writeset value (or tombstone) recorded at the
+	/// savepoint.
 	Restore(Option<ByteSlice>),
 }
 
@@ -501,10 +504,11 @@ pub(crate) struct TransactionInner {
 	pub(crate) locked: bool,
 	/// The local set of key reads
 	pub(crate) readset: HashSet<ByteSlice>,
-	/// Lock-free atomic bloom filter over the readset for fast conflict pre-checks.
-	/// Boxed so that the filter's bit array lives off the transaction struct:
-	/// pooled transactions are stored and returned by value, so keeping it boxed
-	/// avoids copying 1 KB on every pool checkout and return.
+	/// Lock-free atomic bloom filter over the readset for fast conflict
+	/// pre-checks. Boxed so that the filter's bit array lives off the
+	/// transaction struct: pooled transactions are stored and returned by
+	/// value, so keeping it boxed avoids copying 1 KB on every pool
+	/// checkout and return.
 	pub(crate) readset_bloom: Box<AtomicBloomFilter>,
 	/// The local set of keys locked with `get_for_update`. Locked keys
 	/// are tracked separately from the readset so they can be validated
@@ -513,7 +517,8 @@ pub(crate) struct TransactionInner {
 	/// validated: locking a key never widens the abort surface of the
 	/// transaction's other reads
 	pub(crate) lockset: HashSet<ByteSlice>,
-	/// Lock-free atomic bloom filter over the lockset for fast conflict pre-checks.
+	/// Lock-free atomic bloom filter over the lockset for fast conflict
+	/// pre-checks.
 	pub(crate) lockset_bloom: Box<AtomicBloomFilter>,
 	/// The local set of key scans
 	pub(crate) scanset: SkipMap<ByteSlice, ArcSwap<ByteSlice>>,
@@ -529,7 +534,8 @@ pub(crate) struct TransactionInner {
 	reset_threshold: usize,
 	/// Stack of savepoint marks (journal offsets) for nested partial rollbacks.
 	pub(crate) savepoint_stack: Vec<usize>,
-	/// Append-only undo journal of modifications made within active savepoint scopes.
+	/// Append-only undo journal of modifications made within active savepoint
+	/// scopes.
 	pub(crate) undo_journal: Vec<UndoEntry>,
 }
 
@@ -702,7 +708,8 @@ impl TransactionInner {
 		}
 		// Mark this transaction as done
 		self.done = true;
-		// Unpin from readers immediately so queue cleanup and watermarks are unblocked
+		// Unpin from readers immediately so queue cleanup and watermarks are
+		// unblocked
 		self.database.readers.remove(self.slot_id);
 		// Clear the transaction state
 		self.clear_read_state();
@@ -748,10 +755,8 @@ impl TransactionInner {
 		let mark = self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
 		// Revert writes made since the savepoint mark in reverse order
 		while self.undo_journal.len() > mark {
-			let entry = self
-				.undo_journal
-				.pop()
-				.expect("undo journal length checked greater than mark");
+			let entry =
+				self.undo_journal.pop().expect("undo journal length checked greater than mark");
 			match entry.op {
 				UndoOp::Remove => {
 					self.writeset.remove(&entry.key);
@@ -823,7 +828,8 @@ impl TransactionInner {
 		// never reads values, and the entry outlives the merge queue's
 		// value-bearing writeset by the whole cleanup window.
 		let keys: Arc<[ByteSlice]> = writeset.keys().cloned().collect();
-		// Insert this transaction into the commit queue with an adaptive writeset filter
+		// Insert this transaction into the commit queue with an adaptive
+		// writeset filter
 		let (commit_slot, commit_entry) = self.atomic_commit(Commit::new(keys));
 		// Unwind guard: if this transaction panics after publishing its
 		// commit slot, mark the entry aborted and advance the completed
@@ -889,9 +895,7 @@ impl TransactionInner {
 				// guarantees that no concurrent transaction committed a
 				// write to a key locked with `get_for_update`
 				if self.locked
-					&& !tx
-						.value()
-						.is_disjoint_readset_bloom(&self.lockset, &self.lockset_bloom)
+					&& !tx.value().is_disjoint_readset_bloom(&self.lockset, &self.lockset_bloom)
 				{
 					// Do not remove the entry here — see the comment
 					// on the writeset-conflict branch above. The
@@ -915,10 +919,7 @@ impl TransactionInner {
 				// validation of the transaction's other reads
 				if has_writes && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 					// Check if a previous transaction conflicts against reads
-					if !tx
-						.value()
-						.is_disjoint_readset_bloom(&self.readset, &self.readset_bloom)
-					{
+					if !tx.value().is_disjoint_readset_bloom(&self.readset, &self.readset_bloom) {
 						// Do not remove the entry here — see the comment
 						// on the writeset-conflict branch above. The
 						// unwind guard marks it aborted on return.
@@ -933,7 +934,8 @@ impl TransactionInner {
 						// Return the error for this transaction
 						return Err(Error::KeyReadConflict);
 					}
-					// Check if the committed writeset may overlap any scan range
+					// Check if the committed writeset may overlap any scan
+					// range
 					let scan_overlap = if let Some(scan_front) = self.scanset.front() {
 						// Get the upper bound of the last scan range
 						if let Some(scan_back) = self.scanset.back() {
@@ -953,7 +955,8 @@ impl TransactionInner {
 							if let Some(entry) =
 								self.scanset.range::<ByteSlice, _>(..=k).next_back()
 							{
-								// Check if the range includes this key (load from ArcSwap)
+								// Check if the range includes this key (load
+								// from ArcSwap)
 								if **entry.value().load() > *k {
 									// Do not remove the entry here — see the
 									// comment on the writeset-conflict branch
@@ -1034,7 +1037,8 @@ impl TransactionInner {
 			},
 		};
 		// Compute the inline-GC watermark lazily only if a key actually needs
-		// version reclamation, avoiding reader map scans when newly inserting keys.
+		// version reclamation, avoiding reader map scans when newly inserting
+		// keys.
 		let mut watermark: Option<Option<u64>> = None;
 		// Keys whose chains could not be trimmed to a single live value,
 		// collected here and tracked in one batch after the apply loop so
@@ -1241,7 +1245,8 @@ impl TransactionInner {
 		Ok(res)
 	}
 
-	/// Fetch a key from the database and inspect its value with a closure without cloning
+	/// Fetch a key from the database and inspect its value with a closure
+	/// without cloning
 	pub fn with_value<K, F, R>(&self, key: K, f: F) -> Result<Option<R>, Error>
 	where
 		K: IntoBytes,
@@ -1632,8 +1637,8 @@ impl TransactionInner {
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.track_scan_range(beg, end);
 		}
-		// Fast path: no merge queue entries in range and no transaction writes in this
-		// range — walk the datastore directly.
+		// Fast path: no merge queue entries in range and no transaction writes
+		// in this range — walk the datastore directly.
 		let merge_sources = self.snapshot_merge_sources_in_range(self.version, beg, end);
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
@@ -1667,12 +1672,8 @@ impl TransactionInner {
 			return Ok(count);
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = MergeQueueIter::new(
-			merge_sources,
-			beg.clone(),
-			end.clone(),
-			Direction::Forward,
-		);
+		let join_iter =
+			MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), Direction::Forward);
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
 			self.database
@@ -1732,8 +1733,8 @@ impl TransactionInner {
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.track_scan_range(beg, end);
 		}
-		// Fast path: no merge queue entries in range and no transaction writes in this
-		// range — walk the datastore directly.
+		// Fast path: no merge queue entries in range and no transaction writes
+		// in this range — walk the datastore directly.
 		let merge_sources = self.snapshot_merge_sources_in_range(self.version, beg, end);
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
@@ -1767,12 +1768,8 @@ impl TransactionInner {
 			return Ok(count);
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = MergeQueueIter::new(
-			merge_sources,
-			beg.clone(),
-			end.clone(),
-			Direction::Forward,
-		);
+		let join_iter =
+			MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), Direction::Forward);
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database
@@ -1830,8 +1827,8 @@ impl TransactionInner {
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.track_scan_range(beg, end);
 		}
-		// Fast path: no merge queue entries in range and no transaction writes in this
-		// range — walk the datastore directly into the buffer.
+		// Fast path: no merge queue entries in range and no transaction writes
+		// in this range — walk the datastore directly into the buffer.
 		let merge_sources = self.snapshot_merge_sources_in_range(self.version, beg, end);
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
@@ -1862,12 +1859,8 @@ impl TransactionInner {
 			return Ok(());
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = MergeQueueIter::new(
-			merge_sources,
-			beg.clone(),
-			end.clone(),
-			Direction::Forward,
-		);
+		let join_iter =
+			MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), Direction::Forward);
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
 			self.database
@@ -1922,8 +1915,8 @@ impl TransactionInner {
 		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.track_scan_range(beg, end);
 		}
-		// Fast path: no merge queue entries in range and no transaction writes in this
-		// range — walk the datastore directly into the buffer.
+		// Fast path: no merge queue entries in range and no transaction writes
+		// in this range — walk the datastore directly into the buffer.
 		let merge_sources = self.snapshot_merge_sources_in_range(self.version, beg, end);
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
@@ -1954,12 +1947,8 @@ impl TransactionInner {
 			return Ok(());
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = MergeQueueIter::new(
-			merge_sources,
-			beg.clone(),
-			end.clone(),
-			Direction::Forward,
-		);
+		let join_iter =
+			MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), Direction::Forward);
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database
@@ -2010,8 +1999,9 @@ impl TransactionInner {
 			}
 		}
 
-		// Clean up and merge any subsequent ranges that overlap [effective_beg, effective_end]
-		// Any range starting <= effective_end overlaps with us
+		// Clean up and merge any subsequent ranges that overlap [effective_beg,
+		// effective_end] Any range starting <= effective_end overlaps
+		// with us
 		let overlapping: Vec<_> =
 			self.scanset.range::<ByteSlice, _>(&effective_beg..=&effective_end).collect();
 
@@ -2026,8 +2016,9 @@ impl TransactionInner {
 		self.scanset.insert(effective_beg, ArcSwap::from_pointee(effective_end));
 	}
 
-	/// Snapshot the merge-queue writesets visible at `version` within `[beg, end)` as a vector of
-	/// `Arc<Merge>` ordered newest-first. Cheap — each element is an Arc bump.
+	/// Snapshot the merge-queue writesets visible at `version` within `[beg,
+	/// end)` as a vector of `Arc<Merge>` ordered newest-first. Cheap — each
+	/// element is an Arc bump.
 	#[inline]
 	fn snapshot_merge_sources_in_range(
 		&self,
@@ -2129,12 +2120,7 @@ impl TransactionInner {
 			return Ok(res);
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = MergeQueueIter::new(
-			merge_sources,
-			beg.clone(),
-			end.clone(),
-			direction,
-		);
+		let join_iter = MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), direction);
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database
@@ -2236,12 +2222,7 @@ impl TransactionInner {
 			return Ok(res);
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = MergeQueueIter::new(
-			merge_sources,
-			beg.clone(),
-			end.clone(),
-			direction,
-		);
+		let join_iter = MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), direction);
 		// Create the 3-way merge iterator
 		let mut iter = MergeIterator::new(
 			self.database
@@ -2344,12 +2325,7 @@ impl TransactionInner {
 			return Ok(res);
 		}
 		// Lazy k-way merge over the merge-queue writesets.
-		let join_iter = MergeQueueIter::new(
-			merge_sources,
-			beg.clone(),
-			end.clone(),
-			direction,
-		);
+		let join_iter = MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), direction);
 		// Create the 3-way merge iterator
 		let iter = MergeIterator::new(
 			self.database
@@ -2450,8 +2426,9 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let key = key.as_slice();
-		// If the merge queue is empty or the snapshot version has already retired,
-		// no in-flight entry <= version can exist in the merge queue.
+		// If the merge queue is empty or the snapshot version has already
+		// retired, no in-flight entry <= version can exist in the merge
+		// queue.
 		if !self.database.transaction_merge_queue.is_empty()
 			&& version > self.database.merge_retire_id.load(Ordering::Acquire)
 		{
@@ -2464,7 +2441,8 @@ impl TransactionInner {
 				}
 			}
 		}
-		// Check the key in the datastore using ByteSlice::cmp with 4-byte prefix acceleration
+		// Check the key in the datastore using ByteSlice::cmp with 4-byte
+		// prefix acceleration
 		ByteSlice::with_borrowed(key, |k| {
 			self.database.datastore.get(k).and_then(|e| match e.value().try_read() {
 				Some(guard) => guard.fetch_version(version),
@@ -2509,8 +2487,9 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let key = key.as_slice();
-		// If the merge queue is empty or the snapshot version has already retired,
-		// no in-flight entry <= version can exist in the merge queue.
+		// If the merge queue is empty or the snapshot version has already
+		// retired, no in-flight entry <= version can exist in the merge
+		// queue.
 		if !self.database.transaction_merge_queue.is_empty()
 			&& version > self.database.merge_retire_id.load(Ordering::Acquire)
 		{
@@ -2523,7 +2502,8 @@ impl TransactionInner {
 				}
 			}
 		}
-		// Check the key in the datastore using ByteSlice::cmp with 4-byte prefix acceleration
+		// Check the key in the datastore using ByteSlice::cmp with 4-byte
+		// prefix acceleration
 		ByteSlice::with_borrowed(key, |k| {
 			self.database
 				.datastore
@@ -2545,8 +2525,9 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let key = key.as_slice();
-		// If the merge queue is empty or the snapshot version has already retired,
-		// no in-flight entry <= version can exist in the merge queue.
+		// If the merge queue is empty or the snapshot version has already
+		// retired, no in-flight entry <= version can exist in the merge
+		// queue.
 		if !self.database.transaction_merge_queue.is_empty()
 			&& version > self.database.merge_retire_id.load(Ordering::Acquire)
 		{
@@ -2563,7 +2544,8 @@ impl TransactionInner {
 				}
 			}
 		}
-		// Check the key in the datastore using ByteSlice::cmp with 4-byte prefix acceleration
+		// Check the key in the datastore using ByteSlice::cmp with 4-byte
+		// prefix acceleration
 		ByteSlice::with_borrowed(key, |k| {
 			match (
 				chk.as_ref(),
@@ -2723,10 +2705,6 @@ impl<F: FnMut()> Drop for OnUnwind<F> {
 }
 
 #[cfg(test)]
-#[allow(
-	clippy::significant_drop_tightening,
-	reason = "lock contention is irrelevant in single-threaded assertions"
-)]
 mod tests {
 
 	use crate::err::Error;
@@ -3151,7 +3129,8 @@ mod tests {
 			assert!(txn3.commit().is_err());
 		}
 
-		// write-skew: read conflict when read keys are deleted by other transaction
+		// write-skew: read conflict when read keys are deleted by other
+		// transaction
 		{
 			let mut txn1 = db.transaction(true);
 
@@ -3553,7 +3532,8 @@ mod tests {
 		let value3 = "v3";
 		let value4 = "v4";
 
-		// inserts into read ranges of already-committed transaction(s) should fail
+		// inserts into read ranges of already-committed transaction(s) should
+		// fail
 		{
 			let mut txn1 = db.transaction(true);
 			let mut txn2 = db.transaction(true);
@@ -3687,7 +3667,8 @@ mod tests {
 		txn2.set("b", "2").unwrap();
 		txn2.set("d", "4").unwrap();
 
-		// Scan should see both committed (from merge queue) and uncommitted data
+		// Scan should see both committed (from merge queue) and uncommitted
+		// data
 		let res = txn2.scan("a".."f", None, None).unwrap();
 		assert_eq!(res.len(), 5);
 		assert_eq!(res[0].0.as_ref(), b"a"); // From merge queue
@@ -3815,8 +3796,9 @@ mod tests {
 		assert_eq!(res[2].0.as_ref(), b"c"); // Local overwrite
 		assert_eq!(res[2].1.as_ref(), b"30");
 		assert_eq!(res[3].0.as_ref(), b"d"); // Local new
-		                               // "e" is deleted locally, so not in
-		                               // results
+		                                     // "e" is deleted locally, so not
+		                                     // in
+		                                     // results
 	}
 
 	#[test]
@@ -3928,8 +3910,8 @@ mod tests {
 		}
 
 		// Verify the database maintains consistency under high concurrency
-		// We can't directly access inner fields, but we can verify overall consistency
-		// by checking that the database is still functional
+		// We can't directly access inner fields, but we can verify overall
+		// consistency by checking that the database is still functional
 		let tx = db.transaction(false);
 		let mut count = 0;
 		for _ in tx.scan("key_0".to_string().."key_999".to_string(), None, None).unwrap() {
@@ -3939,7 +3921,8 @@ mod tests {
 		// We should have some successful commits
 		assert!(count > 0, "Should have at least some successful commits");
 
-		// Try to commit another transaction to verify the database is still healthy
+		// Try to commit another transaction to verify the database is still
+		// healthy
 		let mut tx = db.transaction(true);
 		tx.set("final_key", "final_value".to_string()).unwrap();
 		tx.commit().expect("Final commit should succeed, database should be healthy");
@@ -3975,9 +3958,11 @@ mod tests {
 					tx.set(key.clone(), value.clone()).unwrap();
 
 					// Try to commit - this will exercise atomic_commit
-					// We don't verify reads here because in MVCC, a new read transaction
-					// might not see recent commits depending on its snapshot
-					let _ = tx.commit(); // Success or conflict, both are fine for this test
+					// We don't verify reads here because in MVCC, a new read
+					// transaction might not see recent
+					// commits depending on its snapshot
+					let _ = tx.commit(); // Success or conflict, both are fine
+										 // for this test
 
 					// Small delay to vary timing
 					thread::sleep(Duration::from_micros(thread_id as u64));
@@ -4054,7 +4039,8 @@ mod tests {
 		// Second nested savepoint
 		tx.set_savepoint().unwrap();
 		tx.set("level2_key1", "level2_value1").unwrap();
-		tx.set("level1_key1", "modified_at_level2").unwrap(); // Modify existing key
+		tx.set("level1_key1", "modified_at_level2").unwrap(); // Modify existing
+															  // key
 
 		// Third nested savepoint
 		tx.set_savepoint().unwrap();
@@ -4139,7 +4125,8 @@ mod tests {
 		assert!(matches!(tx_closed.rollback_to_savepoint(), Err(Error::TxClosed)));
 		assert!(matches!(tx_closed.release_savepoint(), Err(Error::TxClosed)));
 
-		// Test stack exhaustion - error when rolling back more savepoints than were set
+		// Test stack exhaustion - error when rolling back more savepoints than
+		// were set
 		let db_stack = Database::new();
 		let mut tx_stack = db_stack.transaction(true);
 
@@ -4151,7 +4138,7 @@ mod tests {
 		}
 
 		// Rollback all savepoints one by one
-		for _rollback_count in 0..3 {
+		for _ in 0..3 {
 			tx_stack.rollback_to_savepoint().unwrap();
 		}
 
@@ -4182,7 +4169,8 @@ mod tests {
 		// Commit the transaction (returns to pool)
 		tx1.commit().unwrap();
 
-		// Transaction 2: Get a new transaction (likely reuses tx1's pooled object)
+		// Transaction 2: Get a new transaction (likely reuses tx1's pooled
+		// object)
 		let mut tx2 = db.transaction(true);
 
 		// CRITICAL: The savepoint stack should be empty for the new transaction
@@ -4291,11 +4279,12 @@ mod tests {
 
 	#[test]
 	fn test_release_savepoint_bounds_stack_depth() {
-		// Verify that a savepoint per unit of work, each one released, keeps the
-		// savepoint stack at a bounded depth rather than accumulating one
-		// retained writeset snapshot per savepoint. This is a structural
-		// assertion, not a performance test: the timing and allocation story
-		// belongs in the criterion benchmarks.
+		// Verify that a savepoint per unit of work, each one released, keeps
+		// the savepoint stack at a bounded depth rather than
+		// accumulating one retained writeset snapshot per savepoint.
+		// This is a structural assertion, not a performance test: the
+		// timing and allocation story belongs in the criterion
+		// benchmarks.
 
 		let db = Database::new();
 
@@ -4331,11 +4320,12 @@ mod tests {
 
 	#[test]
 	fn test_rollback_keeps_reads_tracked() {
-		// Verify that rolling back a savepoint does not forget reads made inside
-		// the rolled back scope. An application can read a value inside a scope,
-		// roll that scope back, and then make a surviving write that depends on
-		// the value it saw. Dropping those reads from the readset would admit an
-		// SSI anomaly where a concurrent write to the read key does not conflict.
+		// Verify that rolling back a savepoint does not forget reads made
+		// inside the rolled back scope. An application can read a value
+		// inside a scope, roll that scope back, and then make a
+		// surviving write that depends on the value it saw. Dropping
+		// those reads from the readset would admit an SSI anomaly where
+		// a concurrent write to the read key does not conflict.
 		// Reads are therefore tracked monotonically, matching the readset bloom
 		// filter, which is never restored either.
 
@@ -4410,8 +4400,9 @@ mod tests {
 
 	#[test]
 	fn test_savepoints_with_scans_and_writes() {
-		// Verify that savepoints correctly interact with scans and subsequent writes.
-		// This pattern is common in SurrealDB queries with IF-ELSE, SELECT, and UPSERT.
+		// Verify that savepoints correctly interact with scans and subsequent
+		// writes. This pattern is common in SurrealDB queries with
+		// IF-ELSE, SELECT, and UPSERT.
 
 		let db = Database::new();
 
@@ -4440,7 +4431,8 @@ mod tests {
 		// Now write to a different key (like UPSERT based on the scan result)
 		tx1.set("person:test", "updated").unwrap();
 
-		// Commit should detect the SCAN conflict (tx2 wrote to a key tx1 scanned)
+		// Commit should detect the SCAN conflict (tx2 wrote to a key tx1
+		// scanned)
 		let result = tx1.commit();
 		assert!(
 			matches!(result, Err(Error::KeyReadConflict)),
@@ -4450,8 +4442,8 @@ mod tests {
 
 	#[test]
 	fn test_savepoint_rollback_preserves_earlier_scans() {
-		// Verify that rolling back a savepoint doesn't lose scans from before the
-		// savepoint
+		// Verify that rolling back a savepoint doesn't lose scans from before
+		// the savepoint
 
 		let db = Database::new();
 
@@ -4482,9 +4474,10 @@ mod tests {
 		// Rollback to savepoint
 		tx.rollback_to_savepoint().unwrap();
 
-		// The first scan must still be tracked. Scans are tracked monotonically,
-		// so the scan made inside the rolled back scope is retained too, keeping
-		// conflict detection conservative for any write that survives
+		// The first scan must still be tracked. Scans are tracked
+		// monotonically, so the scan made inside the rolled back scope
+		// is retained too, keeping conflict detection conservative for
+		// any write that survives
 		assert!(
 			tx.inner.as_ref().unwrap().scanset.len() >= scanset_before_len,
 			"Scans from before the savepoint should never be lost by a rollback"
@@ -4510,7 +4503,8 @@ mod tests {
 	fn test_gc_does_not_remove_active_versions() {
 		// Test for garbage collection regression issue where versions
 		// were being removed too aggressively
-		// Create a database with GC disabled (automatic version cleanup enabled)
+		// Create a database with GC disabled (automatic version cleanup
+		// enabled)
 		let db = Database::new();
 
 		// Insert 10,000 keys one-by-one
@@ -4656,16 +4650,16 @@ mod tests {
 	#[test]
 	fn test_concurrent_write_read_merge_queue_race() {
 		// This test specifically targets the race condition where readers check
-		// is_removed() on merge queue entries and miss data that's being merged.
-		// The race manifests under high concurrency when:
+		// is_removed() on merge queue entries and miss data that's being
+		// merged. The race manifests under high concurrency when:
 		// 1. Writer commits and merges data into datastore
 		// 2. Writer removes entry from merge queue
-		// 3. Reader checks merge queue (sees removed), checks datastore (doesn't see
-		//    data yet)
+		// 3. Reader checks merge queue (sees removed), checks datastore
+		//    (doesn't see data yet)
 		//
-		// This was fixed by removing the is_removed() checks and always checking all
-		// merge queue entries, since crossbeam-skiplist guarantees they remain
-		// accessible.
+		// This was fixed by removing the is_removed() checks and always
+		// checking all merge queue entries, since crossbeam-skiplist
+		// guarantees they remain accessible.
 
 		let db = Database::new();
 		let db = Arc::new(db);
@@ -4714,7 +4708,7 @@ mod tests {
 
 			// Wait for both to complete
 			writer.join().unwrap();
-			let _saw_value = reader.join().unwrap();
+			reader.join().unwrap();
 
 			// After both complete, a fresh read MUST see the value
 			let mut tx = db.transaction(false);
@@ -4832,7 +4826,8 @@ mod tests {
 			// Set a key in the writeset (not yet committed)
 			tx.set("key1", "value1").unwrap();
 
-			// Try to put the same key - should fail even though it's not in datastore yet
+			// Try to put the same key - should fail even though it's not in
+			// datastore yet
 			let result = tx.put("key1", "value2");
 			assert!(
 				matches!(result, Err(Error::KeyAlreadyExists)),
@@ -4894,7 +4889,8 @@ mod tests {
 			// Delete a key in the writeset
 			tx.del("key5").unwrap();
 
-			// putc with None (expecting non-existent) should succeed on deleted key
+			// putc with None (expecting non-existent) should succeed on deleted
+			// key
 			tx.putc("key5", "resurrected", None::<&str>).unwrap();
 			assert_eq!(tx.get("key5").unwrap().as_deref(), Some(b"resurrected" as &[u8]));
 
@@ -5191,10 +5187,9 @@ mod tests {
 		// visible at its watermark. This test remains as the empirical
 		// validator for that protocol.
 		//
-		// In the SurrealDB embedded `memory` backend the original bug
-		// surfaced as a flake on tests that poll `INFO FOR INDEX` while a
-		// concurrent index builder is committing rapid heartbeat updates
-		// to the build-state key.
+		// Verifies snapshot isolation under rapid concurrent commits and
+		// reader registration. Readers must always observe their snapshot
+		// version without exposure to concurrent sweepers.
 		use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 		use std::sync::Arc;
 		use std::thread;
@@ -5233,11 +5228,9 @@ mod tests {
 			})
 		};
 
-		// Reader threads open many short-lived snapshots. The original
-		// bug triggered when a reader entered `TransactionInner::new` or
-		// `reset` and was descheduled between choosing its snapshot and
-		// becoming visible to sweepers. More readers means more chances
-		// to land in that window.
+		// Reader threads open short-lived snapshots. Reader registration
+		// publishes sentinels before choosing snapshots to ensure background
+		// sweepers cannot reclaim versions while registration is in flight.
 		let mut readers = Vec::new();
 		for _ in 0..6 {
 			let db = Arc::clone(&db);
@@ -5329,8 +5322,7 @@ mod tests {
 		}
 		// Inspect the raw version chain directly.
 		let entry = db.datastore.get(b"hotkey".as_slice()).expect("hotkey entry missing");
-		let guard = entry.value().read();
-		let chain = guard.as_slice();
+		let chain = entry.value().read().as_slice().to_vec();
 		// Versions are strictly increasing: every commit is minted a unique
 		// version, and every written value is unique, so no push dedups.
 		for w in chain.windows(2) {
@@ -5383,8 +5375,7 @@ mod tests {
 		for i in 0..200 {
 			let key = format!("doc:{i:010}").into_bytes();
 			let entry = db.datastore.get(key.as_slice()).expect("doc entry missing");
-			let guard = entry.value().read();
-			let chain = guard.as_slice();
+			let chain = entry.value().read().as_slice().to_vec();
 			assert_eq!(chain.len(), 5, "chain should hold all five rounds");
 			for w in chain.windows(2) {
 				assert!(w[0].version < w[1].version, "versions not strictly monotonic");

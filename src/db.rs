@@ -186,7 +186,8 @@ impl Database {
 		Ok(res)
 	}
 
-	/// Inspect a key's value directly via closure without allocating a transaction or cloning.
+	/// Inspect a key's value directly via closure without allocating a
+	/// transaction or cloning.
 	pub fn with_value<K, F, R>(&self, key: K, f: F) -> Result<Option<R>, Error>
 	where
 		K: IntoBytes,
@@ -433,10 +434,6 @@ impl Database {
 }
 
 #[cfg(test)]
-#[allow(
-	clippy::significant_drop_tightening,
-	reason = "lock contention is irrelevant in single-threaded assertions"
-)]
 mod tests {
 
 	use super::*;
@@ -1451,8 +1448,7 @@ mod tests {
 			tx.commit().unwrap();
 		}
 		let entry = db.datastore.get(b"hotkey".as_slice()).expect("hotkey missing");
-		let guard = entry.value().read();
-		let chain = guard.as_slice();
+		let chain = entry.value().read().as_slice().to_vec();
 		assert_eq!(chain.len(), 1, "inline GC should trim superseded versions at commit");
 		assert_eq!(chain[0].value.as_deref(), Some(b"v99" as &[u8]));
 	}
@@ -1505,16 +1501,15 @@ mod tests {
 		}
 		{
 			let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
-			let guard = entry.value().read();
-			assert!(guard.as_slice().len() > 1, "the pinned reader should retain history");
+			let len = entry.value().read().as_slice().len();
+			assert!(len > 1, "the pinned reader should retain history");
 		}
 		// Drop the reader; no further commits touch the key, so only the
 		// manual (or background) full sweep can reclaim the garbage
 		drop(reader);
 		db.run_gc();
 		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
-		let guard = entry.value().read();
-		let chain = guard.as_slice();
+		let chain = entry.value().read().as_slice().to_vec();
 		assert_eq!(chain.len(), 1, "the safety-net sweep should reclaim departed-reader garbage");
 		assert_eq!(chain[0].value.as_deref(), Some(b"v50" as &[u8]));
 	}
@@ -1657,8 +1652,7 @@ mod tests {
 		let db =
 			Database::new_with_persistence(crate::DatabaseOptions::default(), persistence).unwrap();
 		let entry = db.datastore.get(b"key".as_slice()).expect("key missing after reload");
-		let guard = entry.value().read();
-		let chain = guard.as_slice();
+		let chain = entry.value().read().as_slice().to_vec();
 		assert_eq!(chain.len(), 1, "the load-time sweep should collapse replayed chains");
 		assert_eq!(chain[0].value.as_deref(), Some(b"v4" as &[u8]));
 	}

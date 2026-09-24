@@ -60,7 +60,8 @@ fn large_value_handling() {
 	let db = Database::new();
 
 	// Create values of increasing sizes
-	let sizes = [1024, 10 * 1024, 100 * 1024, 1024 * 1024]; // 1KB, 10KB, 100KB, 1MB
+	let sizes = [1024, 10 * 1024, 100 * 1024, 1024 * 1024]; // 1KB, 10KB, 100KB,
+															// 1MB
 
 	let mut tx = db.transaction(true);
 	for (i, size) in sizes.iter().enumerate() {
