@@ -14,6 +14,7 @@
 
 //! This module stores the monotonic logical clock for merge versions.
 
+use crossbeam_utils::CachePadded;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -50,17 +51,17 @@ use std::sync::Arc;
 /// above every persisted version.
 pub(crate) struct Oracle {
 	/// The merge version allocation counter
-	pub(crate) alloc: AtomicU64,
+	pub(crate) alloc: CachePadded<AtomicU64>,
 	/// The latest published merge version
-	pub(crate) timestamp: AtomicU64,
+	pub(crate) timestamp: CachePadded<AtomicU64>,
 }
 
 impl Oracle {
 	/// Creates a new logical clock starting at version zero
 	pub fn new() -> Arc<Self> {
 		Arc::new(Self {
-			alloc: AtomicU64::new(0),
-			timestamp: AtomicU64::new(0),
+			alloc: CachePadded::new(AtomicU64::new(0)),
+			timestamp: CachePadded::new(AtomicU64::new(0)),
 		})
 	}
 }

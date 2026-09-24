@@ -22,6 +22,7 @@ use crate::versions::Versions;
 use crate::DatabaseOptions;
 use byteslice::ByteSlice;
 use crossbeam_skiplist::SkipMap;
+use crossbeam_utils::CachePadded;
 use papaya::HashSet;
 use parking_lot::RwLock;
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
@@ -84,7 +85,7 @@ pub struct Inner {
 	/// walk a map sized by concurrency, not by the transaction pool.
 	pub(crate) readers: SkipMap<u64, Arc<Slot>>,
 	/// Monotonic slot id allocator for the readers map
-	pub(crate) reader_slot_id: AtomicU64,
+	pub(crate) reader_slot_id: CachePadded<AtomicU64>,
 	/// The contiguous completed prefix of the commit queue: every commit
 	/// with an id at or below this watermark has either published its
 	/// merge version or aborted. Readers take their commit snapshot from
@@ -97,13 +98,13 @@ pub struct Inner {
 	/// advanced past it, so a reader's version snapshot (loaded after
 	/// its commit snapshot) always covers its entire excluded prefix.
 	/// Bounded by, and advanced only after, `transaction_commit_id`.
-	pub(crate) commit_watermark: AtomicU64,
+	pub(crate) commit_watermark: CachePadded<AtomicU64>,
 	/// The commit-queue slot allocation counter. Slots are claimed from
 	/// here (dense and never re-used) rather than by probing queue
 	/// membership, because commit entries are removed on conflict aborts
 	/// and by cleanup, and a re-claimed vacated slot could sit below the
 	/// completed watermark with an unpublished merge version.
-	pub(crate) transaction_queue_id: AtomicU64,
+	pub(crate) transaction_queue_id: CachePadded<AtomicU64>,
 	/// The contiguous inserted prefix of the commit queue: every slot at
 	/// or below this value has definitely been inserted into
 	/// `transaction_commit_queue`. Advanced opportunistically by
@@ -117,7 +118,7 @@ pub struct Inner {
 	/// which mark an aborted entry rather than removing it, leaving
 	/// physical removal to `cleanup_commit_queue` once the entry is
 	/// safely below this bound.
-	pub(crate) transaction_commit_id: AtomicU64,
+	pub(crate) transaction_commit_id: CachePadded<AtomicU64>,
 	/// The transaction commit queue list of modifications
 	pub(crate) transaction_commit_queue: SkipMap<u64, Arc<Commit>>,
 	/// Transaction updates which are committed but not yet applied
@@ -135,7 +136,7 @@ pub struct Inner {
 	/// newest overlay hit at or below a snapshot is the newest write.
 	/// Bounded by, and advanced only after, the published merge clock
 	/// (`oracle.timestamp`).
-	pub(crate) merge_retire_id: AtomicU64,
+	pub(crate) merge_retire_id: CachePadded<AtomicU64>,
 	/// Keys whose version chains may still hold reclaimable garbage:
 	/// chains a commit could not trim to a single live value because a
 	/// reader watermark pinned older versions (or the watermark scan was
@@ -175,13 +176,13 @@ impl Inner {
 			oracle: Oracle::new(),
 			datastore: SkipMap::new(),
 			readers: SkipMap::new(),
-			reader_slot_id: AtomicU64::new(0),
-			commit_watermark: AtomicU64::new(0),
-			transaction_queue_id: AtomicU64::new(0),
-			transaction_commit_id: AtomicU64::new(0),
+			reader_slot_id: CachePadded::new(AtomicU64::new(0)),
+			commit_watermark: CachePadded::new(AtomicU64::new(0)),
+			transaction_queue_id: CachePadded::new(AtomicU64::new(0)),
+			transaction_commit_id: CachePadded::new(AtomicU64::new(0)),
 			transaction_commit_queue: SkipMap::new(),
 			transaction_merge_queue: SkipMap::new(),
-			merge_retire_id: AtomicU64::new(0),
+			merge_retire_id: CachePadded::new(AtomicU64::new(0)),
 			gc_candidates: HashSet::new(),
 			#[cfg(not(target_arch = "wasm32"))]
 			persistence: RwLock::new(None),

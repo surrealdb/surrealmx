@@ -14,7 +14,9 @@
 
 //! This module stores the core in-memory database type.
 
+use crate::err::Error;
 use crate::inner::Inner;
+use crate::kv::IntoBytes;
 use crate::options::DatabaseOptions;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
@@ -23,6 +25,7 @@ use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
 use crate::tx::Transaction;
+use byteslice::ByteSlice;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -156,6 +159,85 @@ impl Database {
 	/// Start a new transaction on this database
 	pub fn transaction(&self, write: bool) -> Transaction {
 		self.pool.get(write)
+	}
+
+	/// Fetch a key directly from the database without allocating a transaction.
+	pub fn get<K: IntoBytes>(&self, key: K) -> Result<Option<ByteSlice>, Error> {
+		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		let lookup = key.as_slice();
+		if !self.inner.transaction_merge_queue.is_empty()
+			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
+		{
+			let iter = self.inner.transaction_merge_queue.range(..=version);
+			for entry in iter.rev() {
+				if !entry.is_removed() && entry.value().may_contain_key(lookup) {
+					if let Some(v) = entry.value().writeset.get(lookup) {
+						return Ok(v.clone());
+					}
+				}
+			}
+		}
+		let res = ByteSlice::with_borrowed(lookup, |k| {
+			self.inner.datastore.get(k).and_then(|e| match e.value().try_read() {
+				Some(guard) => guard.fetch_version(version),
+				None => e.value().read().fetch_version(version),
+			})
+		});
+		Ok(res)
+	}
+
+	/// Inspect a key's value directly via closure without allocating a transaction or cloning.
+	pub fn with_value<K, F, R>(&self, key: K, f: F) -> Result<Option<R>, Error>
+	where
+		K: IntoBytes,
+		F: FnOnce(&[u8]) -> R,
+	{
+		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		let lookup = key.as_slice();
+		if !self.inner.transaction_merge_queue.is_empty()
+			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
+		{
+			let iter = self.inner.transaction_merge_queue.range(..=version);
+			for entry in iter.rev() {
+				if !entry.is_removed() && entry.value().may_contain_key(lookup) {
+					if let Some(v) = entry.value().writeset.get(lookup) {
+						return Ok(v.as_deref().map(f));
+					}
+				}
+			}
+		}
+		let res = ByteSlice::with_borrowed(lookup, |k| {
+			self.inner.datastore.get(k).and_then(|e| match e.value().try_read() {
+				Some(guard) => guard.with_version(version, f),
+				None => e.value().read().with_version(version, f),
+			})
+		});
+		Ok(res)
+	}
+
+	/// Check if a key exists directly without allocating a transaction.
+	pub fn exists<K: IntoBytes>(&self, key: K) -> Result<bool, Error> {
+		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		let lookup = key.as_slice();
+		if !self.inner.transaction_merge_queue.is_empty()
+			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
+		{
+			let iter = self.inner.transaction_merge_queue.range(..=version);
+			for entry in iter.rev() {
+				if !entry.is_removed() && entry.value().may_contain_key(lookup) {
+					if let Some(v) = entry.value().writeset.get(lookup) {
+						return Ok(v.is_some());
+					}
+				}
+			}
+		}
+		let exists = ByteSlice::with_borrowed(lookup, |k| {
+			self.inner.datastore.get(k).is_some_and(|e| match e.value().try_read() {
+				Some(guard) => guard.exists_version(version),
+				None => e.value().read().exists_version(version),
+			})
+		});
+		Ok(exists)
 	}
 
 	/// Get a reference to the persistence layer if enabled
@@ -426,6 +508,23 @@ mod tests {
 		assert_eq!(res.as_deref(), Some(b"something" as &[u8]));
 		let res = tx.cancel();
 		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn direct_database_reads() {
+		let db = Database::new();
+		assert!(!db.exists("test").unwrap());
+		assert_eq!(db.get("test").unwrap(), None);
+
+		let mut tx = db.transaction(true);
+		tx.put("test", "hello world").unwrap();
+		tx.commit().unwrap();
+
+		assert!(db.exists("test").unwrap());
+		assert_eq!(db.get("test").unwrap().as_deref(), Some(b"hello world" as &[u8]));
+
+		let len = db.with_value("test", <[u8]>::len).unwrap();
+		assert_eq!(len, Some(11));
 	}
 
 	#[test]

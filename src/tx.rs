@@ -4992,7 +4992,7 @@ mod tests {
 		tx.commit().unwrap();
 
 		let tx2 = db.transaction(false);
-		let len = tx2.with_value("key", |bytes| bytes.len()).unwrap();
+		let len = tx2.with_value("key", <[u8]>::len).unwrap();
 		assert_eq!(len, Some(11));
 
 		let missing = tx2.with_value("missing", |_| 42).unwrap();
