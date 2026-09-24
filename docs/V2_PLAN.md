@@ -70,12 +70,12 @@ Phase 1: Deterministic Simulation & Differential Testing (ModelDb Oracle)
 
 Before making complex changes to the storage engine, data types, and commit pipeline, we must construct a deterministic simulation and differential testing framework. Concurrency bugs, lost updates, and memory safety issues in lock-free code are notoriously difficult to reproduce under non-deterministic thread schedules.
 
-- [ ] Build `ModelDb`: an unoptimized, trivially correct reference in-memory model (using `BTreeMap` under a sequential lock) representing ground-truth committed state and first-committer-wins OCC semantics.
-- [ ] Implement `WorkloadGenerator`: a deterministic PRNG-driven generator (seeded with `StdRng`) producing interleaved transactions (`Begin`, `Get`, `Set`, `Put`, `Putc`, `Del`, `Delc`, `Savepoint`, `Rollback`, `Commit`, `Scan`, `CrashAndReload`).
-- [ ] Implement `SimRunner`: executes identical randomized actions against both SurrealMX and `ModelDb` concurrently, asserting 100% byte-for-byte equivalence after every commit and scan.
-- [ ] Implement fault injection (simulating thread stalls, watermark lags, and persistence recovery).
-- [ ] Add CLI / test harness support for `--seed <u64>` to reproduce any divergence deterministically in seconds.
-- [ ] Run 100,000+ simulation steps against the baseline engine to verify model equivalence before starting Phase 2.
+- [x] Build `ModelDb`: an unoptimized, trivially correct reference in-memory model (using `BTreeMap` under a sequential lock) representing ground-truth committed state and first-committer-wins OCC semantics.
+- [x] Implement `WorkloadGenerator`: a deterministic PRNG-driven generator (seeded with `StdRng`) producing interleaved transactions (`Begin`, `Get`, `Set`, `Put`, `Putc`, `Del`, `Delc`, `Savepoint`, `Rollback`, `Commit`, `Scan`, `CrashAndReload`).
+- [x] Implement `SimRunner`: executes identical randomized actions against both SurrealMX and `ModelDb` concurrently, asserting 100% byte-for-byte equivalence after every commit and scan.
+- [x] Implement fault injection (simulating thread stalls, watermark lags, and persistence recovery).
+- [x] Add CLI / test harness support for `SIM_SEED=<u64>` to reproduce any divergence deterministically in seconds.
+- [x] Run 100,000+ simulation steps against the baseline engine to verify model equivalence before starting Phase 2.
 
 ### The Differential Testing Oracle (`ModelDb`)
 ```text
