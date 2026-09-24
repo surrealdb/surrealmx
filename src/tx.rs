@@ -4717,17 +4717,9 @@ mod tests {
 
 	#[test]
 	fn test_concurrent_write_read_merge_queue_race() {
-		// This test specifically targets the race condition where readers check
-		// is_removed() on merge queue entries and miss data that's being
-		// merged. The race manifests under high concurrency when:
-		// 1. Writer commits and merges data into datastore
-		// 2. Writer removes entry from merge queue
-		// 3. Reader checks merge queue (sees removed), checks datastore
-		//    (doesn't see data yet)
-		//
-		// This was fixed by removing the is_removed() checks and always
-		// checking all merge queue entries, since crossbeam-skiplist
-		// guarantees they remain accessible.
+		// Verifies atomic visibility of committed writes between the merge
+		// queue overlay and the datastore version chains: a reader must observe
+		// committed writes without gaps during in-flight merge retirement.
 
 		let db = Database::new();
 		let db = Arc::new(db);

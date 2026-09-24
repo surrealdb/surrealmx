@@ -59,7 +59,7 @@ fn setup_database_with_data(count: usize, key_size: usize, value_size: usize) ->
 
 	{
 		let mut tx = db.transaction(true);
-		for _i in 0..count {
+		for _ in 0..count {
 			let key = generate_key(&mut rng, key_size);
 			let value = generate_value(&mut rng, value_size);
 			tx.put(key, value).unwrap();

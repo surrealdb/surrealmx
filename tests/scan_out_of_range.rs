@@ -1,28 +1,12 @@
 #![cfg(not(target_arch = "wasm32"))]
-//! Reproducer for a scan-correctness bug observed in surrealdb-private's
-//! `multi_index_concurrent_test_create_update_delete`.
+//! Verifies that range scans strictly return keys within requested bounds under
+//! heavy concurrent writer traffic across shared prefixes.
 //!
-//! Symptom (in the parent project): a range scan against
-//! `[/*0*0*aaa+ix!dc\0 , /*0*0*aaa+ix!dc\xff*40)` would occasionally
-//! return keys with a *different* `IndexId` (different bytes inside the
-//! shared prefix) and a *different* category byte (`!tt`, `!dl`, …).
-//! The decode of the value as `DocLengthAndCount` then failed with
-//! either "Invalid revision 0" (8-byte u64 doc-length value) or
-//! "Reader did not have enough data" (0-byte string value).
-//!
-//! This isolated reproducer drives the same access pattern directly
-//! against surrealmx:
-//!
-//! - Several writer threads insert into multiple synthetic "indexes",
-//!   committing one key at a time, in tight loops. Each thread uses
-//!   `with_snapshot_isolation()` because that is what the in-mem engine in
-//!   surrealdb passes through.
-//! - A reader thread repeatedly opens a snapshot-isolation transaction and
-//!   scans a narrow range that should only ever contain keys with a specific
-//!   `(ix, category)` prefix.
-//! - On every scanned entry the reader verifies the returned key is within the
-//!   scan bounds; out-of-range keys (or values that don't match the expected
-//!   category-byte) are reported and counted.
+//! - Writer threads insert into multiple synthetic index key ranges, committing
+//!   keys concurrently under snapshot isolation.
+//! - Reader threads repeatedly scan narrow ranges with specific category
+//!   prefixes and assert that all returned keys fall strictly within `[beg,
+//!   end)`.
 
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -67,9 +51,9 @@ fn make_range(ix: u32, kind: [u8; 2]) -> (Vec<u8>, Vec<u8>) {
 	(beg, end)
 }
 
-/// Run the reproducer for at most `budget` and return the number of
-/// out-of-range entries observed. Zero means the bug did not reproduce
-/// in this window.
+/// Run the test workload for at most `budget` and return the number of
+/// out-of-range entries observed. Zero means no out-of-range entries were
+/// observed.
 fn run_once(budget: Duration) -> (usize, usize, usize) {
 	const N_INDEXES: u32 = 5;
 	const SCAN_IX: u32 = 3;
@@ -203,8 +187,7 @@ fn hex(b: &[u8]) -> String {
 }
 
 /// Drive the workload for a fixed budget and assert no out-of-range keys
-/// were seen. Failure prints the first offender so the bug shape is
-/// directly comparable to the surrealdb-private logs.
+/// were seen. Failure prints the first out-of-range key observed.
 #[test]
 fn scan_never_returns_keys_outside_requested_range() {
 	let start = Instant::now();

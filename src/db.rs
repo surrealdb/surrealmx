@@ -951,7 +951,7 @@ mod tests {
 
 		let mut inspected_values = Vec::new();
 		let count = db
-			.scan_with("scan:00".."scan:99", None, None, |_k, v| {
+			.scan_with("scan:00".."scan:99", None, None, |_, v| {
 				inspected_values.push(v.to_vec());
 				true
 			})
