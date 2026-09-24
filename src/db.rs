@@ -29,7 +29,7 @@ use crate::tx::Transaction;
 use crate::version::Version;
 use crate::versions::Versions;
 use byteslice::ByteSlice;
-use std::ops::Deref;
+use std::ops::{Bound, Deref, Range};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
@@ -242,6 +242,244 @@ impl Database {
 			})
 		});
 		Ok(exists)
+	}
+
+	/// Scan key-value pairs in a range directly from the database without
+	/// allocating a transaction. Calls a closure with borrowed key and value
+	/// bytes, stopping early if the closure returns `false`.
+	pub fn scan_with<K, F>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		mut f: F,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+		F: FnMut(&ByteSlice, &[u8]) -> bool,
+	{
+		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		let beg = rng.start.into_bytes();
+		let end = rng.end.into_bytes();
+		if !self.inner.transaction_merge_queue.is_empty()
+			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
+		{
+			let tx = self.transaction(false);
+			return tx.scan_with(beg..end, skip, limit, f);
+		}
+		let mut count = 0;
+		let mut skip = skip.unwrap_or_default();
+		let datastore_range =
+			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
+		for entry in datastore_range {
+			let matched = match entry.value().try_read() {
+				Some(g) => g.with_version(version, |bytes| {
+					if skip > 0 {
+						skip -= 1;
+						true
+					} else {
+						count += 1;
+						f(entry.key(), bytes)
+					}
+				}),
+				None => entry.value().read().with_version(version, |bytes| {
+					if skip > 0 {
+						skip -= 1;
+						true
+					} else {
+						count += 1;
+						f(entry.key(), bytes)
+					}
+				}),
+			};
+			if let Some(continue_iter) = matched {
+				if !continue_iter {
+					break;
+				}
+			}
+			if let Some(l) = limit {
+				if count >= l {
+					break;
+				}
+			}
+		}
+		Ok(count)
+	}
+
+	/// Iterate keys in a range directly from the database without allocating a
+	/// transaction, stopping early if the closure returns `false`.
+	pub fn keys_for_each<K, F>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		mut f: F,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+		F: FnMut(&ByteSlice) -> bool,
+	{
+		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		let beg = rng.start.into_bytes();
+		let end = rng.end.into_bytes();
+		if !self.inner.transaction_merge_queue.is_empty()
+			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
+		{
+			let tx = self.transaction(false);
+			return tx.keys_for_each(beg..end, skip, limit, f);
+		}
+		let mut count = 0;
+		let mut skip = skip.unwrap_or_default();
+		let datastore_range =
+			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
+		for entry in datastore_range {
+			let exists = match entry.value().try_read() {
+				Some(g) => g.exists_version(version),
+				None => entry.value().read().exists_version(version),
+			};
+			if !exists {
+				continue;
+			}
+			if skip > 0 {
+				skip -= 1;
+				continue;
+			}
+			count += 1;
+			if !f(entry.key()) {
+				break;
+			}
+			if let Some(l) = limit {
+				if count >= l {
+					break;
+				}
+			}
+		}
+		Ok(count)
+	}
+
+	/// Count keys in a range directly from the database without allocating a
+	/// transaction.
+	pub fn total<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+	{
+		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		let beg = rng.start.into_bytes();
+		let end = rng.end.into_bytes();
+		if !self.inner.transaction_merge_queue.is_empty()
+			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
+		{
+			let tx = self.transaction(false);
+			return tx.total(beg..end, skip, limit);
+		}
+		let mut count = 0;
+		let mut skip = skip.unwrap_or_default();
+		let datastore_range =
+			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
+		for entry in datastore_range {
+			let exists = match entry.value().try_read() {
+				Some(g) => g.exists_version(version),
+				None => entry.value().read().exists_version(version),
+			};
+			if !exists {
+				continue;
+			}
+			if skip > 0 {
+				skip -= 1;
+				continue;
+			}
+			count += 1;
+			if let Some(l) = limit {
+				if count >= l {
+					break;
+				}
+			}
+		}
+		Ok(count)
+	}
+
+	/// Scan key-value pairs into a caller-provided buffer, reusing its
+	/// capacity.
+	pub fn scan_into<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		buf: &mut Vec<(ByteSlice, ByteSlice)>,
+	) -> Result<(), Error>
+	where
+		K: IntoBytes,
+	{
+		buf.clear();
+		let initial_cap = limit.unwrap_or(128).min(10_000);
+		if buf.capacity() < initial_cap {
+			buf.reserve(initial_cap - buf.capacity());
+		}
+		self.scan_with(rng, skip, limit, |k, v| {
+			buf.push((k.clone(), ByteSlice::from(v)));
+			true
+		})?;
+		Ok(())
+	}
+
+	/// Scan keys into a caller-provided buffer, reusing its capacity.
+	pub fn keys_into<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		buf: &mut Vec<ByteSlice>,
+	) -> Result<(), Error>
+	where
+		K: IntoBytes,
+	{
+		buf.clear();
+		let initial_cap = limit.unwrap_or(128).min(10_000);
+		if buf.capacity() < initial_cap {
+			buf.reserve(initial_cap - buf.capacity());
+		}
+		self.keys_for_each(rng, skip, limit, |k| {
+			buf.push(k.clone());
+			true
+		})?;
+		Ok(())
+	}
+
+	/// Scan key-value pairs in a range directly from the database without
+	/// allocating a transaction.
+	pub fn scan<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<(ByteSlice, ByteSlice)>, Error>
+	where
+		K: IntoBytes,
+	{
+		let mut res = Vec::with_capacity(limit.unwrap_or(128).min(10_000));
+		self.scan_into(rng, skip, limit, &mut res)?;
+		Ok(res)
+	}
+
+	/// Scan keys in a range directly from the database without allocating a
+	/// transaction.
+	pub fn keys<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<ByteSlice>, Error>
+	where
+		K: IntoBytes,
+	{
+		let mut res = Vec::with_capacity(limit.unwrap_or(128).min(10_000));
+		self.keys_into(rng, skip, limit, &mut res)?;
+		Ok(res)
 	}
 
 	/// Set a key to a value in an auto-committed write transaction.
@@ -692,6 +930,42 @@ mod tests {
 		assert!(db.exists("another").unwrap());
 		db.del("another").unwrap();
 		assert!(!db.exists("another").unwrap());
+
+		// Populate keys for direct range scanning
+		db.set("scan:01", "v1").unwrap();
+		db.set("scan:02", "v2").unwrap();
+		db.set("scan:03", "v3").unwrap();
+
+		assert_eq!(db.total("scan:00".."scan:99", None, None).unwrap(), 3);
+		assert_eq!(db.total("scan:00".."scan:99", Some(1), Some(1)).unwrap(), 1);
+
+		let mut scanned_keys = Vec::new();
+		let count = db
+			.keys_for_each("scan:00".."scan:99", None, None, |k| {
+				scanned_keys.push(k.clone());
+				true
+			})
+			.unwrap();
+		assert_eq!(count, 3);
+		assert_eq!(scanned_keys.len(), 3);
+
+		let mut inspected_values = Vec::new();
+		let count = db
+			.scan_with("scan:00".."scan:99", None, None, |_k, v| {
+				inspected_values.push(v.to_vec());
+				true
+			})
+			.unwrap();
+		assert_eq!(count, 3);
+		assert_eq!(inspected_values[0], b"v1");
+
+		let mut buf = Vec::new();
+		db.scan_into("scan:00".."scan:99", None, None, &mut buf).unwrap();
+		assert_eq!(buf.len(), 3);
+
+		let mut kbuf = Vec::new();
+		db.keys_into("scan:00".."scan:99", None, None, &mut kbuf).unwrap();
+		assert_eq!(kbuf.len(), 3);
 	}
 
 	#[test]

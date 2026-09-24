@@ -14,4 +14,5 @@
 
 //! Testing utilities and deterministic simulation testing (DST) framework.
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod sim;

@@ -335,6 +335,25 @@ impl Transaction {
 		self.inner.as_ref().expect(INNER_TAKEN).scan_for_each(rng, skip, limit, f)
 	}
 
+	/// Call a closure with borrowed key and value bytes for each entry in a
+	/// range.
+	///
+	/// Avoids cloning values by inspecting them directly via closure. Return
+	/// `false` from the closure to stop iteration early.
+	pub fn scan_with<K, F>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		f: F,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+		F: FnMut(&ByteSlice, &[u8]) -> bool,
+	{
+		self.inner.as_ref().expect(INNER_TAKEN).scan_with(rng, skip, limit, f)
+	}
+
 	/// Call a closure for each key in a range, avoiding intermediate Vec
 	/// allocation. Return `false` from the closure to stop iteration early.
 	pub fn keys_for_each<K, F>(
@@ -1630,6 +1649,78 @@ impl TransactionInner {
 		K: IntoBytes,
 	{
 		self.scan_any(rng, skip, limit, Direction::Reverse, self.version)
+	}
+
+	/// Call a closure with borrowed key and value bytes for each entry in a
+	/// range.
+	///
+	/// Avoids cloning values by inspecting them directly via closure. Return
+	/// `false` from the closure to stop iteration early.
+	pub fn scan_with<K, F>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		mut f: F,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+		F: FnMut(&ByteSlice, &[u8]) -> bool,
+	{
+		if self.done {
+			return Err(Error::TxClosed);
+		}
+		let mut count = 0;
+		let beg = &rng.start.into_bytes();
+		let end = &rng.end.into_bytes();
+		let mut skip = skip.unwrap_or_default();
+		if self.write && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			self.track_scan_range(beg, end);
+		}
+		let merge_sources = self.snapshot_merge_sources_in_range(self.version, beg, end);
+		if merge_sources.is_empty()
+			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
+		{
+			let datastore_range = self
+				.database
+				.datastore
+				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			for entry in datastore_range {
+				let matched = match entry.value().try_read() {
+					Some(g) => g.with_version(self.version, |bytes| {
+						if skip > 0 {
+							skip -= 1;
+							true
+						} else {
+							count += 1;
+							f(entry.key(), bytes)
+						}
+					}),
+					None => entry.value().read().with_version(self.version, |bytes| {
+						if skip > 0 {
+							skip -= 1;
+							true
+						} else {
+							count += 1;
+							f(entry.key(), bytes)
+						}
+					}),
+				};
+				if let Some(continue_iter) = matched {
+					if !continue_iter {
+						break;
+					}
+				}
+				if let Some(l) = limit {
+					if count >= l {
+						break;
+					}
+				}
+			}
+			return Ok(count);
+		}
+
+		self.scan_for_each(beg.clone()..end.clone(), Some(skip), limit, |k, v| f(k, v.as_slice()))
 	}
 
 	/// Call a closure for each key-value pair in a range
