@@ -2607,7 +2607,7 @@ impl TransactionInner {
 		// value) re-claimed out from under a slow concurrent committer.
 		let slot = self.database.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1;
 		// Insert the commit entry at the claimed slot
-		let entry = queue.get_or_insert_with(slot, || Arc::clone(&updates));
+		let entry = queue.insert(slot, Arc::clone(&updates));
 		// Publish strictly in claim order: wait until every lower slot
 		// has been published, then advance the inserted-prefix bound to
 		// cover our own. This is NOT purely a courtesy to others — a
@@ -2663,7 +2663,7 @@ impl TransactionInner {
 		// always unique, so no collision retry is needed.
 		let version = oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
 		// Insert the merge entry at the claimed version
-		let entry = queue.get_or_insert_with(version, || Arc::clone(&updates));
+		let entry = queue.insert(version, Arc::clone(&updates));
 		// Publish strictly in claim order — see the equivalent comment
 		// in `atomic_commit` for why this must cover our own version
 		// before we return, and why we reload rather than retry a fixed

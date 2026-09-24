@@ -609,6 +609,9 @@ pub(crate) fn earliest_pinned(
 	exclude: Option<u64>,
 ) -> Option<u64> {
 	fence(Ordering::SeqCst);
+	if map.is_empty() {
+		return Some(fallback);
+	}
 	let mut min = fallback;
 	for entry in map {
 		if Some(*entry.key()) == exclude {
