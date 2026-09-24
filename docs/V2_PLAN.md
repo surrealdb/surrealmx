@@ -75,11 +75,11 @@ Before making complex changes to the storage engine, data types, and commit pipe
 - [x] Implement `SimRunner`: executes identical randomized actions against both SurrealMX and `ModelDb` concurrently, asserting 100% byte-for-byte equivalence after every commit and scan.
 - [x] Implement fault injection (simulating thread stalls, watermark lags, and persistence recovery).
 - [x] Add CLI / test harness support for `SIM_SEED=<u64>` to reproduce any divergence deterministically in seconds.
-- [x] Support environment variables matching SurrealKV (`SURREALMX_SIM_SEEDS`, `SURREALKV_SIM_SEEDS`, `SURREALMX_SIM_STEPS`, `SURREALKV_SIM_STEPS`), executable via:
+- [x] Support environment variables `SURREALMX_SIM_SEEDS` and `SURREALMX_SIM_STEPS`, executable via:
   ```bash
-  SURREALKV_SIM_SEEDS=100 SURREALKV_SIM_STEPS=1000 cargo test -p surrealmx --lib test::sim
+  SURREALMX_SIM_SEEDS=100 SURREALMX_SIM_STEPS=1000 cargo test -p surrealmx --lib test::sim
   ```
-- [x] Run 10,000,000+ simulation steps (2,000 seeds $\times$ 5,000 steps) across 64 parallel threads with 100% equivalence assertions against `ModelDb` in 1.33 seconds.
+- [x] Run 25,000,000+ simulation steps (5,000 seeds $\times$ 5,000 steps) across 64 parallel threads with 100% equivalence assertions against `ModelDb` in 3.21 seconds.
 
 ### The Differential Testing Oracle (`ModelDb`)
 ```text

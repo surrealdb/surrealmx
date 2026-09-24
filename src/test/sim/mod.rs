@@ -40,15 +40,11 @@ mod tests {
 	fn test_dst_differential_seeds() {
 		// Read environment variables or default to a robust testing set
 		let steps: usize = std::env::var("SURREALMX_SIM_STEPS")
-			.or_else(|_| std::env::var("SURREALKV_SIM_STEPS"))
-			.or_else(|_| std::env::var("SIM_STEPS"))
 			.ok()
 			.and_then(|s| s.parse().ok())
 			.unwrap_or(1000);
 
 		let seed_count: usize = std::env::var("SURREALMX_SIM_SEEDS")
-			.or_else(|_| std::env::var("SURREALKV_SIM_SEEDS"))
-			.or_else(|_| std::env::var("SIM_SEEDS"))
 			.ok()
 			.and_then(|s| s.parse().ok())
 			.unwrap_or(100);
@@ -140,10 +136,15 @@ mod tests {
 
 	#[test]
 	fn simulation_large_scale_100k_steps() {
-		if let Ok(seed_str) = std::env::var("SIM_SEED") {
+		if let Ok(seed_str) =
+			std::env::var("SURREALMX_SIM_SEED").or_else(|_| std::env::var("SIM_SEED"))
+		{
 			let seed: u64 = seed_str.parse().expect("SIM_SEED must be a valid u64");
-			let steps: usize =
-				std::env::var("SIM_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(100_000);
+			let steps: usize = std::env::var("SURREALMX_SIM_STEPS")
+				.or_else(|_| std::env::var("SIM_STEPS"))
+				.ok()
+				.and_then(|s| s.parse().ok())
+				.unwrap_or(100_000);
 
 			let mut runner = SimRunner::new_in_memory(seed);
 			let gen = WorkloadGenerator::new(seed, 40).with_max_concurrent_txns(16);
