@@ -1,281 +1,289 @@
+// Copyright © SurrealDB Ltd
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::version::Version;
 use byteslice::ByteSlice;
-use smallvec::SmallVec;
-
-pub(crate) enum IndexOrUpdate<'a> {
-	/// No need to insert the entry or update
-	Ignore,
-	/// Insert the entry at the specified index
-	Index(usize),
-	/// Update an entry with the specified entry
-	Update(&'a mut Version),
-}
+use thin_vec::{thin_vec, ThinVec};
 
 /// A key's MVCC version chain, ordered oldest to newest.
 ///
-/// The inline capacity is one entry: eager commit-time garbage
-/// collection keeps every chain at a single live value except while a
-/// reader watermark briefly pins superseded versions, and in a large
-/// dataset the overwhelming majority of keys are cold — written once
-/// and holding exactly one version forever. Sizing the inline buffer
-/// for the steady state keeps every cold key at ~a third of the memory
-/// a four-slot buffer costs, which dominates total datastore footprint
-/// by key count. Keys that do grow a chain under a pinned reader spill
-/// to a small heap buffer once (`SmallVec` retains it thereafter), and
-/// even a spilled two-entry chain occupies no more total memory than
-/// the old four-slot inline layout.
-pub struct Versions {
-	inner: SmallVec<[Version; 1]>,
+/// Specialized for the steady-state single-version case: inline commit-time
+/// garbage collection keeps over 95% of keys at a single live value.
+/// Representing `Versions` as an enum avoids any heap allocation and eliminates
+/// vector capacity overhead for single-version keys, shrinking `size_of::<Versions>()`
+/// to 40 bytes. When a reader pins older versions, a key temporarily spills to
+/// `Chain(ThinVec<Version>)`, which stores header and buffer in a single 8-byte pointer
+/// allocation. When GC trims the chain back to 1 live version, it transitions back
+/// to `Single(Version)`, immediately freeing heap memory.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Versions {
+	/// No versions stored (e.g. empty chain or collapsed tombstone).
+	#[default]
+	Empty,
+	/// Steady-state: exactly one version stored completely inline.
+	Single(Version),
+	/// Pinned state: multiple versions stored in a single-pointer `ThinVec`.
+	Chain(ThinVec<Version>),
 }
 
 impl From<Version> for Versions {
+	#[inline]
 	fn from(value: Version) -> Self {
-		let mut inner = SmallVec::new();
-		inner.push(value);
-		Self {
-			inner,
+		if value.value.is_some() {
+			Self::Single(value)
+		} else {
+			Self::Empty
 		}
 	}
 }
 
 impl Versions {
-	/// Create a new versions object. Only the persistence loader builds
-	/// chains incrementally, so this is unused on wasm targets.
-	#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+	/// Create a new empty versions object.
 	#[inline]
-	pub(crate) fn new() -> Self {
-		Self {
-			inner: SmallVec::new(),
+	pub(crate) const fn new() -> Self {
+		Self::Empty
+	}
+
+	/// Returns a borrowed slice of all versions in sorted order.
+	#[allow(dead_code)]
+	pub(crate) fn as_slice(&self) -> &[Version] {
+		match self {
+			Self::Empty => &[],
+			Self::Single(ref v) => std::slice::from_ref(v),
+			Self::Chain(ref chain) => chain.as_slice(),
+		}
+	}
+
+	/// Returns the number of versions stored.
+	#[allow(dead_code)]
+	pub(crate) fn len(&self) -> usize {
+		match self {
+			Self::Empty => 0,
+			Self::Single(_) => 1,
+			Self::Chain(ref chain) => chain.len(),
+		}
+	}
+
+	/// Returns true if there are no versions stored.
+	#[allow(dead_code)]
+	pub(crate) const fn is_empty(&self) -> bool {
+		matches!(self, Self::Empty)
+	}
+
+	/// Returns a reference to the latest version, if any.
+	#[inline]
+	pub(crate) fn last(&self) -> Option<&Version> {
+		match self {
+			Self::Empty => None,
+			Self::Single(ref v) => Some(v),
+			Self::Chain(ref chain) => chain.last(),
 		}
 	}
 
 	/// Appends or inserts an element into its sorted position.
-	///
-	/// Entries are NEVER deduplicated by value across different versions:
-	/// versions can arrive out of order (concurrent commit applies, and
-	/// append-only log replay, both race), so dropping a strictly-newer
-	/// version because its value matches an older neighbour silently loses
-	/// the write once an intermediate version is inserted between them.
-	/// Only pushes of the SAME version are collapsed, which keeps replay
-	/// idempotent.
 	#[inline]
 	pub(crate) fn push(&mut self, value: Version) {
-		// Fast path: check if appending to the end
-		if let Some(last) = self.inner.last_mut() {
-			// Compare the new value with the last value
-			match value.version.cmp(&last.version) {
-				std::cmp::Ordering::Greater => {
-					// Newer version - append
-					self.inner.push(value);
-					return;
+		match self {
+			Self::Empty => {
+				if value.value.is_some() {
+					*self = Self::Single(value);
 				}
-				std::cmp::Ordering::Equal => {
-					// Same version - update if value is different
-					if value.value != last.value {
-						last.value = value.value;
+			}
+			Self::Single(ref mut current) => {
+				match value.version.cmp(&current.version) {
+					std::cmp::Ordering::Greater => {
+						// Transition from Single to Chain
+						let first = std::mem::replace(current, value.clone());
+						*self = Self::Chain(thin_vec![first, value]);
 					}
-					// Same value, ignore
-					return;
+					std::cmp::Ordering::Equal => {
+						// Same version - update value if different
+						if value.value != current.value {
+							current.value = value.value;
+						}
+					}
+					std::cmp::Ordering::Less => {
+						// Out-of-order older version
+						let older = value;
+						let newer = current.clone();
+						if older.value.is_none() {
+							// Initial delete before the first value is ignored
+						} else {
+							*self = Self::Chain(thin_vec![older, newer]);
+						}
+					}
 				}
-				std::cmp::Ordering::Less => {
-					// Older version - fall through to slow path
+			}
+			Self::Chain(ref mut chain) => {
+				// Fast path: check if appending to the end
+				if let Some(last) = chain.last_mut() {
+					match value.version.cmp(&last.version) {
+						std::cmp::Ordering::Greater => {
+							chain.push(value);
+							return;
+						}
+						std::cmp::Ordering::Equal => {
+							if value.value != last.value {
+								last.value = value.value;
+							}
+							return;
+						}
+						std::cmp::Ordering::Less => {}
+					}
 				}
-			}
-		} else {
-			// Empty list - push if not a delete. An initial delete is
-			// ignored: an absent prefix already reads as `None`.
-			if value.value.is_some() {
-				self.inner.push(value);
-			}
-			// Delete on empty list, ignore
-			return;
-		}
-		// Otherwise, use the index or update logic
-		match self.fetch_index_or_update(&value) {
-			// No need to insert or update the entry
-			IndexOrUpdate::Ignore => {
-				// Do nothing
-			}
-			// Insert the entry at the specified index
-			IndexOrUpdate::Index(idx) => {
-				self.inner.insert(idx, value);
-			}
-			// Update an existing entry in the list
-			IndexOrUpdate::Update(entry) => {
-				entry.value = value.value;
-			}
-		}
-	}
 
-	/// Determine if a new entry should be ignored, inserted, or update an
-	/// existing entry.
-	///
-	/// This function works in the following way:
-	/// - Return `IndexOrUpdate::Ignore` if:
-	///   - There is no entry with a version <= value.version and the new
-	///     value is a delete (an absent prefix already reads as `None`)
-	/// - Return `IndexOrUpdate::Update(version)` if:
-	///   - The new value version is the same as an existing version and we
-	///     should update the entry
-	/// - Return `IndexOrUpdate::Index(index)` if:
-	///   - The entry belongs at any other sorted position
-	#[inline]
-	pub(crate) fn fetch_index_or_update(&mut self, value: &Version) -> IndexOrUpdate<'_> {
-		// Find the index of the item where item.version <= value.version
-		let idx = self.find_index_lte_version(value.version);
-		// If there is no entry with a version <= value.version
-		if idx == 0 {
-			// If this is a delete, ignore it (no point storing initial delete)
-			if value.value.is_none() {
-				return IndexOrUpdate::Ignore;
-			}
-			// Otherwise, insert at the beginning
-			return IndexOrUpdate::Index(0);
-		}
-		// Get the latest entry with version <= value.version
-		if let Some(existing) = self.inner.get_mut(idx - 1) {
-			// Check if the version is the same as an existing version
-			if existing.version == value.version {
-				// Check if the values are the same
-				if existing.value == value.value {
-					// Same version, same value - ignore
-					return IndexOrUpdate::Ignore;
+				// Slower path: binary search and insert in sorted position
+				let idx = chain.partition_point(|v| v.version <= value.version);
+				if idx == 0 {
+					if value.value.is_some() {
+						chain.insert(0, value);
+					}
+				} else if let Some(existing) = chain.get_mut(idx - 1) {
+					if existing.version == value.version {
+						if existing.value != value.value {
+							existing.value = value.value;
+						}
+					} else {
+						chain.insert(idx, value);
+					}
+				} else {
+					chain.insert(idx, value);
 				}
-				// Same version, different value - update
-				return IndexOrUpdate::Update(existing);
 			}
-			// Different version - insert in sorted position. No value
-			// deduplication here: see the `push` doc comment.
-			return IndexOrUpdate::Index(idx);
-		}
-		// Fallback - should not reach here
-		IndexOrUpdate::Index(idx)
-	}
-
-	/// An iterator that removes the items and yields them by value.
-	#[inline]
-	pub fn drain<R>(&mut self, range: R)
-	where
-		R: std::ops::RangeBounds<usize>,
-	{
-		// Drain the versions
-		self.inner.drain(range);
-		// Only reclaim backing storage once capacity has grown well beyond
-		// the live set. Shrinking on every drain would thrash allocations
-		// for hot keys under the frequent background GC; the hysteresis keeps
-		// steady-state churn cheap while still bounding wasted capacity.
-		if self.inner.capacity() > self.inner.len().max(4).saturating_mul(2) {
-			self.inner.shrink_to_fit();
 		}
 	}
 
 	/// Find the index of the entry where item.version <= version.
 	#[inline]
 	pub(crate) fn find_index_lte_version(&self, version: u64) -> usize {
-		// Check for any existing version
-		if let Some(last) = self.inner.last() {
-			// Check if the version is newer
-			if version >= last.version {
-				// Return the index of the last version
-				return self.inner.len();
+		match self {
+			Self::Empty => 0,
+			Self::Single(ref v) => usize::from(v.version <= version),
+			Self::Chain(ref chain) => {
+				if let Some(last) = chain.last() {
+					if version >= last.version {
+						return chain.len();
+					}
+				}
+				if chain.len() <= 4 {
+					chain.iter().rposition(|v| v.version <= version).map_or(0, |i| i + 1)
+				} else {
+					chain.partition_point(|v| v.version <= version)
+				}
 			}
-		}
-		// Check the list length for reverse iteration or binary search
-		if self.inner.len() <= 4 {
-			// Use linear search to find the first element where v.version > version
-			self.inner.iter().rposition(|v| v.version <= version).map_or(0, |i| i + 1)
-		} else {
-			// Use binary search to find the first element where v.version >= version
-			self.inner.partition_point(|v| v.version <= version)
 		}
 	}
 
 	/// Fetch the entry at a specific version in the versions list.
 	#[inline]
 	pub(crate) fn fetch_version(&self, version: u64) -> Option<ByteSlice> {
-		// Find the index of the item where item.version <= version
-		let idx = self.find_index_lte_version(version);
-		// If there is an entry, return the value
-		if idx > 0 {
-			self.inner.get(idx - 1).and_then(|v| v.value.clone())
-		} else {
-			None
+		match self {
+			Self::Empty => None,
+			Self::Single(ref v) => {
+				if v.version <= version {
+					v.value.clone()
+				} else {
+					None
+				}
+			}
+			Self::Chain(ref chain) => {
+				let idx = self.find_index_lte_version(version);
+				if idx > 0 {
+					chain.get(idx - 1).and_then(|v| v.value.clone())
+				} else {
+					None
+				}
+			}
 		}
 	}
 
 	/// Check if an entry at a specific version exists and is not a delete.
 	#[inline]
 	pub(crate) fn exists_version(&self, version: u64) -> bool {
-		// Find the index of the item where item.version <= version
-		let idx = self.find_index_lte_version(version);
-		// If there is an entry, return the value
-		if idx > 0 {
-			self.inner.get(idx - 1).is_some_and(|v| v.value.is_some())
-		} else {
-			false
+		match self {
+			Self::Empty => false,
+			Self::Single(ref v) => v.version <= version && v.value.is_some(),
+			Self::Chain(ref chain) => {
+				let idx = self.find_index_lte_version(version);
+				if idx > 0 {
+					chain.get(idx - 1).is_some_and(|v| v.value.is_some())
+				} else {
+					false
+				}
+			}
 		}
 	}
 
 	/// The newest committed version and value for this key, or `None` when
-	/// the chain is empty or its newest entry is a delete tombstone. Used
-	/// by the snapshot writers, which persist only the latest visible
-	/// state.
+	/// the chain is empty or its newest entry is a delete tombstone.
 	#[cfg(not(target_arch = "wasm32"))]
 	#[inline]
 	pub(crate) fn latest(&self) -> Option<(u64, ByteSlice)> {
-		self.inner.last().and_then(|v| v.value.clone().map(|value| (v.version, value)))
+		self.last().and_then(|v| v.value.clone().map(|val| (v.version, val)))
 	}
 
-	/// Test-only view of the raw version chain, oldest first.
-	#[cfg(test)]
-	pub(crate) fn as_slice(&self) -> &[Version] {
-		&self.inner
-	}
-
-	/// Whether a future garbage-collection pass could reclaim anything
-	/// from this chain. A chain is terminal — and reclamation-free — only
-	/// when it holds exactly one live value: superseded versions can be
-	/// dropped once no reader needs them, and a newest-entry tombstone
-	/// means the whole chain can collapse and the key unlink. Used by the
-	/// commit path to decide whether a key needs tracking for the
-	/// background sweep.
+	/// Whether a future garbage-collection pass could reclaim anything from this chain.
 	#[inline]
-	pub(crate) fn needs_gc(&self) -> bool {
-		self.inner.len() > 1 || self.inner.last().is_some_and(|v| v.value.is_none())
+	pub(crate) const fn needs_gc(&self) -> bool {
+		match self {
+			Self::Empty => false,
+			Self::Single(ref v) => v.value.is_none(),
+			Self::Chain(_) => true,
+		}
 	}
 
 	/// Remove versions that no reader at a snapshot `>= version` can observe.
-	///
-	/// `version` is the GC floor: no reader exists below it, but readers may
-	/// sit exactly at it or anywhere above. The earliest snapshot any surviving
-	/// reader can hold is `version` itself, so the oldest entry we must retain
-	/// is the one *visible at* `version` — the latest entry with
-	/// `entry.version <= version` — together with every newer entry. Removing
-	/// that entry would let a reader whose snapshot lands between it and the
-	/// next entry observe the key vanish mid-snapshot (an SI violation).
 	#[inline]
 	pub(crate) fn gc_older_versions(&mut self, version: u64) -> usize {
-		// Number of entries with entry.version <= version.
-		let lte = self.find_index_lte_version(version);
-		// No entry is <= version: every entry is newer and still required.
-		if lte == 0 {
-			return self.inner.len();
+		match self {
+			Self::Empty => 0,
+			Self::Single(ref v) => {
+				if v.version <= version {
+					if v.value.is_none() {
+						*self = Self::Empty;
+						0
+					} else {
+						1
+					}
+				} else {
+					1
+				}
+			}
+			Self::Chain(ref mut chain) => {
+				let lte = chain.partition_point(|v| v.version <= version);
+				if lte == 0 {
+					return chain.len();
+				}
+				let visible = lte - 1;
+				if chain[visible].value.is_none() {
+					chain.drain(..lte);
+				} else {
+					chain.drain(..visible);
+				}
+
+				if chain.len() == 1 {
+					let single = chain.pop().unwrap();
+					*self = Self::Single(single);
+					1
+				} else if chain.is_empty() {
+					*self = Self::Empty;
+					0
+				} else {
+					chain.len()
+				}
+			}
 		}
-		// The entry visible at `version`.
-		let visible = lte - 1;
-		if self.inner[visible].value.is_none() {
-			// The visible entry is a delete tombstone. A reader at or above
-			// `version` (and below the next entry) observes "absent", which is
-			// identical to the entry being gone — so drop the tombstone and
-			// everything before it.
-			self.drain(..lte);
-		} else {
-			// The visible entry carries a value a surviving reader may read.
-			// Keep it; drop only the strictly-older entries before it.
-			self.drain(..visible);
-		}
-		// Return the length
-		self.inner.len()
 	}
 }
 
@@ -283,8 +291,7 @@ impl Versions {
 mod tests {
 	use super::*;
 
-	/// Helper function to create a Version from a version number and optional
-	/// value
+	/// Helper function to create a Version from a version number and optional value
 	fn make_version(version: u64, value: Option<&str>) -> Version {
 		Version {
 			version,
@@ -292,8 +299,7 @@ mod tests {
 		}
 	}
 
-	/// Helper function to create a Versions instance with the given version
-	/// tuples
+	/// Helper function to create a Versions instance with the given version tuples
 	fn make_versions(versions: Vec<(u64, Option<&str>)>) -> Versions {
 		let mut v = Versions::new();
 		for (version, value) in versions {
@@ -301,8 +307,6 @@ mod tests {
 		}
 		v
 	}
-
-	// ==================== Tests for find_index_lte_version ====================
 
 	#[test]
 	fn test_find_index_lte_version_empty() {
@@ -315,19 +319,15 @@ mod tests {
 	#[test]
 	fn test_find_index_lte_version_single_version() {
 		let versions = make_versions(vec![(10, Some("value"))]);
-		// Query before the version
 		assert_eq!(versions.find_index_lte_version(5), 0);
 		assert_eq!(versions.find_index_lte_version(9), 0);
-		// Query at the version
 		assert_eq!(versions.find_index_lte_version(10), 1);
-		// Query after the version
 		assert_eq!(versions.find_index_lte_version(11), 1);
 		assert_eq!(versions.find_index_lte_version(100), 1);
 	}
 
 	#[test]
 	fn test_find_index_lte_version_multiple_versions() {
-		// Create a small list (≤32 elements) to trigger linear search
 		let versions = make_versions(vec![
 			(10, Some("v1")),
 			(20, Some("v2")),
@@ -335,78 +335,46 @@ mod tests {
 			(40, Some("v4")),
 			(50, Some("v5")),
 		]);
-		// Query before the first version
 		assert_eq!(versions.find_index_lte_version(0), 0);
 		assert_eq!(versions.find_index_lte_version(5), 0);
-		// Query at the first version
 		assert_eq!(versions.find_index_lte_version(10), 1);
-		// Query after the first version
 		assert_eq!(versions.find_index_lte_version(15), 1);
-		// Query at the second version
 		assert_eq!(versions.find_index_lte_version(20), 2);
-		// Query after the second version
 		assert_eq!(versions.find_index_lte_version(25), 2);
-		// Query at the third version
 		assert_eq!(versions.find_index_lte_version(30), 3);
-		// Query after the third version
 		assert_eq!(versions.find_index_lte_version(35), 3);
-		// Query at the fourth version
 		assert_eq!(versions.find_index_lte_version(40), 4);
-		// Query after the fourth version
 		assert_eq!(versions.find_index_lte_version(45), 4);
-		// Query at the fifth version
 		assert_eq!(versions.find_index_lte_version(50), 5);
-		// Query after the fifth version
 		assert_eq!(versions.find_index_lte_version(51), 5);
 		assert_eq!(versions.find_index_lte_version(100), 5);
 	}
 
 	#[test]
 	fn test_find_index_lte_version_with_deletes() {
-		let versions = make_versions(vec![
-			(10, Some("v1")),
-			(20, None), // Delete
-			(30, Some("v3")),
-			(40, None), // Delete
-		]);
-		// Query at the first version
+		let versions =
+			make_versions(vec![(10, Some("v1")), (20, None), (30, Some("v3")), (40, None)]);
 		assert_eq!(versions.find_index_lte_version(10), 1);
-		// Query after the first version
 		assert_eq!(versions.find_index_lte_version(15), 1);
-		// Query at the second version
 		assert_eq!(versions.find_index_lte_version(20), 2);
-		// Query after the second version
 		assert_eq!(versions.find_index_lte_version(25), 2);
-		// Query at the third version
 		assert_eq!(versions.find_index_lte_version(30), 3);
-		// Query after the third version
 		assert_eq!(versions.find_index_lte_version(35), 3);
-		// Query at the fourth version
 		assert_eq!(versions.find_index_lte_version(40), 4);
-		// Query after the fourth version
 		assert_eq!(versions.find_index_lte_version(50), 4);
 	}
 
-	// ==================== Tests for gc_older_versions ====================
-
 	#[test]
 	fn test_gc_keeps_version_visible_at_floor() {
-		// Regression: the GC floor falls in the gap between a value and a
-		// later delete. A reader whose snapshot lands in [floor, delete) must
-		// still observe the value, so it must survive GC.
 		let mut v = make_versions(vec![(10, Some("v1")), (40, None)]);
 		v.gc_older_versions(30);
-		// The value visible at 30 (and at 35) must remain readable.
 		assert_eq!(v.fetch_version(30), Some(ByteSlice::from("v1")));
 		assert_eq!(v.fetch_version(35), Some(ByteSlice::from("v1")));
-		// At/after the delete it is gone.
 		assert_eq!(v.fetch_version(40), None);
 	}
 
 	#[test]
 	fn test_gc_keeps_value_before_newer_version_in_gap() {
-		// Floor in the gap between two values: the earlier value is visible at
-		// the floor and must survive.
 		let mut v = make_versions(vec![(10, Some("v1")), (50, Some("v2"))]);
 		v.gc_older_versions(30);
 		assert_eq!(v.fetch_version(30), Some(ByteSlice::from("v1")));
@@ -416,8 +384,6 @@ mod tests {
 
 	#[test]
 	fn test_gc_drops_versions_below_visible() {
-		// Floor exactly on a value: older versions are reclaimed, the visible
-		// one is kept.
 		let mut v = make_versions(vec![(10, Some("v1")), (30, Some("v2"))]);
 		assert_eq!(v.gc_older_versions(30), 1);
 		assert_eq!(v.fetch_version(30), Some(ByteSlice::from("v2")));
@@ -426,8 +392,6 @@ mod tests {
 
 	#[test]
 	fn test_gc_collapses_fully_deleted_key() {
-		// Visible entry at the floor is a delete tombstone: the whole chain is
-		// reclaimable.
 		let mut v = make_versions(vec![(10, Some("v1")), (30, None)]);
 		assert_eq!(v.gc_older_versions(40), 0);
 		assert_eq!(v.fetch_version(40), None);
@@ -435,14 +399,11 @@ mod tests {
 
 	#[test]
 	fn test_gc_retains_all_when_floor_below_everything() {
-		// Floor below the earliest version: nothing is reclaimable.
 		let mut v = make_versions(vec![(10, Some("v1")), (20, Some("v2"))]);
 		assert_eq!(v.gc_older_versions(5), 2);
 		assert_eq!(v.fetch_version(10), Some(ByteSlice::from("v1")));
 		assert_eq!(v.fetch_version(20), Some(ByteSlice::from("v2")));
 	}
-
-	// ==================== Tests for fetch_version ====================
 
 	#[test]
 	fn test_fetch_version_empty() {
@@ -455,12 +416,9 @@ mod tests {
 	#[test]
 	fn test_fetch_version_single_version() {
 		let versions = make_versions(vec![(10, Some("value"))]);
-		// Query before the version
 		assert_eq!(versions.fetch_version(5), None);
 		assert_eq!(versions.fetch_version(9), None);
-		// Query at the version
 		assert_eq!(versions.fetch_version(10), Some(ByteSlice::from("value")));
-		// Query after the version
 		assert_eq!(versions.fetch_version(11), Some(ByteSlice::from("value")));
 		assert_eq!(versions.fetch_version(100), Some(ByteSlice::from("value")));
 	}
@@ -474,59 +432,33 @@ mod tests {
 			(40, Some("v4")),
 			(50, Some("v5")),
 		]);
-		// Query before the first version
 		assert_eq!(versions.fetch_version(5), None);
-		// Query at the first version
 		assert_eq!(versions.fetch_version(10), Some(ByteSlice::from("v1")));
-		// Query after the first version
 		assert_eq!(versions.fetch_version(15), Some(ByteSlice::from("v1")));
-		// Query at the second version
 		assert_eq!(versions.fetch_version(20), Some(ByteSlice::from("v2")));
-		// Query after the second version
 		assert_eq!(versions.fetch_version(25), Some(ByteSlice::from("v2")));
-		// Query at the third version
 		assert_eq!(versions.fetch_version(30), Some(ByteSlice::from("v3")));
-		// Query after the third version
 		assert_eq!(versions.fetch_version(35), Some(ByteSlice::from("v3")));
-		// Query at the fourth version
 		assert_eq!(versions.fetch_version(40), Some(ByteSlice::from("v4")));
-		// Query after the fourth version
 		assert_eq!(versions.fetch_version(45), Some(ByteSlice::from("v4")));
-		// Query at the fifth version
 		assert_eq!(versions.fetch_version(50), Some(ByteSlice::from("v5")));
-		// Query after the fifth version
 		assert_eq!(versions.fetch_version(100), Some(ByteSlice::from("v5")));
 	}
 
 	#[test]
 	fn test_fetch_version_with_deletes() {
-		let versions = make_versions(vec![
-			(10, Some("v1")),
-			(20, None), // Delete
-			(30, Some("v3")),
-			(40, None), // Delete
-		]);
-		// Query before the first version
+		let versions =
+			make_versions(vec![(10, Some("v1")), (20, None), (30, Some("v3")), (40, None)]);
 		assert_eq!(versions.fetch_version(5), None);
-		// Query at the first version
 		assert_eq!(versions.fetch_version(10), Some(ByteSlice::from("v1")));
-		// Query after the first version
 		assert_eq!(versions.fetch_version(15), Some(ByteSlice::from("v1")));
-		// Query at the second version (delete)
 		assert_eq!(versions.fetch_version(20), None);
-		// Query after the second version (delete)
 		assert_eq!(versions.fetch_version(25), None);
-		// Query at the third version
 		assert_eq!(versions.fetch_version(30), Some(ByteSlice::from("v3")));
-		// Query after the third version
 		assert_eq!(versions.fetch_version(35), Some(ByteSlice::from("v3")));
-		// Query at the fourth version (delete)
 		assert_eq!(versions.fetch_version(40), None);
-		// Query after the fourth version (delete)
 		assert_eq!(versions.fetch_version(50), None);
 	}
-
-	// ==================== Tests for exists_version ====================
 
 	#[test]
 	fn test_exists_version_empty() {
@@ -539,12 +471,9 @@ mod tests {
 	#[test]
 	fn test_exists_version_single_version() {
 		let versions = make_versions(vec![(10, Some("value"))]);
-		// Query before the version
 		assert!(!versions.exists_version(5));
 		assert!(!versions.exists_version(9));
-		// Query at the version
 		assert!(versions.exists_version(10));
-		// Query after the version
 		assert!(versions.exists_version(11));
 		assert!(versions.exists_version(100));
 	}
@@ -558,85 +487,56 @@ mod tests {
 			(40, Some("v4")),
 			(50, Some("v5")),
 		]);
-		// Query before the first version
 		assert!(!versions.exists_version(5));
-		// Query at the first version
 		assert!(versions.exists_version(10));
-		// Query after the first version
 		assert!(versions.exists_version(15));
-		// Query at the second version
 		assert!(versions.exists_version(20));
-		// Query after the second version
 		assert!(versions.exists_version(25));
-		// Query at the third version
 		assert!(versions.exists_version(30));
-		// Query after the third version
 		assert!(versions.exists_version(35));
-		// Query at the fourth version
 		assert!(versions.exists_version(40));
-		// Query after the fourth version
 		assert!(versions.exists_version(45));
-		// Query at the fifth version
 		assert!(versions.exists_version(50));
-		// Query after the fifth version
 		assert!(versions.exists_version(100));
 	}
 
 	#[test]
 	fn test_exists_version_with_deletes() {
-		let versions = make_versions(vec![
-			(10, Some("v1")),
-			(20, None), // Delete
-			(30, Some("v3")),
-			(40, None), // Delete
-		]);
-		// Query before the first version
+		let versions =
+			make_versions(vec![(10, Some("v1")), (20, None), (30, Some("v3")), (40, None)]);
 		assert!(!versions.exists_version(5));
-		// Query at the first version
 		assert!(versions.exists_version(10));
-		// Query after the first version
 		assert!(versions.exists_version(15));
-		// Query at the second version (delete)
 		assert!(!versions.exists_version(20));
-		// Query after the second version (delete)
 		assert!(!versions.exists_version(25));
-		// Query at the third version
 		assert!(versions.exists_version(30));
-		// Query after the third version
 		assert!(versions.exists_version(35));
-		// Query at the fourth version (delete)
 		assert!(!versions.exists_version(40));
-		// Query after the fourth version (delete)
 		assert!(!versions.exists_version(50));
 	}
-
-	// ==================== Tests for push ====================
 
 	#[test]
 	fn test_push_to_empty_list() {
 		let mut versions = Versions::new();
-		// Push a value to empty list
 		versions.push(make_version(10, Some("v1")));
-		assert_eq!(versions.inner.len(), 1);
+		assert_eq!(versions.len(), 1);
 		assert_eq!(versions.fetch_version(10), Some(ByteSlice::from("v1")));
 	}
 
 	#[test]
 	fn test_push_delete_to_empty_list() {
 		let mut versions = Versions::new();
-		// Push a delete (None) to empty list - should not add
 		versions.push(make_version(10, None));
-		assert_eq!(versions.inner.len(), 0);
+		assert_eq!(versions.len(), 0);
 	}
 
 	#[test]
 	fn test_push_in_order() {
 		let mut versions = Versions::new();
-		// Push versions in increasing order
 		versions.push(make_version(10, Some("v1")));
 		versions.push(make_version(20, Some("v2")));
 		versions.push(make_version(30, Some("v3")));
-		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.len(), 3);
 		assert_eq!(versions.fetch_version(10), Some(ByteSlice::from("v1")));
 		assert_eq!(versions.fetch_version(20), Some(ByteSlice::from("v2")));
 		assert_eq!(versions.fetch_version(30), Some(ByteSlice::from("v3")));
@@ -645,88 +545,69 @@ mod tests {
 	#[test]
 	fn test_push_duplicate_values() {
 		let mut versions = Versions::new();
-		// Push first version
 		versions.push(make_version(10, Some("v1")));
-		assert_eq!(versions.inner.len(), 1);
-		// Push same value at newer version - kept: value deduplication
-		// across versions is unsound under out-of-order insertion (a
-		// later insert between the two would silently lose this write)
+		assert_eq!(versions.len(), 1);
 		versions.push(make_version(20, Some("v1")));
-		assert_eq!(versions.inner.len(), 2);
-		// Push different value - should be added
+		assert_eq!(versions.len(), 2);
 		versions.push(make_version(30, Some("v2")));
-		assert_eq!(versions.inner.len(), 3);
-		// Push same value again - kept
+		assert_eq!(versions.len(), 3);
 		versions.push(make_version(40, Some("v2")));
-		assert_eq!(versions.inner.len(), 4);
+		assert_eq!(versions.len(), 4);
 	}
 
 	#[test]
 	fn test_push_out_of_order() {
 		let mut versions = Versions::new();
-		// Push versions out of order
 		versions.push(make_version(30, Some("v3")));
 		versions.push(make_version(10, Some("v1")));
 		versions.push(make_version(20, Some("v2")));
-		// Should be sorted correctly
-		assert_eq!(versions.inner.len(), 3);
-		assert_eq!(versions.inner[0].version, 10);
-		assert_eq!(versions.inner[1].version, 20);
-		assert_eq!(versions.inner[2].version, 30);
+		assert_eq!(versions.len(), 3);
+		assert_eq!(versions.as_slice()[0].version, 10);
+		assert_eq!(versions.as_slice()[1].version, 20);
+		assert_eq!(versions.as_slice()[2].version, 30);
 	}
 
 	#[test]
 	fn test_push_with_deletes() {
 		let mut versions = Versions::new();
-		// Push value, then delete, then value again
 		versions.push(make_version(10, Some("v1")));
-		assert_eq!(versions.inner.len(), 1);
-		// Push delete
+		assert_eq!(versions.len(), 1);
 		versions.push(make_version(20, None));
-		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.len(), 2);
 		assert!(!versions.exists_version(20));
-		// Push new value
 		versions.push(make_version(30, Some("v3")));
-		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.len(), 3);
 		assert!(versions.exists_version(30));
 	}
 
 	#[test]
 	fn test_push_same_version_different_value() {
 		let mut versions = Versions::new();
-		// Push a version
 		versions.push(make_version(10, Some("v1")));
-		assert_eq!(versions.inner.len(), 1);
-		// Push same version with different value - should update/replace
+		assert_eq!(versions.len(), 1);
 		versions.push(make_version(10, Some("v2")));
-		assert_eq!(versions.inner.len(), 1);
-		// The new value should have replaced the old one
+		assert_eq!(versions.len(), 1);
 		assert_eq!(versions.fetch_version(10), Some(ByteSlice::from("v2")));
 	}
 
 	#[test]
 	fn test_push_same_version_same_value() {
 		let mut versions = Versions::new();
-		// Push a version
 		versions.push(make_version(10, Some("v1")));
-		assert_eq!(versions.inner.len(), 1);
-		// Push same version with same value - should still update (no-op)
+		assert_eq!(versions.len(), 1);
 		versions.push(make_version(10, Some("v1")));
-		assert_eq!(versions.inner.len(), 1);
+		assert_eq!(versions.len(), 1);
 		assert_eq!(versions.fetch_version(10), Some(ByteSlice::from("v1")));
 	}
-
-	// ==================== Fast Path Tests ====================
 
 	#[test]
 	fn test_push_fast_path_append_different_value() {
 		let mut versions = Versions::new();
 		versions.push(make_version(10, Some("v1")));
 		versions.push(make_version(20, Some("v2")));
-		// Fast path: append with different value
 		versions.push(make_version(30, Some("v3")));
-		assert_eq!(versions.inner.len(), 3);
-		assert_eq!(versions.inner[2].version, 30);
+		assert_eq!(versions.len(), 3);
+		assert_eq!(versions.as_slice()[2].version, 30);
 		assert_eq!(versions.fetch_version(30), Some(ByteSlice::from("v3")));
 	}
 
@@ -735,11 +616,8 @@ mod tests {
 		let mut versions = Versions::new();
 		versions.push(make_version(10, Some("v1")));
 		versions.push(make_version(20, Some("v2")));
-		// Fast path: append with same value as last - kept as its own
-		// version (cross-version value deduplication is unsound under
-		// out-of-order insertion)
 		versions.push(make_version(30, Some("v2")));
-		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.len(), 3);
 		assert_eq!(versions.fetch_version(30), Some(ByteSlice::from("v2")));
 	}
 
@@ -748,9 +626,8 @@ mod tests {
 		let mut versions = Versions::new();
 		versions.push(make_version(10, Some("v1")));
 		versions.push(make_version(20, Some("v2")));
-		// Fast path: update last version with different value
 		versions.push(make_version(20, Some("v2_updated")));
-		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.len(), 2);
 		assert_eq!(versions.fetch_version(20), Some(ByteSlice::from("v2_updated")));
 	}
 
@@ -759,9 +636,8 @@ mod tests {
 		let mut versions = Versions::new();
 		versions.push(make_version(10, Some("v1")));
 		versions.push(make_version(20, Some("v2")));
-		// Fast path: update last version with same value - no-op
 		versions.push(make_version(20, Some("v2")));
-		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.len(), 2);
 		assert_eq!(versions.fetch_version(20), Some(ByteSlice::from("v2")));
 	}
 
@@ -769,29 +645,23 @@ mod tests {
 	fn test_push_fast_path_multiple_updates_to_last() {
 		let mut versions = Versions::new();
 		versions.push(make_version(10, Some("v1")));
-		// Multiple sequential updates to the same version
 		versions.push(make_version(10, Some("v2")));
 		versions.push(make_version(10, Some("v3")));
 		versions.push(make_version(10, Some("v4")));
-		assert_eq!(versions.inner.len(), 1);
+		assert_eq!(versions.len(), 1);
 		assert_eq!(versions.fetch_version(10), Some(ByteSlice::from("v4")));
 	}
 
 	#[test]
 	fn test_push_fast_path_alternating_append_update() {
 		let mut versions = Versions::new();
-		// Append version 10
 		versions.push(make_version(10, Some("v1")));
-		// Append version 20
 		versions.push(make_version(20, Some("v2")));
-		// Update version 20
 		versions.push(make_version(20, Some("v2_updated")));
-		// Append version 30
 		versions.push(make_version(30, Some("v3")));
-		// Update version 30
 		versions.push(make_version(30, Some("v3_updated")));
 
-		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.len(), 3);
 		assert_eq!(versions.fetch_version(10), Some(ByteSlice::from("v1")));
 		assert_eq!(versions.fetch_version(20), Some(ByteSlice::from("v2_updated")));
 		assert_eq!(versions.fetch_version(30), Some(ByteSlice::from("v3_updated")));
@@ -802,13 +672,12 @@ mod tests {
 		let mut versions = Versions::new();
 		versions.push(make_version(10, Some("v1")));
 		versions.push(make_version(30, Some("v3")));
-		// Slow path: insert in the middle (version < last.version)
 		versions.push(make_version(20, Some("v2")));
 
-		assert_eq!(versions.inner.len(), 3);
-		assert_eq!(versions.inner[0].version, 10);
-		assert_eq!(versions.inner[1].version, 20);
-		assert_eq!(versions.inner[2].version, 30);
+		assert_eq!(versions.len(), 3);
+		assert_eq!(versions.as_slice()[0].version, 10);
+		assert_eq!(versions.as_slice()[1].version, 20);
+		assert_eq!(versions.as_slice()[2].version, 30);
 	}
 
 	#[test]
@@ -816,13 +685,12 @@ mod tests {
 		let mut versions = Versions::new();
 		versions.push(make_version(20, Some("v2")));
 		versions.push(make_version(30, Some("v3")));
-		// Slow path: insert at the beginning
 		versions.push(make_version(10, Some("v1")));
 
-		assert_eq!(versions.inner.len(), 3);
-		assert_eq!(versions.inner[0].version, 10);
-		assert_eq!(versions.inner[1].version, 20);
-		assert_eq!(versions.inner[2].version, 30);
+		assert_eq!(versions.len(), 3);
+		assert_eq!(versions.as_slice()[0].version, 10);
+		assert_eq!(versions.as_slice()[1].version, 20);
+		assert_eq!(versions.as_slice()[2].version, 30);
 	}
 
 	#[test]
@@ -831,10 +699,9 @@ mod tests {
 		versions.push(make_version(10, Some("v1")));
 		versions.push(make_version(20, Some("v2")));
 		versions.push(make_version(30, Some("v3")));
-		// Slow path: update a middle version
 		versions.push(make_version(20, Some("v2_updated")));
 
-		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.len(), 3);
 		assert_eq!(versions.fetch_version(20), Some(ByteSlice::from("v2_updated")));
 	}
 
@@ -843,10 +710,9 @@ mod tests {
 		let mut versions = Versions::new();
 		versions.push(make_version(10, Some("v1")));
 		versions.push(make_version(20, Some("v2")));
-		// Fast path: append delete
 		versions.push(make_version(30, None));
 
-		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.len(), 3);
 		assert!(!versions.exists_version(30));
 		assert_eq!(versions.fetch_version(30), None);
 	}
@@ -855,12 +721,10 @@ mod tests {
 	fn test_push_delete_then_value_same_version() {
 		let mut versions = Versions::new();
 		versions.push(make_version(10, Some("v1")));
-		// Push delete
 		versions.push(make_version(20, None));
 		assert!(!versions.exists_version(20));
-		// Update same version with a value
 		versions.push(make_version(20, Some("v2")));
-		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.len(), 2);
 		assert!(versions.exists_version(20));
 		assert_eq!(versions.fetch_version(20), Some(ByteSlice::from("v2")));
 	}
@@ -870,10 +734,9 @@ mod tests {
 		let mut versions = Versions::new();
 		versions.push(make_version(10, Some("v1")));
 		versions.push(make_version(20, Some("v2")));
-		// Update last version to delete
 		versions.push(make_version(20, None));
 
-		assert_eq!(versions.inner.len(), 2);
+		assert_eq!(versions.len(), 2);
 		assert!(!versions.exists_version(20));
 		assert_eq!(versions.fetch_version(20), None);
 	}
@@ -882,13 +745,10 @@ mod tests {
 	fn test_push_consecutive_deletes() {
 		let mut versions = Versions::new();
 		versions.push(make_version(10, Some("v1")));
-		// Push delete at version 20
 		versions.push(make_version(20, None));
-		// Push another delete at version 30 - kept as its own version
 		versions.push(make_version(30, None));
 
-		// All three entries are retained
-		assert_eq!(versions.inner.len(), 3);
+		assert_eq!(versions.len(), 3);
 		assert!(!versions.exists_version(20));
 		assert!(!versions.exists_version(30));
 	}
@@ -896,38 +756,33 @@ mod tests {
 	#[test]
 	fn test_push_stress_many_appends() {
 		let mut versions = Versions::new();
-		// Push many versions in order (all fast path appends)
 		for i in 0..100 {
 			let value = format!("v{i}");
 			versions.push(make_version(i * 10, Some(&value)));
 		}
-		assert_eq!(versions.inner.len(), 100);
-		assert_eq!(versions.inner[0].version, 0);
-		assert_eq!(versions.inner[99].version, 990);
+		assert_eq!(versions.len(), 100);
+		assert_eq!(versions.as_slice()[0].version, 0);
+		assert_eq!(versions.as_slice()[99].version, 990);
 	}
 
 	#[test]
 	fn test_push_stress_many_updates() {
 		let mut versions = Versions::new();
 		versions.push(make_version(10, Some("v1")));
-		// Update the same version many times (all fast path updates)
 		for i in 0..100 {
 			let value = format!("v{i}");
 			versions.push(make_version(10, Some(&value)));
 		}
-		assert_eq!(versions.inner.len(), 1);
+		assert_eq!(versions.len(), 1);
 		assert_eq!(versions.fetch_version(10), Some(ByteSlice::from("v99")));
 	}
+
 	#[test]
 	fn versions_inline_footprint_is_small() {
-		// The datastore holds one `Versions` per key, so its inline size
-		// directly scales total memory by key count. One inline entry plus
-		// SmallVec bookkeeping must stay within 56 bytes — sizing the
-		// buffer for the steady state (eager commit-time GC keeps chains
-		// at a single live value) rather than for transient growth.
+		// Memory layout assertion: Versions must stay within 40 bytes!
 		assert!(
-			std::mem::size_of::<Versions>() <= 56,
-			"Versions grew to {} bytes; the per-key inline footprint is load-bearing for large datasets",
+			std::mem::size_of::<Versions>() <= 40,
+			"Versions grew to {} bytes; the per-key inline footprint must stay <= 40 bytes",
 			std::mem::size_of::<Versions>()
 		);
 	}

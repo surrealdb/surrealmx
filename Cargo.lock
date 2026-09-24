@@ -766,9 +766,6 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "surrealmx"
@@ -787,8 +784,8 @@ dependencies = [
  "parking_lot",
  "rand",
  "serde",
- "smallvec",
  "tempfile",
+ "thin-vec",
  "thiserror",
  "tracing",
  "wasm-bindgen-test",
@@ -829,6 +826,12 @@ dependencies = [
  "rustix",
  "windows-sys",
 ]
+
+[[package]]
+name = "thin-vec"
+version = "0.2.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4568d7e143ec86d2021c338bae2afa88699e84b8e0af523626654fe6f03a1748"
 
 [[package]]
 name = "thiserror"

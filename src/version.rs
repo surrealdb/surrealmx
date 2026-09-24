@@ -17,7 +17,7 @@
 use byteslice::ByteSlice;
 use std::cmp::Ordering;
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Version {
 	/// The version of this entry
 	pub(crate) version: u64,
