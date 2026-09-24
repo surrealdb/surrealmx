@@ -253,15 +253,17 @@ impl Database {
 		let key = key.into_bytes();
 		let val = val.into_bytes();
 
-		let commit_slot = self.inner.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1;
-		let version = self.inner.oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
-		self.inner.oracle.timestamp.fetch_max(version, Ordering::SeqCst);
-		self.inner.merge_retire_id.fetch_max(version, Ordering::SeqCst);
+		let commit_slot = self.inner.transaction_queue_id.fetch_add(1, Ordering::Relaxed) + 1;
+		let version = self.inner.oracle.alloc.fetch_add(1, Ordering::Relaxed) + 1;
+		self.inner.oracle.timestamp.fetch_max(version, Ordering::Release);
+		self.inner.merge_retire_id.fetch_max(version, Ordering::Release);
 
 		let commit = Commit::new_single(key.clone(), version);
 		self.inner.transaction_commit_queue.insert(commit_slot, Arc::new(commit));
-		self.inner.try_advance_commit_prefix();
-		self.inner.advance_commit_watermark();
+		if commit_slot.trailing_zeros() >= 3 {
+			self.inner.try_advance_commit_prefix();
+			self.inner.advance_commit_watermark();
+		}
 
 		#[cfg(not(target_arch = "wasm32"))]
 		{
@@ -327,15 +329,17 @@ impl Database {
 	pub fn del<K: IntoBytes>(&self, key: K) -> Result<(), Error> {
 		let key = key.into_bytes();
 
-		let commit_slot = self.inner.transaction_queue_id.fetch_add(1, Ordering::SeqCst) + 1;
-		let version = self.inner.oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
-		self.inner.oracle.timestamp.fetch_max(version, Ordering::SeqCst);
-		self.inner.merge_retire_id.fetch_max(version, Ordering::SeqCst);
+		let commit_slot = self.inner.transaction_queue_id.fetch_add(1, Ordering::Relaxed) + 1;
+		let version = self.inner.oracle.alloc.fetch_add(1, Ordering::Relaxed) + 1;
+		self.inner.oracle.timestamp.fetch_max(version, Ordering::Release);
+		self.inner.merge_retire_id.fetch_max(version, Ordering::Release);
 
 		let commit = Commit::new_single(key.clone(), version);
 		self.inner.transaction_commit_queue.insert(commit_slot, Arc::new(commit));
-		self.inner.try_advance_commit_prefix();
-		self.inner.advance_commit_watermark();
+		if commit_slot.trailing_zeros() >= 3 {
+			self.inner.try_advance_commit_prefix();
+			self.inner.advance_commit_watermark();
+		}
 
 		#[cfg(not(target_arch = "wasm32"))]
 		{
