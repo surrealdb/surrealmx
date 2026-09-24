@@ -694,6 +694,8 @@ impl TransactionInner {
 		}
 		// Mark this transaction as done
 		self.done = true;
+		// Unpin from readers immediately so queue cleanup and watermarks are unblocked
+		self.database.readers.remove(&self.slot_id);
 		// Clear the transaction state
 		self.clear_read_state();
 		self.writeset.clear();
@@ -789,6 +791,8 @@ impl TransactionInner {
 		// reads: locked reads must be validated at commit even when the
 		// writeset is empty
 		if self.writeset.is_empty() && !self.locked {
+			// Unpin from readers immediately
+			self.database.readers.remove(&self.slot_id);
 			// Clear the transaction state
 			self.clear_read_state();
 			// Clear savepoint stack and undo journal
@@ -881,6 +885,8 @@ impl TransactionInner {
 					// Do not remove the entry here — see the comment
 					// on the writeset-conflict branch above. The
 					// unwind guard marks it aborted on return.
+					// Unpin from readers immediately
+					self.database.readers.remove(&self.slot_id);
 					// Clear the transaction state
 					self.clear_read_state();
 					self.writeset.clear();
@@ -905,6 +911,8 @@ impl TransactionInner {
 						// Do not remove the entry here — see the comment
 						// on the writeset-conflict branch above. The
 						// unwind guard marks it aborted on return.
+						// Unpin from readers immediately
+						self.database.readers.remove(&self.slot_id);
 						// Clear the transaction state
 						self.clear_read_state();
 						self.writeset.clear();
@@ -940,6 +948,8 @@ impl TransactionInner {
 									// comment on the writeset-conflict branch
 									// above. The unwind guard marks it
 									// aborted on return.
+									// Unpin from readers immediately
+									self.database.readers.remove(&self.slot_id);
 									// Clear the transaction state
 									self.clear_read_state();
 									self.writeset.clear();
@@ -975,6 +985,8 @@ impl TransactionInner {
 			commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
 			commit_guard.armed = false;
 			self.database.advance_commit_watermark();
+			// Unpin from readers immediately
+			self.database.readers.remove(&self.slot_id);
 			// Clear the transaction state
 			self.clear_read_state();
 			// Clear savepoint stack and undo journal
@@ -1123,6 +1135,8 @@ impl TransactionInner {
 				// datastore chains already hold this data regardless (the
 				// pre-existing applied-but-unpersisted limitation of this
 				// error path).
+				// Unpin from readers immediately
+				self.database.readers.remove(&self.slot_id);
 				// Clear the transaction state
 				self.clear_read_state();
 				self.writeset.clear();
@@ -1142,6 +1156,8 @@ impl TransactionInner {
 		entry.applied.store(true, Ordering::SeqCst);
 		merge_guard.armed = false;
 		self.database.advance_merge_retirement();
+		// Unpin from readers immediately
+		self.database.readers.remove(&self.slot_id);
 		// Clear the transaction state
 		self.clear_read_state();
 		self.writeset.clear();
@@ -2541,6 +2557,8 @@ impl TransactionInner {
 			{
 				return (slot, Arc::clone(entry.value()));
 			}
+			// Help advance the contiguous published prefix
+			self.database.try_advance_commit_prefix();
 			// Ensure the thread backs off when under contention
 			backoff(spins);
 			// Increase the number loop spins we have attempted
@@ -2583,6 +2601,8 @@ impl TransactionInner {
 			{
 				return (version, Arc::clone(entry.value()));
 			}
+			// Help advance the published merge clock
+			self.database.try_advance_merge_clock();
 			// Ensure the thread backs off when under contention
 			backoff(spins);
 			// Increase the number loop spins we have attempted
