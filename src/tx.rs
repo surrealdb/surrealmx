@@ -460,6 +460,22 @@ impl Transaction {
 // --------------------------------------------------
 
 /// The inner structure of a database transaction
+/// An operation to undo a writeset mutation upon savepoint rollback.
+#[derive(Debug)]
+pub(crate) enum UndoOp {
+	/// The key was not present in the writeset before; remove it on rollback.
+	Remove,
+	/// The key was previously present in the writeset with the given value (or tombstone).
+	Restore(Option<ByteSlice>),
+}
+
+/// An entry in the transaction delta undo journal.
+#[derive(Debug)]
+pub(crate) struct UndoEntry {
+	pub(crate) key: ByteSlice,
+	pub(crate) op: UndoOp,
+}
+
 pub(crate) struct TransactionInner {
 	/// The isolation level of this transaction
 	pub(crate) mode: IsolationLevel,
@@ -499,12 +515,10 @@ pub(crate) struct TransactionInner {
 	pub(crate) slot_id: u64,
 	/// Threshold after which transaction state is reset
 	reset_threshold: usize,
-	/// Stack of writeset snapshots for nested partial rollbacks. Only the
-	/// writeset is captured: plain reads, locked reads, and scans are
-	/// tracked monotonically and are never rewound by a rollback, so a
-	/// surviving write can never depend on a read the transaction has
-	/// forgotten, and a locked key can never be silently unlocked
-	savepoint_stack: Vec<BTreeMap<ByteSlice, Option<ByteSlice>>>,
+	/// Stack of savepoint marks (journal offsets) for nested partial rollbacks.
+	pub(crate) savepoint_stack: Vec<usize>,
+	/// Append-only undo journal of modifications made within active savepoint scopes.
+	pub(crate) undo_journal: Vec<UndoEntry>,
 }
 
 /// Register a transaction in the readers map and choose its snapshot.
@@ -577,6 +591,7 @@ impl TransactionInner {
 			slot_id,
 			reset_threshold: threshold,
 			savepoint_stack: Vec::new(),
+			undo_journal: Vec::new(),
 		}
 	}
 
@@ -610,11 +625,16 @@ impl TransactionInner {
 		} else {
 			self.writeset.clear();
 		}
-		// Clear or completely reset the allocated savepoints
+		// Clear or completely reset the allocated savepoints and undo journal
 		if self.savepoint_stack.len() > threshold {
 			self.savepoint_stack = Vec::new();
 		} else {
 			self.savepoint_stack.clear();
+		}
+		if self.undo_journal.len() > threshold {
+			self.undo_journal = Vec::new();
+		} else {
+			self.undo_journal.clear();
 		}
 		// Reset the transaction
 		self.done = false;
@@ -652,6 +672,20 @@ impl TransactionInner {
 		}
 	}
 
+	#[inline]
+	fn record_undo(&mut self, key: &ByteSlice) {
+		if !self.savepoint_stack.is_empty() {
+			let op = match self.writeset.get(key) {
+				None => UndoOp::Remove,
+				Some(v) => UndoOp::Restore(v.clone()),
+			};
+			self.undo_journal.push(UndoEntry {
+				key: key.clone(),
+				op,
+			});
+		}
+	}
+
 	/// Cancel the transaction and rollback any changes
 	pub fn cancel(&mut self) -> Result<(), Error> {
 		// Check to see if transaction is closed
@@ -663,8 +697,9 @@ impl TransactionInner {
 		// Clear the transaction state
 		self.clear_read_state();
 		self.writeset.clear();
-		// Clear savepoint stack
+		// Clear savepoint stack and undo journal
 		self.savepoint_stack.clear();
+		self.undo_journal.clear();
 		// Continue
 		Ok(())
 	}
@@ -680,8 +715,8 @@ impl TransactionInner {
 		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
-		// Snapshot the writeset for the savepoint
-		self.savepoint_stack.push(self.writeset.clone());
+		// Record the current undo journal mark for O(1) savepoint creation
+		self.savepoint_stack.push(self.undo_journal.len());
 		// Continue
 		Ok(())
 	}
@@ -699,8 +734,23 @@ impl TransactionInner {
 		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
-		// Pop the most recent savepoint and restore the writeset
-		self.writeset = self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
+		// Pop the most recent savepoint mark
+		let mark = self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
+		// Revert writes made since the savepoint mark in reverse order
+		while self.undo_journal.len() > mark {
+			let entry = self.undo_journal.pop().unwrap();
+			match entry.op {
+				UndoOp::Remove => {
+					self.writeset.remove(&entry.key);
+				}
+				UndoOp::Restore(old_val) => {
+					self.writeset.insert(entry.key, old_val);
+				}
+			}
+		}
+		if self.savepoint_stack.is_empty() {
+			self.undo_journal.clear();
+		}
 		// Continue
 		Ok(())
 	}
@@ -718,8 +768,11 @@ impl TransactionInner {
 		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
-		// Discard the most recent savepoint, keeping the current writeset
+		// Discard the most recent savepoint mark, keeping the current writeset
 		self.savepoint_stack.pop().ok_or(Error::NoSavepoint)?;
+		if self.savepoint_stack.is_empty() {
+			self.undo_journal.clear();
+		}
 		// Continue
 		Ok(())
 	}
@@ -738,8 +791,9 @@ impl TransactionInner {
 		if self.writeset.is_empty() && !self.locked {
 			// Clear the transaction state
 			self.clear_read_state();
-			// Clear savepoint stack
+			// Clear savepoint stack and undo journal
 			self.savepoint_stack.clear();
+			self.undo_journal.clear();
 			// Continue
 			return Ok(());
 		}
@@ -809,8 +863,9 @@ impl TransactionInner {
 					// Clear the transaction state
 					self.clear_read_state();
 					self.writeset.clear();
-					// Clear savepoint stack
+					// Clear savepoint stack and undo journal
 					self.savepoint_stack.clear();
+					self.undo_journal.clear();
 					// Return the error for this transaction
 					return Err(Error::KeyWriteConflict);
 				}
@@ -829,8 +884,9 @@ impl TransactionInner {
 					// Clear the transaction state
 					self.clear_read_state();
 					self.writeset.clear();
-					// Clear savepoint stack
+					// Clear savepoint stack and undo journal
 					self.savepoint_stack.clear();
+					self.undo_journal.clear();
 					// Return the error for this transaction
 					return Err(Error::KeyReadConflict);
 				}
@@ -852,8 +908,9 @@ impl TransactionInner {
 						// Clear the transaction state
 						self.clear_read_state();
 						self.writeset.clear();
-						// Clear savepoint stack
+						// Clear savepoint stack and undo journal
 						self.savepoint_stack.clear();
+						self.undo_journal.clear();
 						// Return the error for this transaction
 						return Err(Error::KeyReadConflict);
 					}
@@ -886,8 +943,9 @@ impl TransactionInner {
 									// Clear the transaction state
 									self.clear_read_state();
 									self.writeset.clear();
-									// Clear savepoint stack
+									// Clear savepoint stack and undo journal
 									self.savepoint_stack.clear();
+									self.undo_journal.clear();
 									// Log the error for debug purposes
 									#[cfg(debug_assertions)]
 									debug!(target: LOG_TARGET_CONFLICTS, "KeyReadConflict involving {:?}", k);
@@ -919,8 +977,9 @@ impl TransactionInner {
 			self.database.advance_commit_watermark();
 			// Clear the transaction state
 			self.clear_read_state();
-			// Clear savepoint stack
+			// Clear savepoint stack and undo journal
 			self.savepoint_stack.clear();
+			self.undo_journal.clear();
 			// Continue
 			return Ok(());
 		}
@@ -1067,8 +1126,9 @@ impl TransactionInner {
 				// Clear the transaction state
 				self.clear_read_state();
 				self.writeset.clear();
-				// Clear savepoint stack
+				// Clear savepoint stack and undo journal
 				self.savepoint_stack.clear();
+				self.undo_journal.clear();
 				// Return a persistence error
 				return Err(Error::TxCommitNotPersisted(e));
 			}
@@ -1085,8 +1145,9 @@ impl TransactionInner {
 		// Clear the transaction state
 		self.clear_read_state();
 		self.writeset.clear();
-		// Clear savepoint stack
+		// Clear savepoint stack and undo journal
 		self.savepoint_stack.clear();
+		self.undo_journal.clear();
 		// Continue
 		Ok(())
 	}
@@ -1268,8 +1329,11 @@ impl TransactionInner {
 		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
+		let key = key.into_bytes();
+		let val = val.into_bytes();
+		self.record_undo(&key);
 		// Set the key
-		self.writeset.insert(key.into_bytes(), Some(val.into_bytes()));
+		self.writeset.insert(key, Some(val));
 		// Return result
 		Ok(())
 	}
@@ -1295,7 +1359,10 @@ impl TransactionInner {
 		if self.writeset.contains_key(lookup) || self.exists_in_datastore(lookup, self.version) {
 			return Err(Error::KeyAlreadyExists);
 		}
-		self.writeset.insert(key.into_bytes(), Some(val.into_bytes()));
+		let key = key.into_bytes();
+		let val = val.into_bytes();
+		self.record_undo(&key);
+		self.writeset.insert(key, Some(val));
 		// Return result
 		Ok(())
 	}
@@ -1321,18 +1388,27 @@ impl TransactionInner {
 		match (chk.as_ref(), self.writeset.get(lookup)) {
 			// The key exists in the writeset, check if it matches
 			(Some(x), Some(Some(y))) if x.as_slice() == y.as_slice() => {
-				self.writeset.insert(key.into_bytes(), Some(val.into_bytes()));
+				let key = key.into_bytes();
+				let val = val.into_bytes();
+				self.record_undo(&key);
+				self.writeset.insert(key, Some(val));
 			}
 			// The key does not exist in the writeset, check if it matches
 			(None, Some(None)) => {
-				self.writeset.insert(key.into_bytes(), Some(val.into_bytes()));
+				let key = key.into_bytes();
+				let val = val.into_bytes();
+				self.record_undo(&key);
+				self.writeset.insert(key, Some(val));
 			}
 			// The key exists in the writeset, but does not match
 			(_, Some(_)) => return Err(Error::ValNotExpectedValue),
 			// Check for the key in the tree
 			_ => {
 				if self.equals_in_datastore(lookup, chk, self.version) {
-					self.writeset.insert(key.into_bytes(), Some(val.into_bytes()));
+					let key = key.into_bytes();
+					let val = val.into_bytes();
+					self.record_undo(&key);
+					self.writeset.insert(key, Some(val));
 				} else {
 					return Err(Error::ValNotExpectedValue);
 				}
@@ -1355,8 +1431,10 @@ impl TransactionInner {
 		if !self.write {
 			return Err(Error::TxNotWritable);
 		}
+		let key = key.into_bytes();
+		self.record_undo(&key);
 		// Remove the key
-		self.writeset.insert(key.into_bytes(), None);
+		self.writeset.insert(key, None);
 		// Return result
 		Ok(())
 	}
@@ -1381,18 +1459,24 @@ impl TransactionInner {
 		match (chk.as_ref(), self.writeset.get(lookup)) {
 			// The key exists in the writeset, check if it matches
 			(Some(x), Some(Some(y))) if x.as_slice() == y.as_slice() => {
-				self.writeset.insert(key.into_bytes(), None);
+				let key = key.into_bytes();
+				self.record_undo(&key);
+				self.writeset.insert(key, None);
 			}
 			// The key does not exist in the writeset, check if it matches
 			(None, Some(None)) => {
-				self.writeset.insert(key.into_bytes(), None);
+				let key = key.into_bytes();
+				self.record_undo(&key);
+				self.writeset.insert(key, None);
 			}
 			// The key exists in the writeset, but does not match
 			(_, Some(_)) => return Err(Error::ValNotExpectedValue),
 			// Check for the key in the tree
 			_ => {
 				if self.equals_in_datastore(lookup, chk, self.version) {
-					self.writeset.insert(key.into_bytes(), None);
+					let key = key.into_bytes();
+					self.record_undo(&key);
+					self.writeset.insert(key, None);
 				} else {
 					return Err(Error::ValNotExpectedValue);
 				}

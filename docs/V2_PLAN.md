@@ -315,16 +315,20 @@ Under Serializable Snapshot Isolation (SSI), read tracking currently acquires a 
 
 Calling `tx.set_savepoint()` currently deep-clones the entire `writeset: BTreeMap<ByteSlice, Option<ByteSlice>>`. In transactions with thousands of writes and nested savepoints (e.g. SurrealQL triggers and subqueries), this causes severe allocator pressure and CPU cache churn.
 
-- [ ] Implement transaction `UndoJournal`:
+- [x] Implement transaction `UndoJournal`:
   ```rust
-  struct UndoEntry {
+  pub(crate) enum UndoOp {
+      Remove,
+      Restore(Option<ByteSlice>),
+  }
+  pub(crate) struct UndoEntry {
       key: ByteSlice,
-      old_value: Option<Option<ByteSlice>>, // None = key was not present before
+      op: UndoOp,
   }
   ```
-- [ ] Change `set_savepoint()` to record the current length of the undo journal ($O(1)$ integer push).
-- [ ] Change `rollback_to_savepoint()` to pop operations from the journal and revert only modified keys ($O(\Delta)$ instead of $O(N)$).
-- [ ] Verify savepoint nested rollbacks with `SimRunner`.
+- [x] Change `set_savepoint()` to record the current length of the undo journal ($O(1)$ integer push).
+- [x] Change `rollback_to_savepoint()` to pop operations from the journal and revert only modified keys ($O(\Delta)$ instead of $O(N)$).
+- [x] Verify savepoint nested rollbacks with `SimRunner` and comprehensive integration tests.
 - [ ] Benchmark nested savepoint creation and rollback on large writesets.
 
 ---
