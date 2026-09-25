@@ -10,9 +10,99 @@ on:
   pull_request:
     branches: [ main, next ]
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  test:
-    name: Test
+  build-test:
+    name: Build & Test (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - x86_64-pc-windows-msvc
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+
+      - name: Install cross-compilation toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Build
+        run: cargo build --target ${{ matrix.target }} --verbose
+
+      - name: Run tests
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        run: cargo test --all-features --target ${{ matrix.target }} --verbose
+
+  apple-targets:
+    name: Apple Ecosystem (${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-ios
+          - aarch64-apple-ios-sim
+          - aarch64-apple-tvos
+          - aarch64-apple-tvos-sim
+          - aarch64-apple-visionos
+          - aarch64-apple-visionos-sim
+          - aarch64-apple-watchos
+          - aarch64-apple-watchos-sim
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+
+      - name: Build
+        run: cargo build --target ${{ matrix.target }}
+
+  android-target:
+    name: Android Ecosystem (aarch64-linux-android)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -20,15 +110,30 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: aarch64-linux-android
 
       - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+
+      - name: Configure Android NDK toolchain
+        run: |
+          NDK_PATH="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          if [ -z "$NDK_PATH" ] || [ ! -d "$NDK_PATH" ]; then
+            NDK_PATH="$(ls -d /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -n 1)"
+          fi
+          TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64"
+          CLANG_BIN="$(find "$TOOLCHAIN/bin" -name "aarch64-linux-android*-clang" | grep -v '++' | sort -V | tail -n 1)"
+          LLVM_AR="$TOOLCHAIN/bin/llvm-ar"
+          echo "CC_aarch64_linux_android=$CLANG_BIN" >> $GITHUB_ENV
+          echo "AR_aarch64_linux_android=$LLVM_AR" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=$LLVM_AR" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CLANG_BIN" >> $GITHUB_ENV
 
       - name: Build
-        run: cargo build --verbose
-
-      - name: Run tests
-        run: cargo test --all-features --verbose
+        run: cargo build --target aarch64-linux-android
 
   dst:
     name: Deterministic Simulation (DST)
