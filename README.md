@@ -39,6 +39,7 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 | LMDB | 896,110 | 695 | 704 | 705 | 252,972 |
 | RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 |
 | Fjall | 767,353 | 1,327 | 1,315 | 1,172 | 143,141 |
+| SlateDB | 273,033 | 8,433 | 8,393 | 8,339 | 1,080 |
 | Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 |
 
 - **Point Reads**: Over **11,300,000 OPS** sustained (440ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`) — over **12× faster** than LMDB and **16× faster** than RocksDB.
@@ -54,6 +55,7 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 | LMDB | ~421 MB | 580 MB |
 | RocksDB | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**~356 MB** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**442 MB** |
 | Fjall | ~405 MB | 669 MB |
+| SlateDB | ~449 MB | 1.71 GB |
 | Libmdbx | ~373 MB | 643 MB |
 
 - **In-Memory Dataset**: True in-memory database holding all 5,000,000 documents resident at **5.2 GiB** resting memory (~1KB per full multi-version document).
