@@ -125,6 +125,7 @@ impl GroupCommitter {
 
 			let flush_result = (|| -> Result<(), PersistenceError> {
 				let mut file = aol.lock()?;
+				file.seek(SeekFrom::End(0))?;
 				for slot in &batch {
 					file.write_all(&slot.data)?;
 				}
@@ -364,18 +365,15 @@ impl Persistence {
 			if let Some(parent) = aol_path.parent() {
 				fs::create_dir_all(parent)?;
 			}
-			// Open the AOL file with append mode (write(true) grants
-			// GENERIC_WRITE on Windows, needed for set_len in truncate)
-			#[expect(
-				clippy::ineffective_open_options,
-				reason = "write(true) grants GENERIC_WRITE on Windows, needed for set_len in truncate"
-			)]
-			let file = OpenOptions::new()
+			// Open the AOL file with read and write access (avoid append(true)
+			// so set_len works on Windows)
+			let mut file = OpenOptions::new()
 				.create(true)
 				.read(true)
 				.write(true)
-				.append(true)
+				.truncate(false)
 				.open(&aol_path)?;
+			file.seek(SeekFrom::End(0))?;
 			Some(Arc::new(Mutex::new(file)))
 		};
 		// Ensure parent directories exist for snapshot path
@@ -966,6 +964,7 @@ impl Persistence {
 											)?;
 										}
 									}
+									file.seek(SeekFrom::End(0))?;
 									// Write encoded batch in a single operation
 									file.write_all(&scratch)?;
 									file.flush()?;
@@ -1098,6 +1097,7 @@ impl Persistence {
 
 				// Lock the AOL file for writing without group fsync
 				let mut file = aol.lock()?;
+				file.seek(SeekFrom::End(0))?;
 				file.write_all(&data)?;
 				file.flush()?;
 
