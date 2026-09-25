@@ -33,11 +33,11 @@ It is designed as an independent, standalone embedded storage engine and caching
 
 Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Processor @ 5.48 GHz, 128 GB DDR5 RAM**, 5,000,000 keys across 48 concurrent worker threads with 128 clients via [`crud-bench`](https://github.com/surrealdb/crud-bench)):
 
-| Engine | Point Read (OPS) | Create (OPS) | Update (OPS) | Delete (OPS) | Scan (OPS) | Resting Memory | Peak Memory |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SurrealMX** | <nobr>**11,338,303**&nbsp;<img width="16" src="/img/rocket.png" alt="🚀"></nobr> | <nobr>**2,396,041**&nbsp;<img width="16" src="/img/rocket.png" alt="🚀"></nobr> | <nobr>**2,223,502**&nbsp;<img width="16" src="/img/rocket.png" alt="🚀"></nobr> | <nobr>**6,172,414**&nbsp;<img width="16" src="/img/rocket.png" alt="🚀"></nobr> | <nobr>**284,419**&nbsp;<img width="16" src="/img/rocket.png" alt="🚀"></nobr> | 5.2 GiB | 10.2 GiB |
+| Engine | Point&nbsp;Read&nbsp;(OPS) | Create&nbsp;(OPS) | Update&nbsp;(OPS) | Delete&nbsp;(OPS) | Scan&nbsp;(OPS) | Resting&nbsp;Memory | Peak&nbsp;Memory |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **SurrealMX** | **11,338,303**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> | **2,396,041**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> | **2,223,502**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> | **6,172,414**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> | **284,419**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> | 5.2 GiB | 10.2 GiB |
 | LMDB | 896,110 | 695 | 704 | 705 | 252,972 | ~421 MB | 580 MB |
-| RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 | <nobr>**~356 MB**&nbsp;<img width="16" src="/img/rocket.png" alt="🚀"></nobr> | <nobr>**442 MB**&nbsp;<img width="16" src="/img/rocket.png" alt="🚀"></nobr> |
+| RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 | **~356 MB**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> | **442 MB**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> |
 | Fjall | 767,353 | 1,327 | 1,315 | 1,172 | 143,141 | ~405 MB | 669 MB |
 | Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 | ~373 MB | 643 MB |
 
