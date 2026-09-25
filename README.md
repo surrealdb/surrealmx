@@ -23,7 +23,30 @@
 	<a href="https://github.com/surrealdb/surrealmx"><img src="https://img.shields.io/badge/license-Apache_License_2.0-00bfff.svg?style=flat-square"></a>
 </p>
 
-#### Features
+SurrealMX is an ultra-high-throughput, in-memory, lock-free key-value database engine built on a multi-version concurrency control (MVCC) skiplist architecture and a circular commit ring buffer.
+
+It is designed as an independent, standalone embedded storage engine and caching layer suitable for microsecond-latency workloads, high-concurrency server applications, and browser WebAssembly environments.
+
+---
+
+## Performance
+
+Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Processor @ 5.48 GHz, 128 GB DDR5 RAM**, 5,000,000 keys across 48 concurrent worker threads with 128 clients via [`crud-bench`](https://github.com/surrealdb/crud-bench)):
+
+| Engine | Point Read (OPS) | Create (OPS) | Update (OPS) | Delete (OPS) | Peak Memory |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **SurrealMX (v2)** | **11,338,303** | **2,396,041** | **2,223,502** | **6,172,414** | **5.2 GiB** |
+| SurrealMX (v1) | 2,302,499 | 32,858 | 32,997 | 32,392 | 16.1 GiB |
+| **Improvement** | **4.92× faster** | **73× faster** | **67× faster** | **190× faster** | **-68% RAM** |
+
+- **Point Reads**: Over **11,300,000 OPS** sustained (440ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`).
+- **Writes & Creates**: Over **2,390,000 OPS** (peaking at **2,830,000 OPS**) via the lock-free circular commit ring buffer and direct auto-commit datastore bypass.
+- **Deletes**: Over **6,170,000 OPS** (810ms for 5,000,000 deletions) via optimized inline tombstone collapse.
+- **Memory Compaction**: **-68% peak memory reduction** (down from 16.1 GiB to 5.2 GiB) via `ThinVec` version specialization and 20-byte Small String Optimization (SSO) in `byteslice`.
+
+---
+
+## Features
 
 - In-memory database
 - Multi-version concurrency control (MVCC)
@@ -41,7 +64,7 @@
   - Asynchronous background logging and periodic full-datastore snapshots
   - Configurable fsync modes and fast LZ4 snapshot file compression
 
-#### Quick start
+## Quick Start
 
 ```rust
 use surrealmx::{Database, DatabaseOptions};
@@ -63,7 +86,7 @@ fn main() {
 }
 ```
 
-#### Direct database operations
+## Direct Database Operations
 
 For single-key reads, writes, and scans, `Database` exposes direct methods that execute with full ACID snapshot isolation while bypassing transaction pool checkout and reader slot registration:
 
@@ -92,7 +115,7 @@ fn main() {
 }
 ```
 
-#### Manual cleanup and garbage collection
+## Manual Cleanup and Garbage Collection
 
 Background worker threads perform cleanup and garbage collection at regular
 intervals. These workers can be disabled through `DatabaseOptions` by setting
@@ -131,11 +154,11 @@ fn main() {
 }
 ```
 
-#### Persistence modes
+## Persistence Modes
 
 SurrealMX supports optional persistence with two modes:
 
-##### Full persistence (AOL + Snapshots) - Default
+### Full persistence (AOL + Snapshots) - Default
 
 Provides maximum durability by logging every change to an append-only log and taking periodic snapshots.
 
@@ -159,7 +182,7 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-##### Snapshot-only persistence
+### Snapshot-only persistence
 
 Provides good performance with periodic durability by taking snapshots without logging individual changes.
 
@@ -183,27 +206,27 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-##### Configuration Options
+### Configuration Options
 
-###### AOL Modes
+#### AOL Modes
 - **`AolMode::Never`**: Disables append-only logging entirely (default)
 - **`AolMode::SynchronousOnCommit`**: Writes changes to AOL immediately on every commit (maximum durability)
 - **`AolMode::AsynchronousAfterCommit`**: Writes changes to AOL asynchronously after every commit (better performance)
 
-###### Snapshot Modes
+#### Snapshot Modes
 - **`SnapshotMode::Never`**: Disables snapshots entirely (default)
 - **`SnapshotMode::Interval(Duration)`**: Takes snapshots at the specified interval
 
-###### Fsync Modes
+#### Fsync Modes
 - **`FsyncMode::Never`**: Never calls fsync - fastest but least durable (default)
 - **`FsyncMode::EveryAppend`**: Calls fsync after every AOL append - slowest but most durable
 - **`FsyncMode::Interval(Duration)`**: Calls fsync at most once per interval - balanced approach
 
-###### Compression Support
+#### Compression Support
 - **`CompressionMode::None`**: No compression applied to snapshots (default)
 - **`CompressionMode::Lz4`**: Fast LZ4 compression for snapshots (reduces storage size)
 
-##### Advanced Configuration Example
+### Advanced Configuration Example
 
 ```rust
 use surrealmx::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode, FsyncMode, CompressionMode};
@@ -237,18 +260,18 @@ fn main() -> std::io::Result<()> {
 
 See the [Durability guarantees](#durability-guarantees) section for detailed information about ACID durability levels.
 
-#### Durability guarantees
+## Durability Guarantees
 
 SurrealMX provides different levels of durability (the "D" in ACID) depending on the persistence configuration:
 
-##### In-memory only mode (No persistence)
+### In-memory only mode (No persistence)
 
 When persistence is disabled (the default), SurrealMX provides **no durability guarantees**. All data is lost when the process terminates, crashes, or the system shuts down. This mode is ideal for:
 - Caching and temporary data storage
 - Development and testing
 - Scenarios where data can be reconstructed from other sources
 
-##### Maximum durability (AOL with fsync)
+### Maximum durability (AOL with fsync)
 
 For maximum durability that survives system crashes and power failures, use synchronous AOL with fsync on every append:
 
@@ -277,7 +300,7 @@ With this configuration:
 - Transactions are fully durable once `commit()` returns successfully
 - Data survives process crashes, system crashes, and power failures
 
-##### Configurable durability levels
+### Configurable durability levels
 
 Different persistence configurations provide different durability guarantees:
 
@@ -310,11 +333,11 @@ Different persistence configurations provide different durability guarantees:
 
 Choose the configuration that best balances your durability requirements against performance needs.
 
-#### Isolation levels
+## Isolation Levels
 
 SurrealMX supports two isolation levels to balance between performance and consistency guarantees:
 
-##### Snapshot Isolation (Default)
+### Snapshot Isolation (Default)
 
 Provides excellent performance with strong consistency guarantees. Transactions see a consistent snapshot of the database as it existed when the transaction began.
 
@@ -342,7 +365,7 @@ fn main() {
 }
 ```
 
-##### Serializable Snapshot Isolation
+### Serializable Snapshot Isolation
 
 Provides the strongest consistency guarantee by detecting read-write conflicts and aborting transactions that would violate serializability.
 
@@ -393,7 +416,7 @@ fn main() {
 - **Snapshot Isolation**: Most applications, high-performance scenarios, read-heavy workloads
 - **Serializable Snapshot Isolation**: Financial applications, inventory management, any scenario requiring strict serializability
 
-##### Conflict diagnostics
+### Conflict diagnostics
 
 When a transaction is aborted due to a conflict (`KeyReadConflict` or `KeyWriteConflict`), SurrealMX can log the conflicting key for debugging purposes. These logs are emitted at the `DEBUG` level using the [`tracing`](https://docs.rs/tracing) crate, and are only included in debug builds (`#[cfg(debug_assertions)]`).
 
@@ -424,7 +447,7 @@ Or via the `RUST_LOG` environment variable:
 RUST_LOG="info,surrealmx::conflicts=debug" cargo run
 ```
 
-#### Savepoints
+## Savepoints
 
 Savepoints mark a point inside a transaction that later writes can be undone back to, without discarding the whole transaction. They are stackable, so scopes can nest.
 
@@ -475,7 +498,7 @@ Both methods return `Error::NoSavepoint` when no savepoint is set, and `Error::T
 
 Note that a rollback rewinds writes only. Keys read and ranges scanned inside a rolled back scope stay tracked for conflict detection, because a write that survives the rollback may have been derived from a value that scope read. This keeps serializable transactions conservative — it can produce a retryable conflict error, never a missed one.
 
-#### Range operations
+## Range Operations
 
 SurrealMX provides powerful range-based operations for scanning, counting, and iterating over keys. All range operations support:
 
@@ -485,7 +508,7 @@ SurrealMX provides powerful range-based operations for scanning, counting, and i
 - **Zero-allocation closure scans** (`scan_with`, `keys_for_each`) inspecting borrowed slices directly without vector allocations or value clones
 - **Buffer-reusing scans** (`scan_into`, `keys_into`) avoiding repeated vector reallocations across query loops
 
-##### Basic range scanning
+### Basic range scanning
 
 ```rust
 use surrealmx::Database;
@@ -522,7 +545,7 @@ fn main() {
 }
 ```
 
-##### Pagination and reverse iteration
+### Pagination and reverse iteration
 
 ```rust
 use surrealmx::Database;
@@ -555,7 +578,7 @@ fn main() {
 }
 ```
 
-##### Zero-allocation range scanning
+### Zero-allocation range scanning
 
 ```rust
 use surrealmx::Database;
@@ -596,7 +619,8 @@ fn main() {
 - `scan(range, skip, limit)` / `scan_reverse(...)`: Get key-value pairs in range as `Vec<(ByteSlice, ByteSlice)>`
 - `total(range, skip, limit)`: Count keys in range
 
-**Range parameters:**
-- `range`: Rust range syntax (`"start".."end"`) - start inclusive, end exclusive
-- `skip`: Optional number of items to skip (for pagination)
-- `limit`: Optional maximum number of items to return
+---
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
