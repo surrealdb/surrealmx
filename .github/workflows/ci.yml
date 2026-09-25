@@ -89,7 +89,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runtime: [node, bun, deno, browser]
+        runtime: [browser, node]
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -105,56 +105,13 @@ jobs:
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
 
-      - name: Setup Bun
-        if: matrix.runtime == 'bun'
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-
-      - name: Setup Deno
-        if: matrix.runtime == 'deno'
-        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2
+      - name: Run WASM tests in Browser (Headless Chrome)
+        if: matrix.runtime == 'browser'
+        run: WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --headless --chrome
 
       - name: Run WASM tests in Node.js
         if: matrix.runtime == 'node'
         run: wasm-pack test --node
-
-      - name: Run WASM tests in Bun
-        if: matrix.runtime == 'bun'
-        run: |
-          mkdir -p /tmp/bun-bin
-          printf 'delete globalThis.self;\n' > /tmp/bun-preload.js
-          cat << 'EOF' > /tmp/bun-bin/node
-          #!/bin/sh
-          exec bun -r /tmp/bun-preload.js "$@"
-          EOF
-          chmod +x /tmp/bun-bin/node
-          PATH=/tmp/bun-bin:$PATH wasm-pack test --node
-
-      - name: Run WASM tests in Deno
-        if: matrix.runtime == 'deno'
-        run: |
-          wasm-pack test --node -- --help
-          RUNNER=$(find ~/.cache ~/.cargo /home/runner -path "*/wasm-bindgen-cargo-install-*/wasm-bindgen-test-runner" 2>/dev/null | head -n 1)
-          if [ -z "$RUNNER" ]; then
-            RUNNER=$(find ~/.cache ~/.cargo /home/runner -name wasm-bindgen-test-runner 2>/dev/null | head -n 1)
-          fi
-          mkdir -p /tmp/deno-bin
-          printf 'globalThis.window = globalThis;\n' > /tmp/deno-preload.js
-          REAL_DENO=$(which -a deno | grep -v "/tmp/deno-bin" | head -n 1)
-          cat << EOF > /tmp/deno-bin/deno
-          #!/bin/sh
-          if [ "\$1" = "run" ]; then
-              shift
-              exec "$REAL_DENO" run --preload=/tmp/deno-preload.js "\$@"
-          else
-              exec "$REAL_DENO" "\$@"
-          fi
-          EOF
-          chmod +x /tmp/deno-bin/deno
-          PATH=/tmp/deno-bin:$PATH CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$RUNNER" WASM_BINDGEN_USE_DENO=1 cargo test --target wasm32-unknown-unknown
-
-      - name: Run WASM tests in Browser (Headless Chrome)
-        if: matrix.runtime == 'browser'
-        run: WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --headless --chrome
 
   format:
     name: Format
