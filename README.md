@@ -33,18 +33,19 @@ It is designed as an independent, standalone embedded storage engine and caching
 
 Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Processor @ 5.48 GHz, 128 GB DDR5 RAM**, 5,000,000 keys across 48 concurrent worker threads with 128 clients via [`crud-bench`](https://github.com/surrealdb/crud-bench)):
 
-| Engine | Point Read (OPS) | Create (OPS) | Update (OPS) | Delete (OPS) | Scan (OPS) | Peak Memory |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SurrealMX** | **11,338,303** | **2,396,041** | **2,223,502** | **6,172,414** | **284,419** | **5.2 GiB** |
-| LMDB | 896,110 | 695 | 704 | 705 | 252,972 | 580 MB |
-| RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 | 442 MB |
-| Fjall | 767,353 | 1,327 | 1,315 | 1,172 | 143,141 | 669 MB |
-| Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 | 643 MB |
+| Engine | Point Read (OPS) | Create (OPS) | Update (OPS) | Delete (OPS) | Scan (OPS) | Resting Memory | Peak Memory |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **SurrealMX** | **11,338,303** | **2,396,041** | **2,223,502** | **6,172,414** | **284,419** | **5.2 GiB** | 10.2 GiB |
+| LMDB | 896,110 | 695 | 704 | 705 | 252,972 | ~421 MB | 580 MB |
+| RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 | ~356 MB | 442 MB |
+| Fjall | 767,353 | 1,327 | 1,315 | 1,172 | 143,141 | ~405 MB | 669 MB |
+| Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 | ~373 MB | 643 MB |
 
 - **Point Reads**: Over **11,300,000 OPS** sustained (440ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`) — over **12× faster** than LMDB and **16× faster** than RocksDB.
 - **Writes & Creates**: Over **2,390,000 OPS** (peaking at **2,830,000 OPS**) via the lock-free circular commit ring buffer and direct auto-commit datastore bypass — **75× faster** than RocksDB.
 - **Deletes**: Over **6,170,000 OPS** (810ms for 5,000,000 deletions) via optimized inline tombstone collapse — **178× faster** than RocksDB.
 - **Range Scans**: **284,419 OPS** using zero-allocation closure traversal (`scan_with` / `keys_for_each`).
+- **Memory Footprint**: In-memory database holding all 5,000,000 documents resident at **5.2 GiB** resting memory; peak memory expands to 10.2 GiB to buffer in-flight concurrent batches across 48 threads before settling.
 
 <details>
 <summary><b>SurrealMX 1.0.0 vs 0.27.0</b></summary>
@@ -61,7 +62,8 @@ Comparison against the previous release (`0.27.0`) under the same 5,000,000 key 
 | **Delete** | 32,392 OPS | **6,172,414 OPS** | **190× faster** |
 | **Bounded Scan** | 34,880 OPS | **44,794 OPS** | **1.28× faster** |
 | **Full Table Scan** | 26.58 OPS | **35.30 OPS** | **1.33× faster** |
-| **Peak Memory** | 16.1 GiB | **5.2 GiB** | **-68% RAM reduction** |
+| **Resting Memory** | 16.1 GiB | **5.2 GiB** | **-68% RAM reduction** |
+| **Peak Memory** | 22.4 GiB | **10.2 GiB** | **-54% RAM reduction** |
 
 </details>
 
