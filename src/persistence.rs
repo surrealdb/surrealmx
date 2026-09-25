@@ -679,8 +679,10 @@ impl Persistence {
 			let file_len = file.metadata()?.len();
 			// Check if there is remaining data
 			if file_len > position {
+				static TRUNCATE_COUNTER: AtomicU64 = AtomicU64::new(0);
+				let id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
 				// Generate a unique name for the temporary file
-				let name = format!("aol_truncate_{}.tmp", std::process::id());
+				let name = format!("aol_truncate_{}_{id}.tmp", std::process::id());
 				// Generate the path for the temporary file
 				let path = std::env::temp_dir().join(name);
 				// Execute truncation in a closure for clean error handling
