@@ -1398,15 +1398,9 @@ fn bench_cursor_pagination(c: &mut Criterion) {
 }
 
 // Per-call savepoint cost, against a pre-populated writeset and isolated
-// from any stack depth effect. A savepoint snapshots the writeset, so
-// setting one costs O(writeset); releasing then discards that snapshot,
-// while rolling back installs it.
-//
-// Both pairs are expected to cost about the same, because the snapshot
-// taken by `set_savepoint` dominates either ending. Release is not a
-// cheaper alternative to rollback on a per-call basis, and it does not
-// reduce the cost of taking a savepoint — see
-// `bench_savepoint_release_vs_emulated_unwind` for what it does improve.
+// from any stack depth effect. Setting a savepoint pushes an undo log journal
+// marker in O(1) time without copying the writeset. Releasing or rolling back
+// unwinds only entries recorded within that scope.
 fn bench_savepoint_snapshot_cost(c: &mut Criterion) {
 	let mut group = c.benchmark_group("savepoint_snapshot_cost");
 
@@ -1479,12 +1473,8 @@ fn bench_savepoint_snapshot_cost(c: &mut Criterion) {
 // discarded as its scope ends, so the same unwind is a single rollback.
 //
 // Only the unwind is timed; building the scopes is identical work in both
-// arms and happens in the batch setup. Note that this measures the unwind
-// only: `set_savepoint` snapshots the writeset on every call whether or
-// not the savepoint is later released, so release does not reduce the cost
-// of taking savepoints. What it bounds is retained memory — one live
-// snapshot instead of n — which criterion cannot measure, and the unwind
-// measured here.
+// arms and happens in the batch setup. Native release discards inner markers
+// as scopes end, so unwinding to the enclosing savepoint is a single rollback.
 fn bench_savepoint_release_vs_emulated_unwind(c: &mut Criterion) {
 	let mut group = c.benchmark_group("savepoint_release_vs_emulated_unwind");
 	group.sample_size(20);
