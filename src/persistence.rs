@@ -125,6 +125,7 @@ impl GroupCommitter {
 
 			let flush_result = (|| -> Result<(), PersistenceError> {
 				let mut file = aol.lock()?;
+				file.seek(SeekFrom::End(0))?;
 				for slot in &batch {
 					file.write_all(&slot.data)?;
 				}
@@ -364,8 +365,15 @@ impl Persistence {
 			if let Some(parent) = aol_path.parent() {
 				fs::create_dir_all(parent)?;
 			}
-			// Open the AOL file with append mode
-			let file = OpenOptions::new().create(true).append(true).read(true).open(&aol_path)?;
+			// Open the AOL file with read and write access (avoid append(true)
+			// so set_len works on Windows)
+			let mut file = OpenOptions::new()
+				.create(true)
+				.read(true)
+				.write(true)
+				.truncate(false)
+				.open(&aol_path)?;
+			file.seek(SeekFrom::End(0))?;
 			Some(Arc::new(Mutex::new(file)))
 		};
 		// Ensure parent directories exist for snapshot path
@@ -459,9 +467,10 @@ impl Persistence {
 			writer.finish()?;
 			// Atomically rename temporary file to actual snapshot
 			fs::rename(&temp_path, &self.snapshot_path)?;
-			// Sync the renamed file to disk for durability
+			// Sync the renamed file to disk for durability (write access
+			// required on Windows for FlushFileBuffers)
 			{
-				let final_file = File::open(&self.snapshot_path)?;
+				let final_file = OpenOptions::new().write(true).open(&self.snapshot_path)?;
 				final_file.sync_all()?;
 			}
 			// Truncate AOL only up to the cutoff position
@@ -678,8 +687,10 @@ impl Persistence {
 			let file_len = file.metadata()?.len();
 			// Check if there is remaining data
 			if file_len > position {
+				static TRUNCATE_COUNTER: AtomicU64 = AtomicU64::new(0);
+				let id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
 				// Generate a unique name for the temporary file
-				let name = format!("aol_truncate_{}.tmp", std::process::id());
+				let name = format!("aol_truncate_{}_{id}.tmp", std::process::id());
 				// Generate the path for the temporary file
 				let path = std::env::temp_dir().join(name);
 				// Execute truncation in a closure for clean error handling
@@ -848,11 +859,12 @@ impl Persistence {
 						writer.flush()?;
 						// Finish compression (finalizes LZ4 stream)
 						writer.finish()?;
-						// Atomically rename temporary file
+						// Atomically rename temporary file to actual snapshot
 						fs::rename(&temp_path, &snapshot_path)?;
-						// Sync the renamed file to disk for durability
+						// Sync the renamed file to disk for durability (write
+						// access required on Windows for FlushFileBuffers)
 						{
-							let final_file = File::open(&snapshot_path)?;
+							let final_file = OpenOptions::new().write(true).open(&snapshot_path)?;
 							final_file.sync_all()?;
 						}
 						// Truncate AOL to the cutoff position
@@ -952,6 +964,7 @@ impl Persistence {
 											)?;
 										}
 									}
+									file.seek(SeekFrom::End(0))?;
 									// Write encoded batch in a single operation
 									file.write_all(&scratch)?;
 									file.flush()?;
@@ -1084,6 +1097,7 @@ impl Persistence {
 
 				// Lock the AOL file for writing without group fsync
 				let mut file = aol.lock()?;
+				file.seek(SeekFrom::End(0))?;
 				file.write_all(&data)?;
 				file.flush()?;
 
