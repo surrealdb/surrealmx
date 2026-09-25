@@ -49,9 +49,47 @@ jobs:
           SURREALMX_SIM_STEPS: 5000
         run: cargo test --release -p surrealmx --lib test::sim -- --nocapture
 
-  wasm:
-    name: WASM
+  wasm-check:
+    name: WASM Check & Clippy
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Check WASM compilation
+        run: cargo check --target wasm32-unknown-unknown
+
+      - name: Run clippy (WASM)
+        run: cargo clippy --target wasm32-unknown-unknown --tests -- -D warnings
+
+      - name: Run clippy (WASM library only, stricter)
+        run: |
+          cargo clippy --target wasm32-unknown-unknown --lib --all-features -- \
+            -D warnings \
+            -D missing_docs \
+            -D clippy::unwrap_used \
+            -D clippy::get_unwrap \
+            -D clippy::panic \
+            -D clippy::cast_possible_truncation \
+            -D clippy::cast_sign_loss \
+            -D clippy::cast_possible_wrap
+
+  wasm-test:
+    name: WASM Test (${{ matrix.runtime }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, bun, deno, browser]
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -64,14 +102,59 @@ jobs:
       - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Check WASM compilation
-        run: cargo check --target wasm32-unknown-unknown
-
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
 
-      - name: Run WASM tests
+      - name: Setup Bun
+        if: matrix.runtime == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Setup Deno
+        if: matrix.runtime == 'deno'
+        uses: denoland/setup-deno@041b854f97b325bd60e83716c7cf2360aba5cbca # v2
+
+      - name: Run WASM tests in Node.js
+        if: matrix.runtime == 'node'
         run: wasm-pack test --node
+
+      - name: Run WASM tests in Bun
+        if: matrix.runtime == 'bun'
+        run: |
+          mkdir -p /tmp/bun-bin
+          printf 'delete globalThis.self;\n' > /tmp/bun-preload.js
+          cat << 'EOF' > /tmp/bun-bin/node
+          #!/bin/sh
+          exec bun -r /tmp/bun-preload.js "$@"
+          EOF
+          chmod +x /tmp/bun-bin/node
+          PATH=/tmp/bun-bin:$PATH wasm-pack test --node
+
+      - name: Run WASM tests in Deno
+        if: matrix.runtime == 'deno'
+        run: |
+          wasm-pack test --node -- --help
+          RUNNER=$(find ~/.cache ~/.cargo /home/runner -path "*/wasm-bindgen-cargo-install-*/wasm-bindgen-test-runner" 2>/dev/null | head -n 1)
+          if [ -z "$RUNNER" ]; then
+            RUNNER=$(find ~/.cache ~/.cargo /home/runner -name wasm-bindgen-test-runner 2>/dev/null | head -n 1)
+          fi
+          mkdir -p /tmp/deno-bin
+          printf 'globalThis.window = globalThis;\n' > /tmp/deno-preload.js
+          REAL_DENO=$(which -a deno | grep -v "/tmp/deno-bin" | head -n 1)
+          cat << EOF > /tmp/deno-bin/deno
+          #!/bin/sh
+          if [ "\$1" = "run" ]; then
+              shift
+              exec "$REAL_DENO" run --preload=/tmp/deno-preload.js "\$@"
+          else
+              exec "$REAL_DENO" "\$@"
+          fi
+          EOF
+          chmod +x /tmp/deno-bin/deno
+          PATH=/tmp/deno-bin:$PATH CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$RUNNER" WASM_BINDGEN_USE_DENO=1 cargo test --target wasm32-unknown-unknown
+
+      - name: Run WASM tests in Browser (Headless Chrome)
+        if: matrix.runtime == 'browser'
+        run: WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --headless --chrome
 
   format:
     name: Format
