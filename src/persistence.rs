@@ -364,8 +364,14 @@ impl Persistence {
 			if let Some(parent) = aol_path.parent() {
 				fs::create_dir_all(parent)?;
 			}
-			// Open the AOL file with append mode
-			let file = OpenOptions::new().create(true).append(true).read(true).open(&aol_path)?;
+			// Open the AOL file with append mode (write(true) grants
+			// GENERIC_WRITE on Windows, needed for set_len in truncate)
+			let file = OpenOptions::new()
+				.create(true)
+				.read(true)
+				.write(true)
+				.append(true)
+				.open(&aol_path)?;
 			Some(Arc::new(Mutex::new(file)))
 		};
 		// Ensure parent directories exist for snapshot path
