@@ -459,9 +459,10 @@ impl Persistence {
 			writer.finish()?;
 			// Atomically rename temporary file to actual snapshot
 			fs::rename(&temp_path, &self.snapshot_path)?;
-			// Sync the renamed file to disk for durability
+			// Sync the renamed file to disk for durability (write access
+			// required on Windows for FlushFileBuffers)
 			{
-				let final_file = File::open(&self.snapshot_path)?;
+				let final_file = OpenOptions::new().write(true).open(&self.snapshot_path)?;
 				final_file.sync_all()?;
 			}
 			// Truncate AOL only up to the cutoff position
@@ -848,11 +849,12 @@ impl Persistence {
 						writer.flush()?;
 						// Finish compression (finalizes LZ4 stream)
 						writer.finish()?;
-						// Atomically rename temporary file
+						// Atomically rename temporary file to actual snapshot
 						fs::rename(&temp_path, &snapshot_path)?;
-						// Sync the renamed file to disk for durability
+						// Sync the renamed file to disk for durability (write
+						// access required on Windows for FlushFileBuffers)
 						{
-							let final_file = File::open(&snapshot_path)?;
+							let final_file = OpenOptions::new().write(true).open(&snapshot_path)?;
 							final_file.sync_all()?;
 						}
 						// Truncate AOL to the cutoff position
