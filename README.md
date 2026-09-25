@@ -46,7 +46,10 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 - **Deletes**: Over **6,170,000 OPS** (810ms for 5,000,000 deletions) via optimized inline tombstone collapse — **178× faster** than RocksDB.
 - **Range Scans**: **284,419 OPS** using zero-allocation closure traversal (`scan_with` / `keys_for_each`).
 
-### SurrealMX 1.0.0 vs 0.27.0
+<details>
+<summary><b>SurrealMX 1.0.0 vs 0.27.0</b></summary>
+
+<br>
 
 Comparison against the previous release (`0.27.0`) under the same 5,000,000 key workload:
 
@@ -59,6 +62,8 @@ Comparison against the previous release (`0.27.0`) under the same 5,000,000 key 
 | **Bounded Scan** | 34,880 OPS | **44,794 OPS** | **1.28× faster** |
 | **Full Table Scan** | 26.58 OPS | **35.30 OPS** | **1.33× faster** |
 | **Peak Memory** | 16.1 GiB | **5.2 GiB** | **-68% RAM reduction** |
+
+</details>
 
 ---
 
