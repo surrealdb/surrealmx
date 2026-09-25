@@ -30,13 +30,13 @@ It is designed as an independent, standalone embedded storage engine and caching
 
 Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Processor @ 5.48 GHz, 128 GB DDR5 RAM**, 5,000,000 keys across 48 concurrent worker threads with 128 clients via [`crud-bench`](https://github.com/surrealdb/crud-bench)):
 
-| Engine | Create (OPS) | Point Read (OPS) | Update (OPS) | Delete (OPS) | Scan (OPS) |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **SurrealMX** | **2,396,041** | **11,338,303** | **2,223,502** | **6,172,414** | **284,419** |
-| RocksDB | 31,777 | 692,597 | 33,228 | 34,563 | 284,228 |
-| LMDB | 695 | 896,110 | 704 | 705 | 252,972 |
-| Libmdbx | 697 | 264,133 | 701 | 681 | 168,041 |
-| Fjall | 1,327 | 767,353 | 1,315 | 1,172 | 143,141 |
+| Engine | Point Read (OPS) | Create (OPS) | Update (OPS) | Delete (OPS) | Scan (OPS) | Peak Memory |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **SurrealMX** | **11,338,303** | **2,396,041** | **2,223,502** | **6,172,414** | **284,419** | **5.2 GiB** |
+| LMDB | 896,110 | 695 | 704 | 705 | 252,972 | 580 MB |
+| RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 | 442 MB |
+| Fjall | 767,353 | 1,327 | 1,315 | 1,172 | 143,141 | 669 MB |
+| Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 | 643 MB |
 
 - **Point Reads**: Over **11,300,000 OPS** sustained (440ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`) — over **12× faster** than LMDB and **16× faster** than RocksDB.
 - **Writes & Creates**: Over **2,390,000 OPS** (peaking at **2,830,000 OPS**) via the lock-free circular commit ring buffer and direct auto-commit datastore bypass — **75× faster** than RocksDB.
