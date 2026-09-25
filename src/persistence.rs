@@ -366,6 +366,10 @@ impl Persistence {
 			}
 			// Open the AOL file with append mode (write(true) grants
 			// GENERIC_WRITE on Windows, needed for set_len in truncate)
+			#[expect(
+				clippy::ineffective_open_options,
+				reason = "write(true) grants GENERIC_WRITE on Windows, needed for set_len in truncate"
+			)]
 			let file = OpenOptions::new()
 				.create(true)
 				.read(true)
