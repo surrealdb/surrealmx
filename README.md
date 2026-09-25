@@ -42,9 +42,9 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 | SlateDB | 273,033 | 8,433 | 8,393 | 8,339 | 1,080 |
 | Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 |
 
-- **Point Reads**: Over **11,300,000 OPS** sustained (440ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`) — over **12× faster** than LMDB and **16× faster** than RocksDB.
-- **Writes & Creates**: Over **2,390,000 OPS** (peaking at **2,830,000 OPS**) via the lock-free circular commit ring buffer and direct auto-commit datastore bypass — **75× faster** than RocksDB.
-- **Deletes**: Over **6,170,000 OPS** (810ms for 5,000,000 deletions) via optimized inline tombstone collapse — **178× faster** than RocksDB.
+- **Point Reads**: Over **11,300,000 OPS** sustained (440ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **12× faster** than LMDB and **16× faster** than RocksDB.
+- **Writes & Creates**: Over **2,390,000 OPS** (peaking at **2,830,000 OPS**) via the lock-free circular commit ring buffer and direct auto-commit datastore bypass: **75× faster** than RocksDB.
+- **Deletes**: Over **6,170,000 OPS** (810ms for 5,000,000 deletions) via optimized inline tombstone collapse: **178× faster** than RocksDB.
 - **Range Scans**: **284,419 OPS** using zero-allocation closure traversal (`scan_with` / `keys_for_each`).
 
 ### Memory Profile
@@ -158,7 +158,7 @@ Background worker threads perform cleanup and garbage collection at regular
 intervals. These workers can be disabled through `DatabaseOptions` by setting
 `enable_cleanup` or `enable_gc` to `false`. When disabled, trigger the tasks
 manually: `run_cleanup` trims the transaction commit queue, `run_gc_tracked`
-sweeps just the keys tracked as holding reclaimable version garbage (cheap —
+sweeps just the keys tracked as holding reclaimable version garbage (cheap,
 its cost scales with the amount of pinned garbage, not the dataset size), and
 `run_gc` performs a full datastore scan, useful as an occasional deep sweep.
 
@@ -510,8 +510,8 @@ tx.commit().unwrap();
 
 Every `set_savepoint` should be paired with exactly one of:
 
-- `rollback_to_savepoint` — undo every write made since the savepoint, and discard it.
-- `release_savepoint` — keep every write made since the savepoint, and discard it.
+- `rollback_to_savepoint`: undo every write made since the savepoint, and discard it.
+- `release_savepoint`: keep every write made since the savepoint, and discard it.
 
 Releasing is what a nested scope does when it succeeds. Its writes join the enclosing scope, so a later rollback of that enclosing scope still undoes them:
 
@@ -533,7 +533,7 @@ assert_eq!(tx.get("b").unwrap(), None);
 
 Both methods return `Error::NoSavepoint` when no savepoint is set, and `Error::TxNotWritable` on a read-only transaction. Savepoints are anonymous, so releasing more savepoints than were set cannot be detected once the stack is non-empty again: a later rollback will silently unwind further than intended.
 
-Note that a rollback rewinds writes only. Keys read and ranges scanned inside a rolled back scope stay tracked for conflict detection, because a write that survives the rollback may have been derived from a value that scope read. This keeps serializable transactions conservative — it can produce a retryable conflict error, never a missed one.
+Note that a rollback rewinds writes only. Keys read and ranges scanned inside a rolled back scope stay tracked for conflict detection, because a write that survives the rollback may have been derived from a value that scope read. This keeps serializable transactions conservative: it can produce a retryable conflict error, never a missed one.
 
 ## Range Operations
 
