@@ -33,16 +33,32 @@ It is designed as an independent, standalone embedded storage engine and caching
 
 Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Processor @ 5.48 GHz, 128 GB DDR5 RAM**, 5,000,000 keys across 48 concurrent worker threads with 128 clients via [`crud-bench`](https://github.com/surrealdb/crud-bench)):
 
-| Engine | Point Read (OPS) | Create (OPS) | Update (OPS) | Delete (OPS) | Peak Memory |
+| Engine | Create (OPS) | Point Read (OPS) | Update (OPS) | Delete (OPS) | Scan (OPS) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SurrealMX (v2)** | **11,338,303** | **2,396,041** | **2,223,502** | **6,172,414** | **5.2 GiB** |
-| SurrealMX (v1) | 2,302,499 | 32,858 | 32,997 | 32,392 | 16.1 GiB |
-| **Improvement** | **4.92× faster** | **73× faster** | **67× faster** | **190× faster** | **-68% RAM** |
+| **SurrealMX** | **2,396,041** | **11,338,303** | **2,223,502** | **6,172,414** | **284,419** |
+| RocksDB | 31,777 | 692,597 | 33,228 | 34,563 | 284,228 |
+| LMDB | 695 | 896,110 | 704 | 705 | 252,972 |
+| Libmdbx | 697 | 264,133 | 701 | 681 | 168,041 |
+| Fjall | 1,327 | 767,353 | 1,315 | 1,172 | 143,141 |
 
-- **Point Reads**: Over **11,300,000 OPS** sustained (440ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`).
-- **Writes & Creates**: Over **2,390,000 OPS** (peaking at **2,830,000 OPS**) via the lock-free circular commit ring buffer and direct auto-commit datastore bypass.
-- **Deletes**: Over **6,170,000 OPS** (810ms for 5,000,000 deletions) via optimized inline tombstone collapse.
-- **Memory Compaction**: **-68% peak memory reduction** (down from 16.1 GiB to 5.2 GiB) via `ThinVec` version specialization and 20-byte Small String Optimization (SSO) in `byteslice`.
+- **Point Reads**: Over **11,300,000 OPS** sustained (440ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`) — over **12× faster** than LMDB and **16× faster** than RocksDB.
+- **Writes & Creates**: Over **2,390,000 OPS** (peaking at **2,830,000 OPS**) via the lock-free circular commit ring buffer and direct auto-commit datastore bypass — **75× faster** than RocksDB.
+- **Deletes**: Over **6,170,000 OPS** (810ms for 5,000,000 deletions) via optimized inline tombstone collapse — **178× faster** than RocksDB.
+- **Range Scans**: **284,419 OPS** using zero-allocation closure traversal (`scan_with` / `keys_for_each`).
+
+### SurrealMX 1.0.0 vs 0.27.0
+
+Comparison against the previous release (`0.27.0`) under the same 5,000,000 key workload:
+
+| Operation | SurrealMX 0.27.0 | SurrealMX 1.0.0 | Improvement |
+| :--- | :--- | :--- | :--- |
+| **Point Read** | 2,302,499 OPS | **11,338,303 OPS** | **4.92× faster** |
+| **Create** | 32,858 OPS | **2,396,041 OPS** | **73× faster** (peaking at 2.83M OPS) |
+| **Update** | 32,997 OPS | **2,223,502 OPS** | **67× faster** |
+| **Delete** | 32,392 OPS | **6,172,414 OPS** | **190× faster** |
+| **Bounded Scan** | 34,880 OPS | **44,794 OPS** | **1.28× faster** |
+| **Full Table Scan** | 26.58 OPS | **35.30 OPS** | **1.33× faster** |
+| **Peak Memory** | 16.1 GiB | **5.2 GiB** | **-68% RAM reduction** |
 
 ---
 
