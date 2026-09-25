@@ -73,13 +73,13 @@ Comparison against the previous release (`0.27.0`) under the same 5,000,000 key 
 - Multi-version concurrency control (MVCC)
 - Lock-free circular commit ring buffer with $O(1)$ atomic slot claiming
 - Sharded active reader registry eliminating atomic cache-line contention across multi-core CPUs
-- High-performance zero-copy byte primitives (`ByteSlice`) with 20-byte SSO and 4-byte prefix comparison
 - Rich transaction support with rollbacks and stackable savepoints
 - Direct auto-committing point operations (`db.get`, `db.set`, `db.del`, `db.put`, `db.exists`)
 - True zero-allocation range scanning (`scan_with`, `scan_into`, `keys_for_each`, `keys_into`)
 - Multiple concurrent readers and writers without global locks
 - Support for serializable and snapshot-isolated transactions
 - Atomicity, Consistency, Isolation, and optional Durability from ACID
+- Deterministic Simulation Tested (DST) against an in-memory linearizable model oracle across 25,000,000 operations with zero divergences
 - Optional persistence with configurable modes:
   - High-throughput Group Commit flusher for synchronous append-only logging
   - Asynchronous background logging and periodic full-datastore snapshots
