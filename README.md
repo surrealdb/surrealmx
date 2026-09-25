@@ -33,19 +33,31 @@ It is designed as an independent, standalone embedded storage engine and caching
 
 Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Processor @ 5.48 GHz, 128 GB DDR5 RAM**, 5,000,000 keys across 48 concurrent worker threads with 128 clients via [`crud-bench`](https://github.com/surrealdb/crud-bench)):
 
-| Engine | Point&nbsp;Read&nbsp;(OPS) | Create&nbsp;(OPS) | Update&nbsp;(OPS) | Delete&nbsp;(OPS) | Scan&nbsp;(OPS) | Resting&nbsp;Memory | Peak&nbsp;Memory |
-| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **SurrealMX** | **11,338,303**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> | **2,396,041**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> | **2,223,502**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> | **6,172,414**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> | **284,419**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> | 5.2 GiB | 10.2 GiB |
-| LMDB | 896,110 | 695 | 704 | 705 | 252,972 | ~421 MB | 580 MB |
-| RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 | **~356 MB**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> | **442 MB**&nbsp;<img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀"> |
-| Fjall | 767,353 | 1,327 | 1,315 | 1,172 | 143,141 | ~405 MB | 669 MB |
-| Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 | ~373 MB | 643 MB |
+| Engine | Point&nbsp;Read&nbsp;(OPS) | Create&nbsp;(OPS) | Update&nbsp;(OPS) | Delete&nbsp;(OPS) | Scan&nbsp;(OPS) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**11,338,303** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**2,396,041** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**2,223,502** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**6,172,414** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**284,419** |
+| LMDB | 896,110 | 695 | 704 | 705 | 252,972 |
+| RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 |
+| Fjall | 767,353 | 1,327 | 1,315 | 1,172 | 143,141 |
+| Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 |
 
 - **Point Reads**: Over **11,300,000 OPS** sustained (440ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`) — over **12× faster** than LMDB and **16× faster** than RocksDB.
 - **Writes & Creates**: Over **2,390,000 OPS** (peaking at **2,830,000 OPS**) via the lock-free circular commit ring buffer and direct auto-commit datastore bypass — **75× faster** than RocksDB.
 - **Deletes**: Over **6,170,000 OPS** (810ms for 5,000,000 deletions) via optimized inline tombstone collapse — **178× faster** than RocksDB.
 - **Range Scans**: **284,419 OPS** using zero-allocation closure traversal (`scan_with` / `keys_for_each`).
-- **Memory Footprint**: In-memory database holding all 5,000,000 documents resident at **5.2 GiB** resting memory; peak memory expands to 10.2 GiB to buffer in-flight concurrent batches across 48 threads before settling.
+
+### Memory Profile
+
+| Engine | Resting&nbsp;Memory | Peak&nbsp;Memory |
+| :--- | ---: | ---: |
+| **SurrealMX** | 5.2 GiB | 10.2 GiB |
+| LMDB | ~421 MB | 580 MB |
+| RocksDB | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**~356 MB** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**442 MB** |
+| Fjall | ~405 MB | 669 MB |
+| Libmdbx | ~373 MB | 643 MB |
+
+- **In-Memory Dataset**: True in-memory database holding all 5,000,000 documents resident at **5.2 GiB** resting memory (~1KB per full multi-version document).
+- **Concurrent Scaling**: Peak memory expands dynamically under high-throughput 48-worker commits before settling back to resting baseline.
 
 <details>
 <summary><b>SurrealMX 1.0.0 vs 0.27.0</b></summary>
