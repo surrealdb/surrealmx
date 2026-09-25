@@ -210,7 +210,7 @@ use_self = "warn"
 arc-swap = "1.9.2"
 bincode = { version = "2.0.1", features = ["serde"] }
 bytes = { version = "1.12.1", features = ["serde"] }
-byteslice = { version = "0.1.0", path = "../byteslice", features = ["serde"] }
+byteslice = { version = "0.1.0", features = ["serde"] }
 crossbeam-deque = "0.8.7"
 crossbeam-queue = "0.3.13"
 crossbeam-skiplist = "0.1.3"
