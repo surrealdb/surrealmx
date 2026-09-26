@@ -250,4 +250,4 @@ strip = true
 inherits = "release"
 
 [patch.crates-io]
-artmap = { path = "../artmap" }
+artmap = { git = "https://github.com/surrealdb/artmap", branch = "main" }

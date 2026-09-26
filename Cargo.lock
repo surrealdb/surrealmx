@@ -44,6 +44,7 @@ dependencies = [
 [[package]]
 name = "artmap"
 version = "0.5.0"
+source = "git+https://github.com/surrealdb/artmap?branch=main#7b646353cb7826305410217334754a041e432676"
 dependencies = [
  "byteslice",
  "crossbeam-epoch",
