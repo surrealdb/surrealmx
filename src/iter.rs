@@ -18,18 +18,12 @@
 use crate::direction::Direction;
 use crate::queue::Merge;
 use crate::versions::Versions;
+use artmap::{EntryRef, Range as ArtRange};
 use byteslice::ByteSlice;
-use crossbeam_skiplist::map::Entry;
-use crossbeam_skiplist::map::Range as SkipRange;
 use parking_lot::RwLock;
 use std::collections::btree_map::Range as TreeRange;
 use std::ops::Bound;
 use std::sync::Arc;
-
-/// Owned range bounds for the skip list range iterator.
-/// Using owned `ByteSlice` avoids lifetime coupling between range bounds
-/// and the `MergeIterator`, enabling persistent storage (e.g., in a Cursor).
-pub(crate) type SkipBounds = (Bound<ByteSlice>, Bound<ByteSlice>);
 
 /// Lazy k-way merge iterator over committed merge-queue writesets.
 ///
@@ -185,14 +179,14 @@ impl Iterator for MergeQueueIter {
 /// writesets
 pub struct MergeIterator<'a> {
 	// Source iterators
-	pub(crate) tree_iter: SkipRange<'a, ByteSlice, SkipBounds, ByteSlice, RwLock<Versions>>,
+	pub(crate) tree_iter: ArtRange<'a, ByteSlice, RwLock<Versions>>,
 	pub(crate) self_iter: TreeRange<'a, ByteSlice, Option<ByteSlice>>,
 
 	// Concrete lazy iterator over committed merge-queue writesets
 	pub(crate) join_iter: MergeQueueIter,
 
 	// Current buffered entries from each source
-	pub(crate) tree_next: Option<Entry<'a, ByteSlice, RwLock<Versions>>>,
+	pub(crate) tree_next: Option<EntryRef<'a, ByteSlice, RwLock<Versions>>>,
 	pub(crate) join_next: Option<(ByteSlice, Option<ByteSlice>)>,
 	pub(crate) self_next: Option<(&'a ByteSlice, &'a Option<ByteSlice>)>,
 
@@ -215,7 +209,7 @@ enum KeySource {
 
 impl<'a> MergeIterator<'a> {
 	pub fn new(
-		mut tree_iter: SkipRange<'a, ByteSlice, SkipBounds, ByteSlice, RwLock<Versions>>,
+		mut tree_iter: ArtRange<'a, ByteSlice, RwLock<Versions>>,
 		mut join_iter: MergeQueueIter,
 		mut self_iter: TreeRange<'a, ByteSlice, Option<ByteSlice>>,
 		direction: Direction,

@@ -42,6 +42,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "artmap"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d3d2fd16633ed3ddee5af798085ef088103a95c7fda23930d6102fef38c4937"
+dependencies = [
+ "byteslice",
+ "crossbeam-epoch",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -774,6 +784,7 @@ name = "surrealmx"
 version = "0.27.0"
 dependencies = [
  "arc-swap",
+ "artmap",
  "bincode",
  "bytes",
  "byteslice",
