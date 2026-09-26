@@ -35,9 +35,9 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 
 | Engine | Point&nbsp;Read&nbsp;(OPS) | Create&nbsp;(OPS) | Update&nbsp;(OPS) | Delete&nbsp;(OPS) | Scan&nbsp;(OPS) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**19,002,983** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**4,265,023** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,113,599** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,274,098** | 258,448 |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**19,002,983** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**4,265,023** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,113,599** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,744,968** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**329,574** |
 | LMDB | 896,110 | 695 | 704 | 705 | 252,972 |
-| RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**284,228** |
+| RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 |
 | Fjall | 767,353 | 1,327 | 1,315 | 1,172 | 143,141 |
 | SlateDB | 273,033 | 8,433 | 8,393 | 8,339 | 1,080 |
 | Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 |
@@ -46,7 +46,7 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 - **Writes & Creates**: Over **4,260,000 OPS** (1.17s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **134× faster** than RocksDB.
 - **Updates**: Over **5,110,000 OPS** (977ms for 5,000,000 updates): **154× faster** than RocksDB.
 - **Deletes**: Over **5,270,000 OPS** (948ms for 5,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **152× faster** than RocksDB.
-- **Range Scans**: **258,448 OPS** using zero-allocation closure traversal (`scan_with` / `keys_for_each`).
+- **Range Scans**: Over **329,000 OPS** using zero-allocation cursor traversal (`scan_with` / `keys_for_each`).
 
 ### Memory Profile
 
