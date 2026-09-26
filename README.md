@@ -63,22 +63,22 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 - **Concurrent Scaling**: Peak memory expands dynamically under high-throughput 48-worker commits before settling back to resting baseline.
 
 <details>
-<summary><b>SurrealMX 1.0.0 vs 0.27.0</b></summary>
+<summary><b>SurrealMX (ArtMap) vs SurrealMX (main)</b></summary>
 
 <br>
 
-Comparison against the previous release (`0.27.0`) under the same 5,000,000 key workload:
+Comparison against `main` (SkipMap) under the same 5,000,000 key workload:
 
-| Operation | SurrealMX 0.27.0 | SurrealMX 1.0.0 | Improvement |
+| Operation | SurrealMX (main) | SurrealMX (ArtMap) | Improvement |
 | :--- | :--- | :--- | :--- |
-| **Point Read** | 2,302,499 OPS | **19,002,983 OPS** | **8.25× faster** |
-| **Create** | 32,858 OPS | **4,265,023 OPS** | **130× faster** |
-| **Update** | 32,997 OPS | **5,113,599 OPS** | **155× faster** |
-| **Delete** | 32,392 OPS | **5,274,098 OPS** | **163× faster** |
-| **Bounded Scan** | 34,880 OPS | **38,098 OPS** | **1.09× faster** |
-| **Full Table Scan** | 24.05 OPS | **24.43 OPS** | **1.02× faster** |
-| **Resting Memory** | 12.5 GiB | **5.5 GiB** | **-56% RAM reduction** |
-| **Peak Memory** | 17.2 GiB | **10.9 GiB** | **-36% RAM reduction** |
+| **Point Read** | 11,338,303 OPS | **19,002,983 OPS** | **1.68× faster** |
+| **Create** | 2,396,041 OPS | **4,265,023 OPS** | **1.78× faster** |
+| **Update** | 2,223,502 OPS | **5,113,599 OPS** | **2.30× faster** |
+| **Delete** | 6,172,414 OPS | **5,274,098 OPS** | — |
+| **Bounded Scan** | 44,794 OPS | **38,098 OPS** | — |
+| **Full Table Scan** | 35.30 OPS | **24.43 OPS** | — |
+| **Resting Memory** | 5.2 GiB | **5.5 GiB** | — |
+| **Peak Memory** | 10.2 GiB | **10.9 GiB** | — |
 
 </details>
 
