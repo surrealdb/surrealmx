@@ -79,8 +79,8 @@ impl Slot {
 pub struct Inner {
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
-	/// The underlying lock-free skip-list datastructure
-	pub(crate) datastore: SkipMap<ByteSlice, RwLock<Versions>>,
+	/// The underlying concurrent ART datastructure
+	pub(crate) datastore: artmap::ArtMap<ByteSlice, RwLock<Versions>>,
 	/// Registered transaction snapshot slots, partitioned across cache-padded
 	/// shards. Contains exactly the live transactions: slots are inserted at
 	/// registration and removed on transaction drop, so watermark scans
@@ -147,7 +147,7 @@ impl Inner {
 	pub fn new(opts: &DatabaseOptions) -> Self {
 		Self {
 			oracle: Oracle::new(),
-			datastore: SkipMap::new(),
+			datastore: artmap::ArtMap::new(),
 			readers: Readers::new(),
 			reader_slot_id: CachePadded::new(AtomicU64::new(0)),
 			commit_watermark: CachePadded::new(AtomicU64::new(0)),
