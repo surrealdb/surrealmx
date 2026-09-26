@@ -25,6 +25,8 @@ use byteslice::ByteSlice;
 use crossbeam_skiplist::SkipMap;
 use crossbeam_utils::CachePadded;
 use papaya::HashSet;
+#[cfg(not(target_arch = "wasm32"))]
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
