@@ -23,13 +23,10 @@ use crate::iter::{MergeIterator, MergeQueueIter};
 use crate::kv::IntoBytes;
 use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
-use crate::version::Version;
-use crate::versions::Versions;
 use arc_swap::ArcSwap;
 use byteslice::ByteSlice;
 use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
-use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::Range;
@@ -1077,83 +1074,27 @@ impl TransactionInner {
 				}
 			},
 		};
-		// Compute the inline-GC watermark lazily only if a key actually needs
-		// version reclamation, avoiding reader map scans when newly inserting
-		// keys.
+		// Apply each writeset entry to the datastore.
+		let mut tracked = Vec::new();
 		let mut watermark: Option<Option<u64>> = None;
-		// Keys whose chains could not be trimmed to a single live value,
-		// collected here and tracked in one batch after the apply loop so
-		// no hash-set work happens inside a chain write-lock critical
-		// section. Empty in the steady state, so no allocation occurs.
-		let mut tracked: Vec<ByteSlice> = Vec::new();
-		// Apply each writeset entry, reclaiming superseded versions
-		// inline while the chain write lock is already held.
 		for (key, value) in entry.writeset.iter() {
-			// Clone the value for insertion
-			let value = value.clone();
-			// Publish the new version into the datastore, guarding against a
-			// concurrent gc sweep that may be unlinking this key: sweeps
-			// call `Entry::remove` while holding the entry's write
-			// lock, so once we hold that lock `is_removed()` tells us whether
-			// the node is still live. `get_or_insert_with` (unlike `insert`)
-			// never replaces a live node, so a concurrent writer's entry can
-			// never be clobbered; if a sweep unlinked the node we landed
-			// on, we retry and get a fresh one. The closure seeds the chain
-			// with this version so a freshly-inserted node is never an empty,
-			// immediately-gc-reclaimable node mid-insert.
-			loop {
-				let entry = self.database.datastore.get_or_insert_with(key.clone(), || {
-					RwLock::new(Versions::from(Version {
-						version,
-						value: value.clone(),
-					}))
-				});
-				let mut versions = entry.value().write();
-				// A sweep unlinked this node between lookup and lock; retry
-				// onto a fresh one rather than writing into a detached node.
-				if entry.is_removed() {
-					continue;
-				}
-				// Check if the node was just seeded with this version
-				let is_new_insert =
-					matches!(*versions, Versions::Single(ref v) if v.version == version);
-				if !is_new_insert {
-					// An update or insert into an existing chain
-					versions.push(Version {
-						version,
-						value,
-					});
-					// Compute the inline-GC watermark lazily on demand
-					let w = *watermark
-						.get_or_insert_with(|| self.database.inline_gc_watermark(self.slot_id));
-					match w {
-						Some(w) => {
-							if versions.gc_older_versions(w) == 0 {
-								entry.remove();
-							} else if versions.needs_gc() {
-								tracked.push(key.clone());
-							}
-						}
-						None => {
-							if versions.needs_gc() {
-								tracked.push(key.clone());
-							}
-						}
+			self.database.datastore.insert(key.clone(), version, value.clone());
+			let w =
+				*watermark.get_or_insert_with(|| self.database.inline_gc_watermark(self.slot_id));
+			match w {
+				Some(w) => {
+					self.database.datastore.prune_key(key, w, Option::is_none);
+					if self.database.datastore.version_count(key) > 1 {
+						tracked.push(key.clone());
 					}
 				}
-				break;
+				None => {
+					if self.database.datastore.version_count(key) > 1 || value.is_none() {
+						tracked.push(key.clone());
+					}
+				}
 			}
 		}
-		// Track the collected keys in one batch, outside every chain
-		// write lock and under a single map guard. Insert-after-unlock
-		// is race-free against the sweep's remove-then-trim ordering:
-		// the garbage these keys refer to was pushed before this insert,
-		// so a sweep that untracks a key here either trims that garbage
-		// in the same pass (and re-tracks it if a reader still pins it)
-		// or ran entirely before it existed — in which case this insert
-		// lands after the removal and the key stays tracked. At worst a
-		// key is tracked for an already-terminal chain, which the next
-		// sweep simply untracks.
 		if !tracked.is_empty() {
 			let candidates = self.database.gc_candidates.pin();
 			for key in tracked {
@@ -1686,29 +1627,14 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
 			for entry in datastore_range {
-				let matched = match entry.value().try_read() {
-					Some(g) => g.with_version(self.version, |bytes| {
-						if skip > 0 {
-							skip -= 1;
-							true
-						} else {
-							count += 1;
-							f(entry.key(), bytes)
+				if let Some((_, Some(bytes))) = entry.get_version_le(self.version) {
+					if skip > 0 {
+						skip -= 1;
+					} else {
+						count += 1;
+						if !f(entry.key(), bytes) {
+							break;
 						}
-					}),
-					None => entry.value().read().with_version(self.version, |bytes| {
-						if skip > 0 {
-							skip -= 1;
-							true
-						} else {
-							count += 1;
-							f(entry.key(), bytes)
-						}
-					}),
-				};
-				if let Some(continue_iter) = matched {
-					if !continue_iter {
-						break;
 					}
 				}
 				if let Some(l) = limit {
@@ -1761,11 +1687,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
 			for entry in datastore_range {
-				let value = match entry.value().try_read() {
-					Some(g) => g.fetch_version(self.version),
-					None => entry.value().read().fetch_version(self.version),
-				};
-				let Some(value) = value else {
+				let Some((_, Some(value))) = entry.get_version_le(self.version) else {
 					continue;
 				};
 				if skip > 0 {
@@ -1773,7 +1695,7 @@ impl TransactionInner {
 					continue;
 				}
 				count += 1;
-				if !f(entry.key(), &value) {
+				if !f(entry.key(), value) {
 					break;
 				}
 				if let Some(l) = limit {
@@ -1857,11 +1779,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
 			for entry in datastore_range {
-				let exists = match entry.value().try_read() {
-					Some(g) => g.exists_version(self.version),
-					None => entry.value().read().exists_version(self.version),
-				};
-				if !exists {
+				if !entry.get_version_le(self.version).is_some_and(|(_, v)| v.is_some()) {
 					continue;
 				}
 				if skip > 0 {
@@ -1951,18 +1869,14 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
 			for entry in datastore_range {
-				let value = match entry.value().try_read() {
-					Some(g) => g.fetch_version(self.version),
-					None => entry.value().read().fetch_version(self.version),
-				};
-				let Some(value) = value else {
+				let Some((_, Some(value))) = entry.get_version_le(self.version) else {
 					continue;
 				};
 				if skip > 0 {
 					skip -= 1;
 					continue;
 				}
-				buf.push((entry.key().clone(), value));
+				buf.push((entry.key().clone(), value.clone()));
 				if let Some(l) = limit {
 					if buf.len() >= l {
 						break;
@@ -2039,11 +1953,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
 			for entry in datastore_range {
-				let exists = match entry.value().try_read() {
-					Some(g) => g.exists_version(self.version),
-					None => entry.value().read().exists_version(self.version),
-				};
-				if !exists {
+				if !entry.get_version_le(self.version).is_some_and(|(_, v)| v.is_some()) {
 					continue;
 				}
 				if skip > 0 {
@@ -2206,11 +2116,7 @@ impl TransactionInner {
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
 					for entry in $iter {
-						let exists = match entry.value().try_read() {
-							Some(g) => g.exists_version(version),
-							None => entry.value().read().exists_version(version),
-						};
-						if !exists {
+						if !entry.get_version_le(version).is_some_and(|(_, v)| v.is_some()) {
 							continue;
 						}
 						if skip > 0 {
@@ -2308,11 +2214,7 @@ impl TransactionInner {
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
 					for entry in $iter {
-						let exists = match entry.value().try_read() {
-							Some(g) => g.exists_version(version),
-							None => entry.value().read().exists_version(version),
-						};
-						if !exists {
+						if !entry.get_version_le(version).is_some_and(|(_, v)| v.is_some()) {
 							continue;
 						}
 						if skip > 0 {
@@ -2411,18 +2313,14 @@ impl TransactionInner {
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
 					for entry in $iter {
-						let value = match entry.value().try_read() {
-							Some(g) => g.fetch_version(version),
-							None => entry.value().read().fetch_version(version),
-						};
-						let Some(value) = value else {
+						let Some((_, Some(value))) = entry.get_version_le(version) else {
 							continue;
 						};
 						if skip > 0 {
 							skip -= 1;
 							continue;
 						}
-						res.push((entry.key().clone(), value));
+						res.push((entry.key().clone(), value.clone()));
 						if let Some(l) = limit {
 							if res.len() >= l {
 								break;
@@ -2557,10 +2455,7 @@ impl TransactionInner {
 		// Check the key in the datastore using ByteSlice::cmp with 4-byte
 		// prefix acceleration
 		ByteSlice::with_borrowed(key, |k| {
-			self.database.datastore.get(k).and_then(|e| match e.value().try_read() {
-				Some(guard) => guard.fetch_version(version),
-				None => e.value().read().fetch_version(version),
-			})
+			self.database.datastore.get_version_le(k, version).and_then(|(_, val)| val)
 		})
 	}
 
@@ -2585,10 +2480,10 @@ impl TransactionInner {
 			}
 		}
 		ByteSlice::with_borrowed(key, |k| {
-			self.database.datastore.get(k).and_then(|e| match e.value().try_read() {
-				Some(guard) => guard.with_version(version, f),
-				None => e.value().read().with_version(version, f),
-			})
+			self.database
+				.datastore
+				.get_version_le(k, version)
+				.and_then(|(_, val)| val.as_deref().map(f))
 		})
 	}
 
@@ -2618,14 +2513,7 @@ impl TransactionInner {
 		// Check the key in the datastore using ByteSlice::cmp with 4-byte
 		// prefix acceleration
 		ByteSlice::with_borrowed(key, |k| {
-			self.database
-				.datastore
-				.get(k)
-				.map(|e| match e.value().try_read() {
-					Some(guard) => guard.exists_version(version),
-					None => e.value().read().exists_version(version),
-				})
-				.is_some_and(|v| v)
+			self.database.datastore.get_version_le(k, version).is_some_and(|(_, val)| val.is_some())
 		})
 	}
 
@@ -2660,17 +2548,8 @@ impl TransactionInner {
 		// Check the key in the datastore using ByteSlice::cmp with 4-byte
 		// prefix acceleration
 		ByteSlice::with_borrowed(key, |k| {
-			match (
-				chk.as_ref(),
-				self.database
-					.datastore
-					.get(k)
-					.and_then(|e| match e.value().try_read() {
-						Some(guard) => guard.fetch_version(version),
-						None => e.value().read().fetch_version(version),
-					})
-					.as_ref(),
-			) {
+			let val = self.database.datastore.get_version_le(k, version).and_then(|(_, val)| val);
+			match (chk.as_ref(), val.as_ref()) {
 				(Some(x), Some(y)) => x.as_slice() == y.as_slice(),
 				(None, None) => true,
 				_ => false,
@@ -3864,9 +3743,9 @@ mod tests {
 		assert_eq!(res[2].0.as_ref(), b"c"); // Local overwrite
 		assert_eq!(res[2].1.as_ref(), b"30");
 		assert_eq!(res[3].0.as_ref(), b"d"); // Local new
-		                                     // "e" is deleted locally, so not
-		                                     // in
-		                                     // results
+		                               // "e" is deleted locally, so not
+		                               // in
+		                               // results
 	}
 
 	#[test]
@@ -4030,7 +3909,7 @@ mod tests {
 					// transaction might not see recent
 					// commits depending on its snapshot
 					let _ = tx.commit(); // Success or conflict, both are fine
-										 // for this test
+						  // for this test
 
 					// Small delay to vary timing
 					thread::sleep(Duration::from_micros(thread_id as u64));
@@ -4108,7 +3987,7 @@ mod tests {
 		tx.set_savepoint().unwrap();
 		tx.set("level2_key1", "level2_value1").unwrap();
 		tx.set("level1_key1", "modified_at_level2").unwrap(); // Modify existing
-															  // key
+														// key
 
 		// Third nested savepoint
 		tx.set_savepoint().unwrap();
@@ -5381,26 +5260,21 @@ mod tests {
 			h.join().unwrap();
 		}
 		// Inspect the raw version chain directly.
-		let entry = db.datastore.get(b"hotkey".as_slice()).expect("hotkey entry missing");
-		let chain = entry.value().read().as_slice().to_vec();
+		let mut chain = db.datastore.get_all_versions(b"hotkey".as_slice());
+		chain.reverse();
 		// Versions are strictly increasing: every commit is minted a unique
 		// version, and every written value is unique, so no push dedups.
 		for w in chain.windows(2) {
-			assert!(
-				w[0].version < w[1].version,
-				"versions not strictly monotonic: {} then {}",
-				w[0].version,
-				w[1].version
-			);
+			assert!(w[0].0 < w[1].0, "versions not strictly monotonic: {} then {}", w[0].0, w[1].0);
 		}
 		// No tombstones: this key was never deleted.
-		assert!(chain.iter().all(|v| v.value.is_some()), "unexpected tombstone in chain");
+		assert!(chain.iter().all(|v| v.1.is_some()), "unexpected tombstone in chain");
 		// Lossless and duplicate-free: the chain holds the seed plus every
 		// successfully committed value, and nothing else.
 		let committed = written.lock().unwrap().clone();
 		assert_eq!(chain.len(), 1 + committed.len(), "chain length diverges from committed writes");
 		let mut got: std::collections::BTreeSet<Vec<u8>> =
-			chain.iter().filter_map(|v| v.value.as_ref().map(|b| b.to_vec())).collect();
+			chain.iter().filter_map(|v| v.1.as_ref().map(|b| b.to_vec())).collect();
 		got.remove(b"seed".as_slice());
 		assert_eq!(got, committed, "chain values diverge from committed writes");
 		// Release the pinned reader
@@ -5434,15 +5308,15 @@ mod tests {
 		// Each key's chain holds all five rounds, in commit order.
 		for i in 0..200 {
 			let key = format!("doc:{i:010}").into_bytes();
-			let entry = db.datastore.get(key.as_slice()).expect("doc entry missing");
-			let chain = entry.value().read().as_slice().to_vec();
+			let mut chain = db.datastore.get_all_versions(key.as_slice());
+			chain.reverse();
 			assert_eq!(chain.len(), 5, "chain should hold all five rounds");
 			for w in chain.windows(2) {
-				assert!(w[0].version < w[1].version, "versions not strictly monotonic");
+				assert!(w[0].0 < w[1].0, "versions not strictly monotonic");
 			}
 			for (round, v) in chain.iter().enumerate() {
 				assert_eq!(
-					v.value.as_deref(),
+					v.1.as_deref(),
 					Some(format!("round{round}-i{i}").as_bytes()),
 					"unexpected value at round {round} for key {i}"
 				);

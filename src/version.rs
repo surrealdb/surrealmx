@@ -17,6 +17,7 @@
 use byteslice::ByteSlice;
 use std::cmp::Ordering;
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Version {
 	/// The version of this entry

@@ -498,7 +498,7 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 	for entry_count in &[1000, 10_000] {
 		for &thread_count in &thread_counts {
 			let operations_per_thread = 50; // Each thread performs 50
-											// operations
+								   // operations
 
 			group.throughput(Throughput::Elements((operations_per_thread * thread_count) as u64));
 			group.bench_with_input(
@@ -523,8 +523,8 @@ fn bench_concurrent_writers(c: &mut Criterion) {
 								let mut thread_ops = Vec::new();
 								for op_id in 0..ops_per_thread {
 									let operation_type = op_id % 3; // 0=insert,
-																	// 1=update,
-																	// 2=upsert
+										 // 1=update,
+										 // 2=upsert
 									let base_key_id = thread_id * 1000 + op_id; // Avoid key conflicts between threads
 
 									match operation_type {
@@ -764,8 +764,8 @@ fn bench_mixed_workload(c: &mut Criterion) {
 								}
 								"delete" => {
 									let _ = tx.del(key.clone()); // Ignore error
-									                             // if key doesn'
-									                             // t exist
+									  // if key doesn'
+									  // t exist
 								}
 								_ => unreachable!(),
 							}

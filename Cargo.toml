@@ -248,3 +248,6 @@ strip = true
 
 [profile.bench]
 inherits = "release"
+
+[patch.crates-io]
+artmap = { path = "../artmap" }
