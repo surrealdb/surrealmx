@@ -43,9 +43,9 @@ dependencies = [
 
 [[package]]
 name = "artmap"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c714ce082ef9c766c89824c1fea5ddd749ffb375724940b64d5e0d3cbb6f33aa"
+checksum = "7a7580a30af03817e64c50383e6c45ce580a418955926f4018b07d7d6cfb2972"
 dependencies = [
  "byteslice",
  "crossbeam-epoch",
