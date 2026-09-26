@@ -17,10 +17,8 @@
 
 use crate::direction::Direction;
 use crate::queue::Merge;
-use crate::versions::Versions;
-use artmap::{EntryRef, Range as ArtRange};
+use artmap::versioned::{Range as ArtRange, VersionedEntryRef as EntryRef};
 use byteslice::ByteSlice;
-use parking_lot::RwLock;
 use std::collections::btree_map::Range as TreeRange;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -179,14 +177,14 @@ impl Iterator for MergeQueueIter {
 /// writesets
 pub struct MergeIterator<'a> {
 	// Source iterators
-	pub(crate) tree_iter: ArtRange<'a, ByteSlice, RwLock<Versions>>,
+	pub(crate) tree_iter: ArtRange<'a, ByteSlice, Option<ByteSlice>>,
 	pub(crate) self_iter: TreeRange<'a, ByteSlice, Option<ByteSlice>>,
 
 	// Concrete lazy iterator over committed merge-queue writesets
 	pub(crate) join_iter: MergeQueueIter,
 
 	// Current buffered entries from each source
-	pub(crate) tree_next: Option<EntryRef<'a, ByteSlice, RwLock<Versions>>>,
+	pub(crate) tree_next: Option<EntryRef<'a, ByteSlice, Option<ByteSlice>>>,
 	pub(crate) join_next: Option<(ByteSlice, Option<ByteSlice>)>,
 	pub(crate) self_next: Option<(&'a ByteSlice, &'a Option<ByteSlice>)>,
 
@@ -209,7 +207,7 @@ enum KeySource {
 
 impl<'a> MergeIterator<'a> {
 	pub fn new(
-		mut tree_iter: ArtRange<'a, ByteSlice, RwLock<Versions>>,
+		mut tree_iter: ArtRange<'a, ByteSlice, Option<ByteSlice>>,
 		mut join_iter: MergeQueueIter,
 		mut self_iter: TreeRange<'a, ByteSlice, Option<ByteSlice>>,
 		direction: Direction,
@@ -352,12 +350,8 @@ impl<'a> MergeIterator<'a> {
 				}
 				KeySource::Datastore => {
 					let t_entry = self.tree_next.as_ref().expect(SELECTED_HEAD);
-					let tv = match t_entry.value().try_read() {
-						Some(guard) => guard,
-						None => t_entry.value().read(),
-					};
-					let exists = tv.exists_version(self.version);
-					drop(tv);
+					let exists =
+						t_entry.get_version_le(self.version).is_some_and(|(_, v)| v.is_some());
 
 					// Advance tree iterator
 					self.tree_next = match self.direction {
@@ -511,12 +505,8 @@ impl<'a> MergeIterator<'a> {
 				}
 				KeySource::Datastore => {
 					let t_entry = self.tree_next.as_ref().expect(SELECTED_HEAD);
-					let tv = match t_entry.value().try_read() {
-						Some(guard) => guard,
-						None => t_entry.value().read(),
-					};
-					let exists = tv.exists_version(self.version);
-					drop(tv);
+					let exists =
+						t_entry.get_version_le(self.version).is_some_and(|(_, v)| v.is_some());
 
 					// Handle skipping BEFORE cloning the key
 					if exists && self.skip_remaining > 0 {
@@ -679,13 +669,9 @@ impl Iterator for MergeIterator<'_> {
 				}
 				KeySource::Datastore => {
 					let t_entry = self.tree_next.as_ref().expect(SELECTED_HEAD);
-					let tv = match t_entry.value().try_read() {
-						Some(guard) => guard,
-						None => t_entry.value().read(),
-					};
-					let value_opt = tv.fetch_version(self.version);
+					let value_opt =
+						t_entry.get_version_le(self.version).and_then(|(_, v)| v.clone());
 					let exists = value_opt.is_some();
-					drop(tv);
 
 					// Handle skipping BEFORE cloning the key
 					if exists && self.skip_remaining > 0 {

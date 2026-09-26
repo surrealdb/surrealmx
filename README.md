@@ -35,24 +35,24 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 
 | Engine | Point&nbsp;Read&nbsp;(OPS) | Create&nbsp;(OPS) | Update&nbsp;(OPS) | Delete&nbsp;(OPS) | Scan&nbsp;(OPS) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**19,002,983** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**4,265,023** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,113,599** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,744,968** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**329,574** |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**17,824,818** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**3,747,996** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**4,278,370** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,459,356** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**350,476** |
 | LMDB | 896,110 | 695 | 704 | 705 | 252,972 |
 | RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 |
 | Fjall | 767,353 | 1,327 | 1,315 | 1,172 | 143,141 |
 | SlateDB | 273,033 | 8,433 | 8,393 | 8,339 | 1,080 |
 | Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 |
 
-- **Point Reads**: Over **19,000,000 OPS** sustained (263ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **21× faster** than LMDB and **27× faster** than RocksDB.
-- **Writes & Creates**: Over **4,260,000 OPS** (1.17s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **134× faster** than RocksDB.
-- **Updates**: Over **5,110,000 OPS** (977ms for 5,000,000 updates): **154× faster** than RocksDB.
-- **Deletes**: Over **5,270,000 OPS** (948ms for 5,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **152× faster** than RocksDB.
-- **Range Scans**: Over **329,000 OPS** using zero-allocation cursor traversal (`scan_with` / `keys_for_each`).
+- **Point Reads**: Over **17,800,000 OPS** sustained (280ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **19× faster** than LMDB and **25× faster** than RocksDB.
+- **Writes & Creates**: Over **3,740,000 OPS** (1.33s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **117× faster** than RocksDB.
+- **Updates**: Over **4,270,000 OPS** (1.16s for 5,000,000 updates): **128× faster** than RocksDB.
+- **Deletes**: Over **5,450,000 OPS** (915ms for 5,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **157× faster** than RocksDB.
+- **Range Scans**: Over **350,000 OPS** using zero-allocation cursor traversal (`scan_with` / `keys_for_each`).
 
 ### Memory Profile
 
 | Engine | Resting&nbsp;Memory | Peak&nbsp;Memory |
 | :--- | ---: | ---: |
-| **SurrealMX** | 5.5 GiB | 10.9 GiB |
+| **SurrealMX** | 5.5 GiB | 10.3 GiB |
 | LMDB | ~421 MB | 580 MB |
 | RocksDB | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**~356 MB** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**442 MB** |
 | Fjall | ~405 MB | 669 MB |
@@ -61,26 +61,6 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 
 - **In-Memory Dataset**: True in-memory database holding all 5,000,000 documents resident at **5.5 GiB** resting memory (~1KB per full multi-version document).
 - **Concurrent Scaling**: Peak memory expands dynamically under high-throughput 48-worker commits before settling back to resting baseline.
-
-<details>
-<summary><b>SurrealMX (ArtMap) vs SurrealMX (main)</b></summary>
-
-<br>
-
-Comparison against `main` (SkipMap) under the same 5,000,000 key workload:
-
-| Operation | SurrealMX (main) | SurrealMX (ArtMap) | Improvement |
-| :--- | :--- | :--- | :--- |
-| **Point Read** | 11,338,303 OPS | **19,002,983 OPS** | **1.68× faster** |
-| **Create** | 2,396,041 OPS | **4,265,023 OPS** | **1.78× faster** |
-| **Update** | 2,223,502 OPS | **5,113,599 OPS** | **2.30× faster** |
-| **Delete** | 6,172,414 OPS | **5,744,968 OPS** | — |
-| **Bounded Scan** | 44,794 OPS | **82,499 OPS** | **1.84× faster** |
-| **Full Table Scan** | 35.30 OPS | **44.77 OPS** | **1.27× faster** |
-| **Resting Memory** | 5.2 GiB | **5.5 GiB** | — |
-| **Peak Memory** | 10.2 GiB | **10.9 GiB** | — |
-
-</details>
 
 ---
 

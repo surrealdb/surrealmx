@@ -21,8 +21,6 @@ use crate::compression::CompressedWriter;
 use crate::compression::CompressionMode;
 use crate::err::PersistenceError;
 use crate::inner::Inner;
-use crate::version::Version;
-use crate::versions::Versions;
 use bincode::config;
 use byteslice::ByteSlice;
 use crossbeam_deque::{Injector, Steal};
@@ -441,21 +439,9 @@ impl Persistence {
 			};
 			// Stream write each key-value pair to reduce memory usage
 			for entry in &self.inner.datastore {
-				// Persist only the latest committed version of each key. Keys
-				// whose newest entry is a delete tombstone are omitted: on
-				// reload the key is simply absent, which is the same
-				// observable state. The encoded element type is unchanged, so
-				// snapshot files remain readable across releases in both
-				// directions.
-				// `latest` returns owned values, so the per-key version read
-				// guard is released at the end of this
-				// statement rather than being held across
-				// the encode and write below.
-				let latest = entry.value().read().latest();
-				if let Some((version, value)) = latest {
-					// Serialize and write this single entry
+				if let Some(ref value) = *entry.value() {
 					bincode::serde::encode_into_std_write(
-						&(entry.key().clone(), vec![(version, Some(value))]),
+						&(entry.key().clone(), vec![(entry.version(), Some(value.clone()))]),
 						&mut writer,
 						config::standard(),
 					)?;
@@ -544,15 +530,7 @@ impl Persistence {
 								max_version = max_version.max(version);
 								// Skip keys which were deleted
 								if value.is_some() {
-									// Create a new versions entry
-									let mut entries = Versions::default();
-									// Add the latest version entry
-									entries.push(Version {
-										version,
-										value,
-									});
-									// Insert the entry into the datastore
-									self.inner.datastore.insert(k, RwLock::new(entries));
+									self.inner.datastore.insert(k, version, value);
 								}
 							}
 						}
@@ -599,23 +577,7 @@ impl Persistence {
 							// appends race), so the maximum must be tracked
 							// over every record, not taken from the last.
 							max_version = max_version.max(version);
-							// Check if the key already exists
-							if let Some(entry) = self.inner.datastore.get(&k) {
-								// Update existing key with stored version
-								entry.value().write().push(Version {
-									version,
-									value: val,
-								});
-							} else {
-								// Insert new key with stored version
-								self.inner.datastore.insert(
-									k.clone(),
-									RwLock::new(Versions::from(Version {
-										version,
-										value: val,
-									})),
-								);
-							}
+							self.inner.datastore.insert(k, version, val);
 						}
 						Err(e) => match e {
 							// Handle bincode decode errors that indicate EOF
@@ -837,19 +799,12 @@ impl Persistence {
 						};
 						// Stream write each entry to reduce memory usage
 						for entry in &db.datastore {
-							// Persist only the latest committed version of
-							// each key, omitting keys whose newest entry is
-							// a delete tombstone. See `snapshot()` above.
-							// `latest` returns owned values, so the per-key
-							// version read guard is
-							// released at the end of this statement rather than
-							// being held across the
-							// encode and write below.
-							let latest = entry.value().read().latest();
-							if let Some((version, value)) = latest {
-								// Serialize and write this single entry
+							if let Some(ref value) = *entry.value() {
 								bincode::serde::encode_into_std_write(
-									&(entry.key().clone(), vec![(version, Some(value))]),
+									&(
+										entry.key().clone(),
+										vec![(entry.version(), Some(value.clone()))],
+									),
 									&mut writer,
 									config::standard(),
 								)?;
