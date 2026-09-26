@@ -35,18 +35,18 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 
 | Engine | Point&nbsp;Read&nbsp;(OPS) | Create&nbsp;(OPS) | Update&nbsp;(OPS) | Delete&nbsp;(OPS) | Scan&nbsp;(OPS) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**17,824,818** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**3,747,996** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**4,278,370** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,459,356** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**350,476** |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**18,794,285** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**3,953,111** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**4,825,481** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,416,383** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**320,616** |
 | LMDB | 896,110 | 695 | 704 | 705 | 252,972 |
 | RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 |
 | Fjall | 767,353 | 1,327 | 1,315 | 1,172 | 143,141 |
 | SlateDB | 273,033 | 8,433 | 8,393 | 8,339 | 1,080 |
 | Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 |
 
-- **Point Reads**: Over **17,800,000 OPS** sustained (280ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **19× faster** than LMDB and **25× faster** than RocksDB.
-- **Writes & Creates**: Over **3,740,000 OPS** (1.33s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **117× faster** than RocksDB.
-- **Updates**: Over **4,270,000 OPS** (1.16s for 5,000,000 updates): **128× faster** than RocksDB.
-- **Deletes**: Over **5,450,000 OPS** (915ms for 5,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **157× faster** than RocksDB.
-- **Range Scans**: Over **350,000 OPS** using zero-allocation cursor traversal (`scan_with` / `keys_for_each`).
+- **Point Reads**: Over **18,700,000 OPS** sustained (266ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **20× faster** than LMDB and **27× faster** than RocksDB.
+- **Writes & Creates**: Over **3,950,000 OPS** (1.26s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **124× faster** than RocksDB.
+- **Updates**: Over **4,820,000 OPS** (1.03s for 5,000,000 updates): **145× faster** than RocksDB.
+- **Deletes**: Over **5,410,000 OPS** (923ms for 5,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **156× faster** than RocksDB.
+- **Range Scans**: Over **320,000 OPS** using zero-allocation cursor traversal (`scan_with` / `keys_for_each`).
 
 ### Memory Profile
 
