@@ -44,7 +44,13 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 /// Default capacity of the commit ring buffer (must be a power of two).
-pub(crate) const DEFAULT_COMMIT_RING_CAPACITY: usize = 65536;
+/// Miri builds a far smaller ring: interpreting the construction of every
+/// slot would otherwise dominate the cost of each test database.
+pub(crate) const DEFAULT_COMMIT_RING_CAPACITY: usize = if cfg!(miri) {
+	1024
+} else {
+	65536
+};
 
 /// The sequence number held by a slot that has never been published.
 /// Sequence numbers handed out by a ring always start above it.

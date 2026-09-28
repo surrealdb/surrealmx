@@ -20,13 +20,13 @@ use crate::persistence::Persistence;
 use crate::queue::{Commit, Merge};
 use crate::readers::Readers;
 use crate::ring::{CommitRing, DEFAULT_COMMIT_RING_CAPACITY};
+use crate::sync::RwLock;
 use crate::versions::Versions;
 use crate::DatabaseOptions;
 use byteslice::ByteSlice;
 use crossbeam_skiplist::SkipMap;
 use crossbeam_utils::CachePadded;
 use papaya::HashSet;
-use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]

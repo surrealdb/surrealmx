@@ -12,37 +12,64 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Synchronisation primitives for the commit ring.
+//! Synchronisation primitives, swappable for testing.
 //!
-//! Under `--cfg loom` these resolve to their `loom` equivalents so that the
-//! ring protocol can be model checked; otherwise they are the primitives
-//! the engine uses everywhere else. Only the ring is modelled: a database
-//! cannot be constructed outside a loom model under `--cfg loom`.
+//! Normal builds use `parking_lot` locks and `std` atomics. Two test
+//! configurations substitute them:
+//!
+//! - Under `--cfg loom` the commit ring's atomics and every lock resolve to
+//!   their `loom` equivalents, so the ring protocol can be model checked. Only
+//!   the ring is modelled: a database cannot be constructed outside a loom
+//!   model in this configuration.
+//! - Under Miri the locks are `std` locks. Miri rejects the argument types
+//!   `parking_lot_core` passes to the `futex` syscall whenever a lock is
+//!   contended, which would otherwise stop every multi-threaded test.
+//!
+//! The substitutes expose the non-poisoning `parking_lot` API.
 
-#[cfg(not(loom))]
+#[cfg(not(any(loom, miri)))]
 pub(crate) use parking_lot::RwLock;
+
 #[cfg(not(loom))]
 pub(crate) use std::sync::atomic::AtomicU64;
 
 #[cfg(loom)]
 pub(crate) use loom::sync::atomic::AtomicU64;
 
-/// A `loom` read-write lock with the non-poisoning `parking_lot` API.
-#[cfg(loom)]
-pub(crate) struct RwLock<T>(loom::sync::RwLock<T>);
+#[cfg(any(loom, miri))]
+pub(crate) use substitute::RwLock;
 
-#[cfg(loom)]
-impl<T> RwLock<T> {
-	pub(crate) fn new(value: T) -> Self {
-		Self(loom::sync::RwLock::new(value))
-	}
+#[cfg(any(loom, miri))]
+mod substitute {
+	#[cfg(loom)]
+	use loom::sync as imp;
+	#[cfg(not(loom))]
+	use std::sync as imp;
+	use std::sync::{PoisonError, TryLockError};
 
-	pub(crate) fn read(&self) -> loom::sync::RwLockReadGuard<'_, T> {
-		self.0.read().unwrap_or_else(std::sync::PoisonError::into_inner)
-	}
+	/// A read-write lock with the non-poisoning `parking_lot` API.
+	pub(crate) struct RwLock<T>(imp::RwLock<T>);
 
-	pub(crate) fn write(&self) -> loom::sync::RwLockWriteGuard<'_, T> {
-		self.0.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+	impl<T> RwLock<T> {
+		pub(crate) fn new(value: T) -> Self {
+			Self(imp::RwLock::new(value))
+		}
+
+		pub(crate) fn read(&self) -> imp::RwLockReadGuard<'_, T> {
+			self.0.read().unwrap_or_else(PoisonError::into_inner)
+		}
+
+		pub(crate) fn write(&self) -> imp::RwLockWriteGuard<'_, T> {
+			self.0.write().unwrap_or_else(PoisonError::into_inner)
+		}
+
+		pub(crate) fn try_read(&self) -> Option<imp::RwLockReadGuard<'_, T>> {
+			match self.0.try_read() {
+				Ok(guard) => Some(guard),
+				Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+				Err(TryLockError::WouldBlock) => None,
+			}
+		}
 	}
 }
 

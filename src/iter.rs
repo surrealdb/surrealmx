@@ -17,10 +17,10 @@
 
 use crate::direction::Direction;
 use crate::queue::Merge;
+use crate::sync::RwLock;
 use crate::versions::Versions;
 use artmap::{EntryRef, Range as ArtRange};
 use byteslice::ByteSlice;
-use parking_lot::RwLock;
 use std::collections::btree_map::Range as TreeRange;
 use std::ops::Bound;
 use std::sync::Arc;
