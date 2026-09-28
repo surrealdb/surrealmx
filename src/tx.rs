@@ -893,8 +893,10 @@ impl TransactionInner {
 							spins += 1;
 						}
 						// A full lap of commits has overwritten a commit in
-						// our conflict window, so its writeset is unknown
-						SlotRead::Lapped => {
+						// our conflict window, so its writeset is unknown.
+						// Released entries sit at or below the retired
+						// watermark, which a live window never reaches.
+						SlotRead::Gone => {
 							commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
 							commit_guard.armed = false;
 							self.database.advance_commit_watermark();

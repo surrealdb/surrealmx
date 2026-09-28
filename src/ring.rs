@@ -37,6 +37,12 @@
 //! lock, so a reader holding the read lock always sees the sequence number
 //! that matches the entry. A reader that finds a later occupant knows the
 //! entry it wanted is gone, and must treat it conservatively.
+//!
+//! Once the retired prefix passes an entry, its slot releases the entry but
+//! keeps its sequence number, so retired commits stop pinning memory while
+//! waiting a lap to be overwritten. The retired prefix never passes the
+//! completed prefix, so a released entry was complete, and a slot that
+//! holds its own sequence number without an entry reads as gone.
 
 use crate::sync::{AtomicU64, RwLock};
 use crossbeam_utils::CachePadded;
@@ -68,10 +74,10 @@ pub(crate) trait RingEntry {
 pub(crate) enum SlotRead<R> {
 	/// The sequence has been claimed, but its entry is not published yet.
 	Pending,
-	/// The entry was published and has since been overwritten by a later
-	/// lap, so its contents are no longer available. It was complete when
-	/// it was overwritten.
-	Lapped,
+	/// The entry was published and complete, and has since been overwritten
+	/// by a later lap or released after retirement, so its contents are no
+	/// longer available.
+	Gone,
 	/// The entry published at this sequence.
 	Ready(R),
 }
@@ -197,12 +203,11 @@ impl<T: RingEntry> CommitRing<T> {
 		let guard = slot.entry.read();
 		// Stable under the read lock, so it describes `guard`
 		let current = slot.seq.load(Ordering::Relaxed);
-		if current > seq {
-			SlotRead::Lapped
-		} else if let (true, Some(entry)) = (current == seq, guard.as_ref()) {
-			SlotRead::Ready(f(entry))
-		} else {
-			SlotRead::Pending
+		match (current.cmp(&seq), guard.as_ref()) {
+			(std::cmp::Ordering::Equal, Some(entry)) => SlotRead::Ready(f(entry)),
+			// Released after retirement, or overwritten by a later lap
+			(std::cmp::Ordering::Equal, None) | (std::cmp::Ordering::Greater, _) => SlotRead::Gone,
+			(std::cmp::Ordering::Less, _) => SlotRead::Pending,
 		}
 	}
 
@@ -246,8 +251,10 @@ impl<T: RingEntry> CommitRing<T> {
 			while target < published {
 				let complete = match self.read(target + 1, |e| e.is_complete()) {
 					SlotRead::Ready(complete) => complete,
-					// Only a complete occupant is ever overwritten
-					SlotRead::Lapped => true,
+					// Only a complete occupant is ever overwritten or
+					// released. A released slot is only reached from a
+					// stale view of this prefix, which already passed it.
+					SlotRead::Gone => true,
 					SlotRead::Pending => false,
 				};
 				if !complete {
@@ -271,9 +278,34 @@ impl<T: RingEntry> CommitRing<T> {
 		}
 	}
 
-	/// Advances the retired watermark `taken` in O(1).
+	/// Advances the retired watermark `taken`, releasing the entries it
+	/// passes so that retired slots stop pinning memory.
+	///
+	/// The caller must guarantee that no live or future conflict window
+	/// reaches at or below `new_taken`. The watermark is also clamped to the
+	/// completed prefix, which keeps released slots out of the completed
+	/// prefix's own scan and makes every released entry a complete one.
 	pub(crate) fn advance_taken(&self, new_taken: u64) {
-		self.taken.fetch_max(new_taken, Ordering::SeqCst);
+		let new_taken = new_taken.min(self.completed());
+		let prev = self.taken.fetch_max(new_taken, Ordering::SeqCst);
+		// Concurrent advances release disjoint ranges, and only the most
+		// recent lap of sequences can still hold an entry
+		let from = prev.max(new_taken.saturating_sub(self.capacity));
+		for seq in (from + 1)..=new_taken {
+			self.release(seq);
+		}
+	}
+
+	/// Drops the entry of a retired sequence, keeping its sequence number.
+	fn release(&self, seq: u64) {
+		let slot = self.slot(seq);
+		let mut guard = slot.entry.write();
+		// A later lap may already own the slot
+		if slot.seq.load(Ordering::Relaxed) == seq {
+			let released = guard.take();
+			drop(guard);
+			drop(released);
+		}
 	}
 
 	/// The contiguous published prefix bound.
@@ -299,6 +331,12 @@ impl<T: RingEntry> CommitRing<T> {
 	#[cfg(all(test, not(loom)))]
 	pub(crate) const fn capacity(&self) -> u64 {
 		self.capacity
+	}
+
+	/// The number of slots currently holding an entry.
+	#[cfg(test)]
+	pub(crate) fn occupied(&self) -> usize {
+		self.slots.iter().filter(|s| s.entry.read().is_some()).count()
 	}
 }
 
@@ -338,8 +376,8 @@ mod tests {
 		matches!(read, SlotRead::Pending)
 	}
 
-	const fn is_lapped(read: &SlotRead<Arc<Entry>>) -> bool {
-		matches!(read, SlotRead::Lapped)
+	const fn is_gone(read: &SlotRead<Arc<Entry>>) -> bool {
+		matches!(read, SlotRead::Gone)
 	}
 
 	fn advance(ring: &CommitRing<Entry>) {
@@ -473,7 +511,7 @@ mod tests {
 			assert_eq!(seq_of(ring.get(s)), Some(s));
 		}
 		for s in 1..=(last - ring.capacity()) {
-			assert!(is_lapped(&ring.get(s)), "sequence {s} should have been lapped");
+			assert!(is_gone(&ring.get(s)), "sequence {s} should have been lapped");
 		}
 	}
 
@@ -503,7 +541,7 @@ mod tests {
 		let last = held + ring.capacity();
 		assert_eq!(ring.published(), last);
 		assert_eq!(ring.completed(), last);
-		assert!(is_lapped(&ring.get(held)));
+		assert!(is_gone(&ring.get(held)));
 		assert_eq!(seq_of(ring.get(last)), Some(last));
 	}
 
@@ -538,7 +576,7 @@ mod tests {
 		advance(&ring);
 		assert_eq!(ring.published(), lapped);
 		assert_eq!(ring.completed(), lapped);
-		assert!(is_lapped(&ring.get(first.seq)));
+		assert!(is_gone(&ring.get(first.seq)));
 	}
 
 	#[test]
@@ -550,15 +588,25 @@ mod tests {
 			let s = ring.claim();
 			ring.publish(s, entry(s, true));
 		}
-		assert!(is_lapped(&ring.get(1)));
+		assert!(is_gone(&ring.get(1)));
 		advance(&ring);
 		assert_eq!(ring.published(), 3);
 		assert_eq!(ring.completed(), 3);
 	}
 
+	/// Publish `n` complete commits and advance both prefixes over them.
+	fn commit_all(ring: &CommitRing<Entry>, n: u64) {
+		for _ in 0..n {
+			let s = ring.claim();
+			ring.publish(s, entry(s, true));
+		}
+		advance(ring);
+	}
+
 	#[test]
 	fn advance_taken_is_monotonic() {
-		let ring = CommitRing::<Entry>::new(8, 1);
+		let ring = CommitRing::new(8, 1);
+		commit_all(&ring, 7);
 		ring.advance_taken(5);
 		assert_eq!(ring.taken(), 5);
 		ring.advance_taken(3);
@@ -568,10 +616,79 @@ mod tests {
 	}
 
 	#[test]
+	fn advance_taken_releases_retired_entries() {
+		let ring = CommitRing::new(8, 1);
+		commit_all(&ring, 5);
+		assert_eq!(ring.occupied(), 5);
+		ring.advance_taken(3);
+		assert_eq!(ring.occupied(), 2);
+		for s in 1..=3 {
+			assert!(is_gone(&ring.get(s)), "sequence {s} should have been released");
+		}
+		assert_eq!(seq_of(ring.get(4)), Some(4));
+		assert_eq!(seq_of(ring.get(5)), Some(5));
+		// Releasing leaves both prefixes where they were
+		advance(&ring);
+		assert_eq!(ring.published(), 5);
+		assert_eq!(ring.completed(), 5);
+	}
+
+	#[test]
+	fn advance_taken_never_passes_the_completed_prefix() {
+		let ring = CommitRing::new(8, 1);
+		let (a, b) = (ring.claim(), ring.claim());
+		ring.publish(a, entry(a, true));
+		ring.publish(b, entry(b, false));
+		advance(&ring);
+		assert_eq!(ring.completed(), a);
+		ring.advance_taken(b);
+		assert_eq!(ring.taken(), a);
+		// The in-flight entry is still readable
+		assert_eq!(seq_of(ring.get(b)), Some(b));
+		assert_eq!(ring.occupied(), 1);
+	}
+
+	#[test]
+	fn a_released_slot_is_free_for_the_next_lap() {
+		// A released occupant counts as complete, so the lapping publish
+		// goes straight in rather than waiting
+		let ring = CommitRing::new(2, 1);
+		commit_all(&ring, 2);
+		ring.advance_taken(2);
+		assert_eq!(ring.occupied(), 0);
+		commit_all(&ring, 2);
+		assert_eq!(seq_of(ring.get(3)), Some(3));
+		assert_eq!(seq_of(ring.get(4)), Some(4));
+		assert_eq!(ring.completed(), 4);
+	}
+
+	#[test]
+	fn release_skips_a_slot_owned_by_a_later_lap() {
+		// Retire sequence 1 only after sequence 3 has taken its slot
+		let ring = CommitRing::new(2, 1);
+		commit_all(&ring, 3);
+		ring.advance_taken(1);
+		assert_eq!(ring.taken(), 1);
+		assert_eq!(seq_of(ring.get(3)), Some(3));
+		assert_eq!(ring.occupied(), 2);
+	}
+
+	#[test]
+	fn release_only_visits_the_most_recent_lap() {
+		// A large jump releases every slot still holding a retired entry
+		let ring = CommitRing::new(4, 1);
+		commit_all(&ring, 40);
+		ring.advance_taken(40);
+		assert_eq!(ring.taken(), 40);
+		assert_eq!(ring.occupied(), 0);
+	}
+
+	#[test]
 	fn concurrent_commits_across_many_laps() {
 		// Many committers share a tiny ring, forcing constant slot reuse,
 		// while a reader checks that every entry it can see belongs to the
-		// sequence it asked for.
+		// sequence it asked for, and a cleaner retires and releases entries
+		// behind them.
 		let threads: u64 = if cfg!(miri) {
 			3
 		} else {
@@ -599,6 +716,16 @@ mod tests {
 				}
 			})
 		};
+		let cleaner = {
+			let ring = Arc::clone(&ring);
+			let stop = Arc::clone(&stop);
+			thread::spawn(move || {
+				while !stop.load(Ordering::Relaxed) {
+					ring.advance_taken(ring.completed().saturating_sub(1));
+					thread::yield_now();
+				}
+			})
+		};
 		let writers: Vec<_> = (0..threads)
 			.map(|_| {
 				let ring = Arc::clone(&ring);
@@ -621,13 +748,17 @@ mod tests {
 		}
 		stop.store(true, Ordering::Relaxed);
 		reader.join().unwrap();
+		cleaner.join().unwrap();
 		advance(&ring);
 		let total = threads * per_thread;
 		assert_eq!(ring.published(), total);
 		assert_eq!(ring.completed(), total);
-		for s in (total - ring.capacity() + 1)..=total {
+		// Everything above the retired watermark is still readable
+		for s in (ring.taken() + 1).max(total - ring.capacity() + 1)..=total {
 			assert_eq!(seq_of(ring.get(s)), Some(s));
 		}
+		ring.advance_taken(total);
+		assert_eq!(ring.occupied(), 0);
 	}
 }
 
@@ -756,7 +887,7 @@ mod loom_tests {
 			late.join().unwrap();
 			ring.advance_published();
 			assert_eq!(ring.published(), b);
-			assert!(matches!(ring.get(a), SlotRead::Lapped));
+			assert!(matches!(ring.get(a), SlotRead::Gone));
 			assert!(matches!(ring.get(b), SlotRead::Ready(ref e) if e.seq == b));
 		});
 	}
@@ -784,6 +915,42 @@ mod loom_tests {
 			ring.advance_published();
 			ring.advance_completed();
 			assert_eq!(ring.published(), 2);
+			assert_eq!(ring.completed(), 2);
+		});
+	}
+
+	#[test]
+	fn release_never_drops_a_later_laps_entry() {
+		// Retiring sequence 1 races the commit that laps it into the only
+		// slot, while a reader looks at both
+		model(|| {
+			let ring = Arc::new(CommitRing::new(1, 1));
+			commit(&ring);
+			let releaser = {
+				let ring = Arc::clone(&ring);
+				thread::spawn(move || ring.advance_taken(1))
+			};
+			let lapper = {
+				let ring = Arc::clone(&ring);
+				thread::spawn(move || {
+					commit(&ring);
+				})
+			};
+			match ring.get(1) {
+				SlotRead::Ready(e) => assert_eq!(e.seq, 1),
+				SlotRead::Gone => {}
+				SlotRead::Pending => panic!("a published entry read as pending"),
+			}
+			if let SlotRead::Ready(e) = ring.get(2) {
+				assert_eq!(e.seq, 2);
+			}
+			releaser.join().unwrap();
+			lapper.join().unwrap();
+			assert_eq!(ring.taken(), 1);
+			assert!(matches!(ring.get(1), SlotRead::Gone));
+			assert!(matches!(ring.get(2), SlotRead::Ready(ref e) if e.seq == 2));
+			ring.advance_published();
+			ring.advance_completed();
 			assert_eq!(ring.completed(), 2);
 		});
 	}
