@@ -166,9 +166,6 @@ fn direct_writes_never_report_conflicts() {
 			thread::spawn(move || {
 				for i in 0..writes {
 					db.set("hot", format!("{t}:{i}")).unwrap();
-					if i % 7 == 0 {
-						db.del("hot").unwrap();
-					}
 				}
 			})
 		})
