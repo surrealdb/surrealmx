@@ -36,8 +36,8 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 | Engine | Point&nbsp;Read&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Create&nbsp;(OPS) | Update&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Delete&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Scan&nbsp;(OPS) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
 | **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**19,002,983** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**4,265,023** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,113,599** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,744,968** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**329,574** |
-| LMDB (In-Memory) | 1,188,844 | 234,230 | 218,400 | 172,182 | 132,397 |
-| RocksDB (In-Memory) | 788,066 | 664,999 | 581,861 | 740,588 | 134,237 |
+| LMDB<br><sup>(In-Memory)</sup> | 1,188,844 | 234,230 | 218,400 | 172,182 | 132,397 |
+| RocksDB<br><sup>(In-Memory)</sup> | 788,066 | 664,999 | 581,861 | 740,588 | 134,237 |
 
 - **Point Reads**: Over **19,000,000 OPS** sustained (263ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **15× faster** than LMDB and **24× faster** than RocksDB.
 - **Writes & Creates**: Over **4,260,000 OPS** (1.17s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **6.4× faster** than RocksDB and **18× faster** than LMDB.
@@ -50,8 +50,8 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 | Engine | Resting&nbsp;Memory | Peak&nbsp;Memory |
 | :--- | ---: | ---: |
 | **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5.5 GiB** | 10.9 GiB |
-| LMDB (In-Memory) | 7.0 GiB | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**8.4 GiB** |
-| RocksDB (In-Memory) | 8.7 GiB | 32.2 GiB |
+| LMDB<br><sup>(In-Memory)</sup> | 7.0 GiB | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**8.4 GiB** |
+| RocksDB<br><sup>(In-Memory)</sup> | 8.7 GiB | 32.2 GiB |
 
 - **In-Memory Dataset**: True in-memory database holding all 5,000,000 documents resident at **5.5 GiB** resting memory (~1KB per full multi-version document).
 - **Concurrent Scaling**: Peak memory expands dynamically under high-throughput 48-worker commits before settling back to resting baseline.

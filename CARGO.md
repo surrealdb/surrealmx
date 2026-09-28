@@ -33,8 +33,8 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 | Engine | Point Read (OPS) | Create (OPS) | Update (OPS) | Delete (OPS) | Scan (OPS) | Peak Memory |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **SurrealMX** | **19,002,983** | **4,265,023** | **5,113,599** | **5,744,968** | **329,574** | **10.9 GiB** |
-| LMDB (In-Memory) | 1,188,844 | 234,230 | 218,400 | 172,182 | 132,397 | 8.4 GiB |
-| RocksDB (In-Memory) | 788,066 | 664,999 | 581,861 | 740,588 | 134,237 | 32.2 GiB |
+| LMDB<br><sup>(In-Memory)</sup> | 1,188,844 | 234,230 | 218,400 | 172,182 | 132,397 | 8.4 GiB |
+| RocksDB<br><sup>(In-Memory)</sup> | 788,066 | 664,999 | 581,861 | 740,588 | 134,237 | 32.2 GiB |
 
 - **Point Reads**: Over **19,000,000 OPS** sustained (263ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`) — over **15× faster** than LMDB and **24× faster** than RocksDB.
 - **Writes & Creates**: Over **4,260,000 OPS** via the lock-free circular commit ring buffer and direct auto-commit datastore bypass — **6.4× faster** than RocksDB and **18× faster** than LMDB.
