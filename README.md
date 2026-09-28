@@ -36,28 +36,22 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 | Engine | Point&nbsp;Read&nbsp;(OPS) | Create&nbsp;(OPS) | Update&nbsp;(OPS) | Delete&nbsp;(OPS) | Scan&nbsp;(OPS) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
 | **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**19,002,983** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**4,265,023** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,113,599** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,744,968** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**329,574** |
-| LMDB | 896,110 | 695 | 704 | 705 | 252,972 |
-| RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 |
-| Fjall | 767,353 | 1,327 | 1,315 | 1,172 | 143,141 |
-| SlateDB | 273,033 | 8,433 | 8,393 | 8,339 | 1,080 |
-| Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 |
+| LMDB (In-Memory) | 1,188,844 | 234,230 | 218,400 | 172,182 | 132,397 |
+| RocksDB (In-Memory) | 788,066 | 664,999 | 581,861 | 740,588 | 134,237 |
 
-- **Point Reads**: Over **19,000,000 OPS** sustained (263ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **21× faster** than LMDB and **27× faster** than RocksDB.
-- **Writes & Creates**: Over **4,260,000 OPS** (1.17s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **134× faster** than RocksDB.
-- **Updates**: Over **5,110,000 OPS** (977ms for 5,000,000 updates): **154× faster** than RocksDB.
-- **Deletes**: Over **5,270,000 OPS** (948ms for 5,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **152× faster** than RocksDB.
-- **Range Scans**: Over **329,000 OPS** using zero-allocation cursor traversal (`scan_with` / `keys_for_each`).
+- **Point Reads**: Over **19,000,000 OPS** sustained (263ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **15× faster** than LMDB and **24× faster** than RocksDB.
+- **Writes & Creates**: Over **4,260,000 OPS** (1.17s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **6.4× faster** than RocksDB and **18× faster** than LMDB.
+- **Updates**: Over **5,110,000 OPS** (977ms for 5,000,000 updates): **8.7× faster** than RocksDB and **23× faster** than LMDB.
+- **Deletes**: Over **5,740,000 OPS** (870ms for 5,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **7.7× faster** than RocksDB and **33× faster** than LMDB.
+- **Range Scans**: Over **329,000 OPS** using zero-allocation cursor traversal (`scan_with` / `keys_for_each`): over **2.4× faster** than RocksDB and LMDB.
 
 ### Memory Profile
 
 | Engine | Resting&nbsp;Memory | Peak&nbsp;Memory |
 | :--- | ---: | ---: |
-| **SurrealMX** | 5.5 GiB | 10.9 GiB |
-| LMDB | ~421 MB | 580 MB |
-| RocksDB | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**~356 MB** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**442 MB** |
-| Fjall | ~405 MB | 669 MB |
-| SlateDB | ~449 MB | 1.71 GB |
-| Libmdbx | ~373 MB | 643 MB |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5.5 GiB** | 10.9 GiB |
+| LMDB (In-Memory) | 7.0 GiB | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**8.4 GiB** |
+| RocksDB (In-Memory) | 8.7 GiB | 32.2 GiB |
 
 - **In-Memory Dataset**: True in-memory database holding all 5,000,000 documents resident at **5.5 GiB** resting memory (~1KB per full multi-version document).
 - **Concurrent Scaling**: Peak memory expands dynamically under high-throughput 48-worker commits before settling back to resting baseline.
