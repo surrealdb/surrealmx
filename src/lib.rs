@@ -44,6 +44,7 @@ mod pool;
 mod queue;
 mod readers;
 mod ring;
+mod sync;
 mod tx;
 mod version;
 mod versions;

@@ -499,7 +499,7 @@ impl Database {
 		let commit = Commit::new_single(key.clone(), version);
 		self.inner.commit_ring.publish(commit_slot, Arc::new(commit));
 		if commit_slot.trailing_zeros() >= 3 {
-			self.inner.commit_ring.advance_published_prefix();
+			self.inner.commit_ring.advance_published();
 			self.inner.advance_commit_watermark();
 		}
 
@@ -577,7 +577,7 @@ impl Database {
 		let commit = Commit::new_single(key.clone(), version);
 		self.inner.commit_ring.publish(commit_slot, Arc::new(commit));
 		if commit_slot.trailing_zeros() >= 3 {
-			self.inner.commit_ring.advance_published_prefix();
+			self.inner.commit_ring.advance_published();
 			self.inner.advance_commit_watermark();
 		}
 
@@ -1848,7 +1848,6 @@ mod tests {
 
 	#[test]
 	fn commit_watermark_tracks_commits() {
-		use std::sync::atomic::Ordering;
 		let db = Database::new_with_options(
 			crate::DatabaseOptions::default().with_all_workers_disabled(),
 		);
@@ -1858,8 +1857,8 @@ mod tests {
 			tx.commit().unwrap();
 		}
 		// Every commit completed, so the watermark covers all claimed ids
-		assert_eq!(db.commit_watermark.load(Ordering::SeqCst), 5);
-		assert_eq!(db.inner.commit_ring.published_prefix.load(Ordering::SeqCst), 5);
+		assert_eq!(db.commit_watermark(), 5);
+		assert_eq!(db.inner.commit_ring.published(), 5);
 		// An aborted commit removes its entry, which also counts as
 		// complete: the watermark must still cover the aborted id.
 		let mut tx1 = db.transaction(true);
@@ -1868,10 +1867,7 @@ mod tests {
 		tx2.set("conflict", "b").unwrap();
 		tx1.commit().unwrap();
 		assert!(tx2.commit().is_err());
-		assert_eq!(
-			db.commit_watermark.load(Ordering::SeqCst),
-			db.inner.commit_ring.published_prefix.load(Ordering::SeqCst)
-		);
+		assert_eq!(db.commit_watermark(), db.inner.commit_ring.published());
 	}
 
 	#[test]
