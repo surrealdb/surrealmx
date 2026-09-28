@@ -3901,6 +3901,7 @@ mod tests {
 	}
 
 	#[test]
+	#[cfg_attr(miri, ignore = "artmap 0.5.0 races on concurrent node inserts, reported by Miri")]
 	fn test_atomic_transaction_id_generation() {
 		use std::sync::{Arc, Barrier};
 		use std::thread;
@@ -3969,6 +3970,7 @@ mod tests {
 	}
 
 	#[test]
+	#[cfg_attr(miri, ignore = "artmap 0.5.0 races on concurrent node inserts, reported by Miri")]
 	fn test_atomic_commit_ordering() {
 		use std::sync::{Arc, Barrier};
 		use std::thread;
@@ -4546,9 +4548,14 @@ mod tests {
 		// Create a database with GC disabled (automatic version cleanup
 		// enabled)
 		let db = Database::new();
+		let keys = if cfg!(miri) {
+			200
+		} else {
+			10_000
+		};
 
-		// Insert 10,000 keys one-by-one
-		for i in 0..10_000 {
+		// Insert the keys one-by-one
+		for i in 0..keys {
 			let key = format!("key_{i:08}").into_bytes();
 			let value = format!("value_{i:08}").into_bytes();
 
@@ -4558,7 +4565,7 @@ mod tests {
 		}
 
 		// Read each key one-by-one
-		for i in 0..10_000 {
+		for i in 0..keys {
 			let key = format!("key_{i:08}").into_bytes();
 			let expected_value = format!("value_{i:08}").into_bytes();
 
@@ -4576,6 +4583,7 @@ mod tests {
 	}
 
 	#[test]
+	#[cfg_attr(miri, ignore = "artmap 0.5.0 races on concurrent node inserts, reported by Miri")]
 	fn test_gc_concurrent_readers() {
 		use std::sync::Arc;
 		use std::thread;
@@ -4688,6 +4696,7 @@ mod tests {
 	}
 
 	#[test]
+	#[cfg_attr(miri, ignore = "artmap 0.5.0 races on concurrent node inserts, reported by Miri")]
 	fn test_concurrent_write_read_merge_queue_race() {
 		// Verifies atomic visibility of committed writes between the merge
 		// queue overlay and the datastore version chains: a reader must observe
@@ -4759,6 +4768,7 @@ mod tests {
 	}
 
 	#[test]
+	#[cfg_attr(miri, ignore = "artmap 0.5.0 races on concurrent node inserts, reported by Miri")]
 	fn test_high_concurrency_merge_queue_visibility() {
 		// Simulate the crud-bench scenario: many concurrent writers and readers
 		// This stresses the merge queue under high contention

@@ -154,6 +154,67 @@ jobs:
           SURREALMX_SIM_STEPS: 5000
         run: cargo test --release -p surrealmx --lib test::sim -- --nocapture
 
+  loom:
+    name: Loom (commit ring)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # `--cfg loom` swaps the ring's atomics and locks for loom's (see
+      # `src/sync.rs`), which explores every interleaving of each model up
+      # to the preemption bound.
+      - name: Model check the commit ring
+        env:
+          RUSTFLAGS: --cfg loom
+          LOOM_MAX_PREEMPTIONS: 3
+        run: cargo test --release --lib ring::loom_tests
+
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: nightly
+          components: miri, rust-src
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Set up Miri
+        run: cargo +nightly miri setup
+
+      # The commit ring touches no epoch-reclaimed structures, so it runs
+      # under the full Tree Borrows aliasing model.
+      - name: Commit ring (Tree Borrows)
+        env:
+          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-strict-provenance
+        run: cargo +nightly miri test --lib ring::tests
+
+      # Everything else goes through crossbeam-skiplist 0.1.3, which frees
+      # nodes through pointers derived from shared references and so fails
+      # both aliasing models, so they are disabled here. Miri still checks
+      # for use-after-free, out-of-bounds and uninitialised accesses, and
+      # data races. Epoch-based reclamation leaves garbage at exit, hence
+      # ignoring leaks; persistence tests need the real filesystem.
+      - name: Engine
+        env:
+          MIRIFLAGS: -Zmiri-disable-stacked-borrows -Zmiri-ignore-leaks -Zmiri-disable-isolation
+        run: |
+          cargo +nightly miri test --lib
+          cargo +nightly miri test --test direct_operations
+
   wasm-check:
     name: WASM Check & Clippy
     runs-on: ubuntu-latest
