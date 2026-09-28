@@ -17,16 +17,16 @@
 use crate::oracle::Oracle;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::persistence::Persistence;
-use crate::queue::Merge;
+use crate::queue::{Commit, Merge};
 use crate::readers::Readers;
 use crate::ring::{CommitRing, DEFAULT_COMMIT_RING_CAPACITY};
+use crate::sync::RwLock;
 use crate::versions::Versions;
 use crate::DatabaseOptions;
 use byteslice::ByteSlice;
 use crossbeam_skiplist::SkipMap;
 use crossbeam_utils::CachePadded;
 use papaya::HashSet;
-use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
@@ -88,12 +88,10 @@ pub struct Inner {
 	pub(crate) readers: Readers,
 	/// Monotonic slot id allocator for the readers map
 	pub(crate) reader_slot_id: CachePadded<AtomicU64>,
-	/// The contiguous completed prefix of the commit ring: every commit
-	/// with an id at or below this watermark has either published its
-	/// merge version or aborted.
-	pub(crate) commit_watermark: CachePadded<AtomicU64>,
-	/// The fixed-size, lock-free OCC circular commit ring buffer.
-	pub(crate) commit_ring: CommitRing,
+	/// The fixed-size, lock-free OCC circular commit ring buffer. Its
+	/// completed prefix is the commit watermark: every commit with an id
+	/// at or below it has either published its merge version or aborted.
+	pub(crate) commit_ring: CommitRing<Commit>,
 	/// Transaction updates which are committed but not yet applied
 	pub(crate) transaction_merge_queue: SkipMap<u64, Arc<Merge>>,
 	/// The contiguous retired prefix of the merge queue: every merge
@@ -150,7 +148,6 @@ impl Inner {
 			datastore: artmap::ArtMap::new(),
 			readers: Readers::new(),
 			reader_slot_id: CachePadded::new(AtomicU64::new(0)),
-			commit_watermark: CachePadded::new(AtomicU64::new(0)),
 			commit_ring: CommitRing::new(DEFAULT_COMMIT_RING_CAPACITY, 1),
 			transaction_merge_queue: SkipMap::new(),
 			merge_retire_id: CachePadded::new(AtomicU64::new(0)),
@@ -186,16 +183,21 @@ impl Inner {
 
 	/// Returns the number of unretired commits in the commit ring.
 	pub fn unretired_commits(&self) -> u64 {
-		let prefix = self.commit_ring.published_prefix.load(Ordering::SeqCst);
-		let taken = self.commit_ring.taken.load(Ordering::SeqCst);
-		prefix.saturating_sub(taken)
+		self.commit_ring.published().saturating_sub(self.commit_ring.taken())
+	}
+
+	/// The commit watermark: the contiguous completed prefix of the commit
+	/// ring.
+	#[inline]
+	pub(crate) fn commit_watermark(&self) -> u64 {
+		self.commit_ring.completed()
 	}
 
 	/// Trim commit-queue entries which no active or future transaction can
 	/// need for conflict detection.
 	pub(crate) fn cleanup_commit_queue(&self) {
 		self.refresh_commit_watermark();
-		let fallback = self.commit_watermark.load(Ordering::SeqCst);
+		let fallback = self.commit_watermark();
 		if let Some(oldest) = self.earliest_active_commit(fallback) {
 			self.commit_ring.advance_taken(oldest.saturating_sub(1));
 		}
@@ -258,7 +260,7 @@ impl Inner {
 	/// Opportunistically advance the contiguous inserted prefix of the
 	/// commit ring as far as currently possible.
 	pub(crate) fn try_advance_commit_prefix(&self) {
-		self.commit_ring.advance_published_prefix();
+		self.commit_ring.advance_published();
 	}
 
 	/// Opportunistically advance the published merge clock as far as
@@ -308,31 +310,7 @@ impl Inner {
 
 	/// Advance the contiguous completed prefix of the commit ring.
 	pub(crate) fn advance_commit_watermark(&self) {
-		let max_prefix = self.commit_ring.published_prefix.load(Ordering::Acquire);
-		let wm = self.commit_watermark.load(Ordering::Acquire);
-		let mut target = wm;
-		while target < max_prefix {
-			let next = target + 1;
-			let slot = self.commit_ring.slot(next);
-			let guard = slot.commit.read();
-			let complete = match *guard {
-				Some(ref entry) => entry.merge_version.load(Ordering::SeqCst) != 0,
-				None => true,
-			};
-			drop(guard);
-			if !complete {
-				break;
-			}
-			target = next;
-		}
-		if target > wm {
-			let _ = self.commit_watermark.compare_exchange(
-				wm,
-				target,
-				Ordering::Release,
-				Ordering::Relaxed,
-			);
-		}
+		self.commit_ring.advance_completed();
 	}
 
 	/// Advance the contiguous retired prefix of the merge queue, removing

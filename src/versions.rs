@@ -205,6 +205,28 @@ impl Versions {
 		}
 	}
 
+	/// The version a reader without a pinned snapshot observes at `version`:
+	/// the newest version at or below it, or failing that the oldest one
+	/// above it.
+	///
+	/// An unpinned reader does not hold back garbage collection, so the
+	/// versions at or below its clock value may have been reclaimed by the
+	/// time it locks the chain. Every version in a chain was published
+	/// before it was applied, and one above the reader's clock value was
+	/// published after the read began, so returning it is a linearizable
+	/// read of a value committed while the read was in progress.
+	#[inline]
+	pub(crate) fn fetch_unpinned(&self, version: u64) -> Option<&Version> {
+		match self {
+			Self::Empty => None,
+			Self::Single(ref v) => Some(v),
+			Self::Chain(ref chain) => match self.find_index_lte_version(version) {
+				0 => chain.first(),
+				idx => chain.get(idx - 1),
+			},
+		}
+	}
+
 	/// Access the value at a specific version via closure without cloning.
 	#[inline]
 	pub(crate) fn with_version<F, R>(&self, version: u64, f: F) -> Option<R>
@@ -801,6 +823,30 @@ mod tests {
 		}
 		assert_eq!(versions.len(), 1);
 		assert_eq!(versions.fetch_version(10), Some(ByteSlice::from("v99")));
+	}
+
+	#[test]
+	fn fetch_unpinned_prefers_the_newest_visible_version() {
+		let versions = make_versions(vec![(10, Some("v1")), (20, Some("v2")), (30, None)]);
+		let seen = |at| versions.fetch_unpinned(at).map(|v| (v.version, v.value.clone()));
+		assert_eq!(seen(10), Some((10, Some(ByteSlice::from("v1")))));
+		assert_eq!(seen(25), Some((20, Some(ByteSlice::from("v2")))));
+		assert_eq!(seen(99), Some((30, None)));
+	}
+
+	#[test]
+	fn fetch_unpinned_falls_back_to_the_oldest_newer_version() {
+		// Garbage collection has trimmed everything at or below the
+		// reader's clock value, leaving only newer versions
+		let mut versions =
+			make_versions(vec![(10, Some("v1")), (20, Some("v2")), (30, Some("v3"))]);
+		versions.gc_older_versions(20);
+		assert!(versions.fetch_version(15).is_none());
+		assert_eq!(versions.fetch_unpinned(15).map(|v| v.version), Some(20));
+		versions.gc_older_versions(30);
+		assert!(versions.fetch_version(15).is_none());
+		assert_eq!(versions.fetch_unpinned(15).map(|v| v.version), Some(30));
+		assert!(Versions::new().fetch_unpinned(15).is_none());
 	}
 
 	#[test]

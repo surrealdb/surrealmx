@@ -23,13 +23,15 @@ use crate::iter::{MergeIterator, MergeQueueIter};
 use crate::kv::IntoBytes;
 use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
+use crate::ring::SlotRead;
+use crate::sync::backoff;
+use crate::sync::RwLock;
 use crate::version::Version;
 use crate::versions::Versions;
 use arc_swap::ArcSwap;
 use byteslice::ByteSlice;
 use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
-use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::Range;
@@ -587,7 +589,7 @@ fn pin_slot(db: &Inner, slot: &Arc<Slot>) -> (u64, u64, u64) {
 	// Pair with the fence in every watermark scan
 	fence(Ordering::SeqCst);
 	// Load the commit snapshot, then the version snapshot
-	let commit = db.commit_watermark.load(Ordering::SeqCst);
+	let commit = db.commit_watermark();
 	let version = db.oracle.timestamp.load(Ordering::SeqCst);
 	// Publish the chosen snapshot into the slot
 	slot.commit.store(commit, Ordering::SeqCst);
@@ -865,9 +867,9 @@ impl TransactionInner {
 		};
 		// Check wether we should check reads conflicts on commit
 		if self.mode >= IsolationLevel::SnapshotIsolation {
-			// Check if the ring buffer has lapped past this transaction's
+			// Check if the ring buffer has retired past this transaction's
 			// snapshot
-			if self.commit < self.database.commit_ring.taken.load(Ordering::Acquire) {
+			if self.commit < self.database.commit_ring.taken() {
 				commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
 				commit_guard.armed = false;
 				self.database.advance_commit_watermark();
@@ -881,44 +883,29 @@ impl TransactionInner {
 
 			// Retrieve all transactions committed since we began.
 			for s in (self.commit + 1)..commit_slot {
-				let slot = self.database.commit_ring.slot(s);
 				let mut spins = 0;
-				while !slot.is_published(s) {
-					let cur_seq = slot.seq.load(Ordering::Acquire);
-					if cur_seq > s || self.database.commit_ring.taken.load(Ordering::Acquire) >= s {
-						commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
-						commit_guard.armed = false;
-						self.database.advance_commit_watermark();
-						self.database.readers.remove(self.slot_id);
-						self.clear_read_state();
-						self.writeset.clear();
-						self.savepoint_stack.clear();
-						self.undo_journal.clear();
-						return Err(Error::KeyWriteConflict);
+				let tx = loop {
+					match self.database.commit_ring.get(s) {
+						SlotRead::Ready(tx) => break tx,
+						// Claimed before us but not yet published: wait
+						SlotRead::Pending => {
+							backoff(spins);
+							spins += 1;
+						}
+						// A full lap of commits has overwritten a commit in
+						// our conflict window, so its writeset is unknown
+						SlotRead::Lapped => {
+							commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
+							commit_guard.armed = false;
+							self.database.advance_commit_watermark();
+							self.database.readers.remove(self.slot_id);
+							self.clear_read_state();
+							self.writeset.clear();
+							self.savepoint_stack.clear();
+							self.undo_journal.clear();
+							return Err(Error::KeyWriteConflict);
+						}
 					}
-					crate::tx::backoff(spins);
-					spins += 1;
-				}
-
-				let tx = {
-					let guard = slot.commit.read();
-					if slot.seq.load(Ordering::Acquire) != s {
-						commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
-						commit_guard.armed = false;
-						self.database.advance_commit_watermark();
-						self.database.readers.remove(self.slot_id);
-						self.clear_read_state();
-						self.writeset.clear();
-						self.savepoint_stack.clear();
-						self.undo_journal.clear();
-						return Err(Error::KeyWriteConflict);
-					}
-					let Some(ref tx) = *guard else {
-						continue;
-					};
-					let cloned = Arc::clone(tx);
-					drop(guard);
-					cloned
 				};
 
 				// Skip aborted commits: their writes will never publish
@@ -2684,7 +2671,7 @@ impl TransactionInner {
 		let updates = Arc::new(updates);
 		let slot = self.database.commit_ring.claim();
 		self.database.commit_ring.publish(slot, Arc::clone(&updates));
-		self.database.commit_ring.advance_published_prefix();
+		self.database.commit_ring.advance_published();
 		(slot, updates)
 	}
 
@@ -2730,23 +2717,6 @@ impl TransactionInner {
 			// Increase the number loop spins we have attempted
 			spins += 1;
 		}
-	}
-}
-
-/// Progressive backoff strategy for contention in atomic queues.
-#[inline(always)]
-pub(crate) fn backoff(spins: usize) {
-	if spins < 10 {
-		std::hint::spin_loop();
-	} else {
-		#[cfg(not(target_arch = "wasm32"))]
-		if spins < 100 {
-			std::thread::yield_now();
-		} else {
-			std::thread::park_timeout(std::time::Duration::from_micros(10));
-		}
-		#[cfg(target_arch = "wasm32")]
-		std::hint::spin_loop();
 	}
 }
 

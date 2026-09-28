@@ -104,7 +104,7 @@ fn main() {
 
 ## Direct Database Operations
 
-For single-key reads, writes, and scans, `Database` exposes direct methods that execute with full ACID snapshot isolation while bypassing transaction pool checkout and reader slot registration:
+For single-key reads, writes, and scans, `Database` exposes direct methods. Point reads (`get`, `exists`, `with_value`) bypass transaction pool checkout and reader slot registration entirely, and are linearizable: each returns the latest committed value. Writes commit as single-key auto-committed transactions with full snapshot isolation, retrying write-write conflicts internally since they read nothing. Scans read a consistent snapshot pinned by a pooled read transaction:
 
 ```rust
 use surrealmx::Database;

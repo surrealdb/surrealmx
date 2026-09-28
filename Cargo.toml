@@ -31,6 +31,10 @@ unsafe_code = "forbid"
 # clippy pass in CI. Applied crate-wide it would demand a `//!` header on
 # every integration test and benchmark crate too.
 
+# `--cfg loom` swaps the commit ring's primitives for `loom`'s so that its
+# protocol can be model checked (see `src/sync.rs`).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
 [lints.clippy]
 
 # --- Guardrails ----------------------------------------------------------
@@ -227,6 +231,9 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 lz4 = "1.28.1"
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 bincode = { version = "2.0.1", features = ["serde"] }
