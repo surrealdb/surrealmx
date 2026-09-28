@@ -1675,6 +1675,7 @@ mod tests {
 			tx.commit().unwrap();
 		}
 		assert_eq!(db.unretired_commits(), 10);
+		assert_eq!(db.inner.commit_ring.occupied(), 10);
 		db.run_cleanup();
 		// With no registered readers the trim bound falls back to the
 		// current commit id: everything below it is unreachable by any
@@ -1682,6 +1683,8 @@ mod tests {
 		// above the commit id the transaction registers at. The exclusive
 		// bound leaves exactly the entry at the current commit id.
 		assert_eq!(db.unretired_commits(), 1);
+		// The retired entries are released, not just counted as retired
+		assert_eq!(db.inner.commit_ring.occupied(), 1);
 	}
 
 	#[test]
@@ -1710,10 +1713,35 @@ mod tests {
 		// 1-4 are trimmed; the entry at the reader's snapshot (5) and
 		// everything above remain.
 		assert_eq!(db.unretired_commits(), 6);
+		assert_eq!(db.inner.commit_ring.occupied(), 6);
 		drop(reader);
 		db.run_cleanup();
 		// With the reader gone the idle fallback applies again
 		assert_eq!(db.unretired_commits(), 1);
+		assert_eq!(db.inner.commit_ring.occupied(), 1);
+	}
+
+	#[test]
+	fn cleanup_keeps_entries_in_a_live_conflict_window() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("pre{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		let mut writer = db.transaction(true);
+		writer.set("mine", "value").unwrap();
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("post{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		db.run_cleanup();
+		// The writer validates against every commit in its window, so a
+		// released entry there would read as gone and abort it
+		writer.commit().unwrap();
 	}
 
 	#[test]
