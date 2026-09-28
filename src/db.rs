@@ -162,6 +162,11 @@ impl Database {
 	}
 
 	/// Fetch a key directly from the database without allocating a transaction.
+	///
+	/// The read is linearizable: it returns the latest value committed
+	/// before the call, or a value committed while the call was in
+	/// progress. It holds no snapshot, so use a transaction to read several
+	/// keys consistently.
 	pub fn get<K: IntoBytes>(&self, key: K) -> Result<Option<ByteSlice>, Error> {
 		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
 		let lookup = key.as_slice();
@@ -179,15 +184,15 @@ impl Database {
 		}
 		let res = ByteSlice::with_borrowed(lookup, |k| {
 			self.inner.datastore.get(k).and_then(|e| match e.value().try_read() {
-				Some(guard) => guard.fetch_version(version),
-				None => e.value().read().fetch_version(version),
+				Some(guard) => guard.fetch_unpinned(version).and_then(|v| v.value.clone()),
+				None => e.value().read().fetch_unpinned(version).and_then(|v| v.value.clone()),
 			})
 		});
 		Ok(res)
 	}
 
 	/// Inspect a key's value directly via closure without allocating a
-	/// transaction or cloning.
+	/// transaction or cloning. Linearizable, as [`Database::get`].
 	pub fn with_value<K, F, R>(&self, key: K, f: F) -> Result<Option<R>, Error>
 	where
 		K: IntoBytes,
@@ -209,14 +214,19 @@ impl Database {
 		}
 		let res = ByteSlice::with_borrowed(lookup, |k| {
 			self.inner.datastore.get(k).and_then(|e| match e.value().try_read() {
-				Some(guard) => guard.with_version(version, f),
-				None => e.value().read().with_version(version, f),
+				Some(guard) => {
+					guard.fetch_unpinned(version).and_then(|v| v.value.as_deref().map(f))
+				}
+				None => {
+					e.value().read().fetch_unpinned(version).and_then(|v| v.value.as_deref().map(f))
+				}
 			})
 		});
 		Ok(res)
 	}
 
 	/// Check if a key exists directly without allocating a transaction.
+	/// Linearizable, as [`Database::get`].
 	pub fn exists<K: IntoBytes>(&self, key: K) -> Result<bool, Error> {
 		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
 		let lookup = key.as_slice();
@@ -234,16 +244,18 @@ impl Database {
 		}
 		let exists = ByteSlice::with_borrowed(lookup, |k| {
 			self.inner.datastore.get(k).is_some_and(|e| match e.value().try_read() {
-				Some(guard) => guard.exists_version(version),
-				None => e.value().read().exists_version(version),
+				Some(guard) => guard.fetch_unpinned(version).is_some_and(|v| v.value.is_some()),
+				None => e.value().read().fetch_unpinned(version).is_some_and(|v| v.value.is_some()),
 			})
 		});
 		Ok(exists)
 	}
 
-	/// Scan key-value pairs in a range directly from the database without
-	/// allocating a transaction. Calls a closure with borrowed key and value
-	/// bytes, stopping early if the closure returns `false`.
+	/// Scan key-value pairs in a range directly from the database at a
+	/// consistent snapshot, calling a closure with borrowed key and value
+	/// bytes and stopping early if the closure returns `false`. A pooled
+	/// read transaction pins the snapshot, and the datastore is read in
+	/// place whenever no merge is still being applied.
 	pub fn scan_with<K, F>(
 		&self,
 		rng: Range<K>,
@@ -255,13 +267,15 @@ impl Database {
 		K: IntoBytes,
 		F: FnMut(&ByteSlice, &[u8]) -> bool,
 	{
-		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		// Pin a snapshot for the whole scan: without it, inline GC in
+		// concurrent commits can reclaim the versions being scanned
+		let tx = self.transaction(false);
+		let version = tx.version();
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
 		if !self.inner.transaction_merge_queue.is_empty()
 			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
 		{
-			let tx = self.transaction(false);
 			return tx.scan_with(beg..end, skip, limit, f);
 		}
 		let mut count = 0;
@@ -303,8 +317,9 @@ impl Database {
 		Ok(count)
 	}
 
-	/// Iterate keys in a range directly from the database without allocating a
-	/// transaction, stopping early if the closure returns `false`.
+	/// Iterate keys in a range directly from the database at a consistent
+	/// snapshot, stopping early if the closure returns `false`. See
+	/// [`Database::scan_with`].
 	pub fn keys_for_each<K, F>(
 		&self,
 		rng: Range<K>,
@@ -316,13 +331,15 @@ impl Database {
 		K: IntoBytes,
 		F: FnMut(&ByteSlice) -> bool,
 	{
-		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		// Pin a snapshot for the whole scan: without it, inline GC in
+		// concurrent commits can reclaim the versions being scanned
+		let tx = self.transaction(false);
+		let version = tx.version();
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
 		if !self.inner.transaction_merge_queue.is_empty()
 			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
 		{
-			let tx = self.transaction(false);
 			return tx.keys_for_each(beg..end, skip, limit, f);
 		}
 		let mut count = 0;
@@ -354,8 +371,8 @@ impl Database {
 		Ok(count)
 	}
 
-	/// Count keys in a range directly from the database without allocating a
-	/// transaction.
+	/// Count keys in a range directly from the database at a consistent
+	/// snapshot. See [`Database::scan_with`].
 	pub fn total<K>(
 		&self,
 		rng: Range<K>,
@@ -365,13 +382,15 @@ impl Database {
 	where
 		K: IntoBytes,
 	{
-		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		// Pin a snapshot for the whole scan: without it, inline GC in
+		// concurrent commits can reclaim the versions being scanned
+		let tx = self.transaction(false);
+		let version = tx.version();
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
 		if !self.inner.transaction_merge_queue.is_empty()
 			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
 		{
-			let tx = self.transaction(false);
 			return tx.total(beg..end, skip, limit);
 		}
 		let mut count = 0;
@@ -447,8 +466,8 @@ impl Database {
 		Ok(())
 	}
 
-	/// Scan key-value pairs in a range directly from the database without
-	/// allocating a transaction.
+	/// Scan key-value pairs in a range directly from the database at a
+	/// consistent snapshot. See [`Database::scan_with`].
 	pub fn scan<K>(
 		&self,
 		rng: Range<K>,
@@ -463,8 +482,8 @@ impl Database {
 		Ok(res)
 	}
 
-	/// Scan keys in a range directly from the database without allocating a
-	/// transaction.
+	/// Scan keys in a range directly from the database at a consistent
+	/// snapshot. See [`Database::scan_with`].
 	pub fn keys<K>(
 		&self,
 		rng: Range<K>,

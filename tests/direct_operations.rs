@@ -177,3 +177,85 @@ fn direct_writes_never_report_conflicts() {
 		h.join().unwrap();
 	}
 }
+
+#[test]
+fn direct_reads_never_miss_a_live_key() {
+	// Direct reads used to read at a clock value without pinning it, so
+	// inline GC in a concurrent commit could reclaim the version being read
+	// and a key that existed throughout was reported missing.
+	let db = Arc::new(Database::new());
+	db.set("k", "0").unwrap();
+	let writer = Arc::clone(&db);
+	let violation = race(
+		move |stop| {
+			let mut i: u64 = 1;
+			while !stop.load(Ordering::Relaxed) {
+				let mut tx = writer.transaction(true);
+				tx.set("k", i.to_string()).unwrap();
+				tx.commit().unwrap();
+				i += 1;
+			}
+		},
+		|| {
+			if db.get("k").unwrap().is_none() {
+				return Some("get missed a live key".into());
+			}
+			if db.with_value("k", <[u8]>::len).unwrap().is_none() {
+				return Some("with_value missed a live key".into());
+			}
+			if !db.exists("k").unwrap() {
+				return Some("exists missed a live key".into());
+			}
+			let mut seen = 0;
+			db.scan_with("a".."z", None, None, |_, _| {
+				seen += 1;
+				true
+			})
+			.unwrap();
+			if seen != 1 {
+				return Some(format!("scan_with saw {seen} keys"));
+			}
+			let keys = db.keys("a".."z", None, None).unwrap().len();
+			if keys != 1 {
+				return Some(format!("keys saw {keys} keys"));
+			}
+			let total = db.total("a".."z", None, None).unwrap();
+			(total != 1).then(|| format!("total counted {total} keys"))
+		},
+	);
+	assert_eq!(violation, None);
+}
+
+#[test]
+fn direct_scans_read_a_consistent_snapshot() {
+	// Every transaction rewrites all keys with one value, so a scan at a
+	// snapshot must see every key, all with the same value.
+	let db = Arc::new(Database::new());
+	{
+		let mut tx = db.transaction(true);
+		for k in 0..16 {
+			tx.set(format!("k{k:02}"), "0").unwrap();
+		}
+		tx.commit().unwrap();
+	}
+	let writer = Arc::clone(&db);
+	let violation = race(
+		move |stop| {
+			let mut i: u64 = 1;
+			while !stop.load(Ordering::Relaxed) {
+				let mut tx = writer.transaction(true);
+				for k in 0..16 {
+					tx.set(format!("k{k:02}"), i.to_string()).unwrap();
+				}
+				tx.commit().unwrap();
+				i += 1;
+			}
+		},
+		|| {
+			let rows = db.scan("k".."l", None, None).unwrap();
+			(rows.len() != 16 || rows.iter().any(|(_, v)| v != &rows[0].1))
+				.then(|| format!("inconsistent scan: {rows:?}"))
+		},
+	);
+	assert_eq!(violation, None);
+}
