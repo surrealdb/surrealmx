@@ -56,26 +56,6 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 - **In-Memory Dataset**: True in-memory database holding all 5,000,000 documents resident at **5.5 GiB** resting memory (~1KB per full multi-version document).
 - **Concurrent Scaling**: Peak memory expands dynamically under high-throughput 48-worker commits before settling back to resting baseline.
 
-<details>
-<summary><b>SurrealMX (ArtMap) vs SurrealMX (main)</b></summary>
-
-<br>
-
-Comparison against `main` (SkipMap) under the same 5,000,000 key workload:
-
-| Operation | SurrealMX (main) | SurrealMX (ArtMap) | Improvement |
-| :--- | :--- | :--- | :--- |
-| **Point Read** | 11,338,303 OPS | **19,002,983 OPS** | **1.68× faster** |
-| **Create** | 2,396,041 OPS | **4,265,023 OPS** | **1.78× faster** |
-| **Update** | 2,223,502 OPS | **5,113,599 OPS** | **2.30× faster** |
-| **Delete** | 6,172,414 OPS | **5,744,968 OPS** | — |
-| **Bounded Scan** | 44,794 OPS | **82,499 OPS** | **1.84× faster** |
-| **Full Table Scan** | 35.30 OPS | **44.77 OPS** | **1.27× faster** |
-| **Resting Memory** | 5.2 GiB | **5.5 GiB** | — |
-| **Peak Memory** | 10.2 GiB | **10.9 GiB** | — |
-
-</details>
-
 ---
 
 ## Features
