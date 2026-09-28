@@ -33,7 +33,7 @@ It is designed as an independent, standalone embedded storage engine and caching
 
 Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Processor @ 5.48 GHz, 128 GB DDR5 RAM**, 5,000,000 keys across 48 concurrent worker threads with 128 clients via [`crud-bench`](https://github.com/surrealdb/crud-bench)):
 
-| Engine | Point&nbsp;Read&nbsp;(OPS) | Create&nbsp;(OPS) | Update&nbsp;(OPS) | Delete&nbsp;(OPS) | Scan&nbsp;(OPS) |
+| Engine | Point&nbsp;Read&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Create&nbsp;(OPS) | Update&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Delete&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Scan&nbsp;(OPS) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
 | **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**19,002,983** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**4,265,023** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,113,599** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,744,968** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**329,574** |
 | LMDB (In-Memory) | 1,188,844 | 234,230 | 218,400 | 172,182 | 132,397 |
