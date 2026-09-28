@@ -24,10 +24,7 @@ use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
 use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
-use crate::queue::Commit;
 use crate::tx::Transaction;
-use crate::version::Version;
-use crate::versions::Versions;
 use byteslice::ByteSlice;
 use std::ops::{Bound, Deref, Range};
 use std::sync::atomic::Ordering;
@@ -485,53 +482,14 @@ impl Database {
 	/// Set a key to a value in an auto-committed write transaction.
 	///
 	/// Atomically sets the key to the specified value and commits the write.
-	/// Overwrites any existing value at the key.
+	/// Overwrites any existing value at the key. The write reads nothing, so
+	/// a write-write conflict with a concurrent transaction is retried
+	/// against a fresh snapshot rather than returned.
 	#[inline]
 	pub fn set<K: IntoBytes, V: IntoBytes>(&self, key: K, val: V) -> Result<(), Error> {
 		let key = key.into_bytes();
 		let val = val.into_bytes();
-
-		let commit_slot = self.inner.commit_ring.claim();
-		let version = self.inner.oracle.alloc.fetch_add(1, Ordering::Relaxed) + 1;
-		self.inner.oracle.timestamp.fetch_max(version, Ordering::Release);
-		self.inner.merge_retire_id.fetch_max(version, Ordering::Release);
-
-		let commit = Commit::new_single(key.clone(), version);
-		self.inner.commit_ring.publish(commit_slot, Arc::new(commit));
-		if commit_slot.trailing_zeros() >= 3 {
-			self.inner.commit_ring.advance_published();
-			self.inner.advance_commit_watermark();
-		}
-
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			let persistence = self.inner.persistence.read().clone();
-			if let Some(p) = persistence {
-				let mut map = std::collections::BTreeMap::new();
-				map.insert(key.clone(), Some(val.clone()));
-				p.append(version, &map).map_err(Error::TxCommitNotPersisted)?;
-			}
-		}
-
-		let entry = self.inner.datastore.get_or_insert_with(key, || {
-			parking_lot::RwLock::new(Versions::from(Version {
-				version,
-				value: Some(val.clone()),
-			}))
-		});
-		let mut versions = entry.value().write();
-		if !entry.is_removed() {
-			let is_new_insert =
-				matches!(*versions, Versions::Single(ref v) if v.version == version);
-			if !is_new_insert {
-				versions.push(Version {
-					version,
-					value: Some(val),
-				});
-			}
-		}
-		drop(versions);
-		Ok(())
+		self.blind_write(|tx| tx.set(key.clone(), val.clone()))
 	}
 
 	/// Put a key to a value in an auto-committed write transaction.
@@ -565,51 +523,39 @@ impl Database {
 	/// Delete a key in an auto-committed write transaction.
 	///
 	/// Atomically creates a tombstone at the key and commits the deletion.
+	/// Like [`Database::set`], a write-write conflict is retried rather than
+	/// returned.
 	#[inline]
 	pub fn del<K: IntoBytes>(&self, key: K) -> Result<(), Error> {
 		let key = key.into_bytes();
+		self.blind_write(|tx| tx.del(key.clone()))
+	}
 
-		let commit_slot = self.inner.commit_ring.claim();
-		let version = self.inner.oracle.alloc.fetch_add(1, Ordering::Relaxed) + 1;
-		self.inner.oracle.timestamp.fetch_max(version, Ordering::Release);
-		self.inner.merge_retire_id.fetch_max(version, Ordering::Release);
-
-		let commit = Commit::new_single(key.clone(), version);
-		self.inner.commit_ring.publish(commit_slot, Arc::new(commit));
-		if commit_slot.trailing_zeros() >= 3 {
-			self.inner.commit_ring.advance_published();
-			self.inner.advance_commit_watermark();
-		}
-
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			let persistence = self.inner.persistence.read().clone();
-			if let Some(p) = persistence {
-				let mut map = std::collections::BTreeMap::new();
-				map.insert(key.clone(), None);
-				p.append(version, &map).map_err(Error::TxCommitNotPersisted)?;
+	/// Commit a write that reads nothing, retrying on write-write conflicts.
+	///
+	/// This goes through a full transaction on purpose: a direct write must
+	/// be pinned while it applies (or inline GC can collapse a chain under
+	/// it), publish through the merge queue in version order (or a snapshot
+	/// can see the clock pass it before its write lands), and be validated
+	/// against concurrent commits (or first-committer-wins is lost). With no
+	/// reads to invalidate, any snapshot is as good as another, so a
+	/// conflict is always safe to retry.
+	fn blind_write(
+		&self,
+		write: impl Fn(&mut Transaction) -> Result<(), Error>,
+	) -> Result<(), Error> {
+		let mut spins = 0;
+		loop {
+			let mut tx = self.transaction(true);
+			write(&mut tx)?;
+			match tx.commit() {
+				Err(Error::KeyWriteConflict) => {
+					crate::sync::backoff(spins);
+					spins += 1;
+				}
+				res => return res,
 			}
 		}
-
-		let entry = self.inner.datastore.get_or_insert_with(key, || {
-			parking_lot::RwLock::new(Versions::from(Version {
-				version,
-				value: None,
-			}))
-		});
-		let mut versions = entry.value().write();
-		if !entry.is_removed() {
-			let is_new_insert =
-				matches!(*versions, Versions::Single(ref v) if v.version == version);
-			if !is_new_insert {
-				versions.push(Version {
-					version,
-					value: None,
-				});
-			}
-		}
-		drop(versions);
-		Ok(())
 	}
 
 	/// Conditionally delete a key in an auto-committed write transaction.
