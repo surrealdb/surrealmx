@@ -1765,11 +1765,9 @@ mod tests {
 		// publish exactly versions 1 through 10.
 		assert_eq!(db.oracle.timestamp.load(std::sync::atomic::Ordering::SeqCst), 10);
 		let entry = db.datastore.get(b"key0".as_slice()).expect("key0 missing");
-		let guard = entry.value().read();
-		assert_eq!(guard.as_slice()[0].version, 1);
+		assert_eq!(entry.value().read().as_slice()[0].version, 1);
 		let entry = db.datastore.get(b"key9".as_slice()).expect("key9 missing");
-		let guard = entry.value().read();
-		assert_eq!(guard.as_slice()[0].version, 10);
+		assert_eq!(entry.value().read().as_slice()[0].version, 10);
 	}
 
 	#[test]
@@ -1793,8 +1791,7 @@ mod tests {
 		tx.commit().unwrap();
 		// The next minted version continues strictly above the seed
 		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
-		let guard = entry.value().read();
-		assert_eq!(guard.as_slice()[0].version, seed + 1);
+		assert_eq!(entry.value().read().as_slice()[0].version, seed + 1);
 		// And the write is visible to a fresh reader
 		let mut tx = db.transaction(false);
 		assert_eq!(tx.get("key").unwrap().as_deref(), Some(b"value" as &[u8]));
