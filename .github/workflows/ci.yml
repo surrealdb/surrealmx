@@ -195,24 +195,13 @@ jobs:
       - name: Set up Miri
         run: cargo +nightly miri setup
 
-      # The commit ring and its epoch-protected slot cells run under the Tree
-      # Borrows aliasing model. crossbeam-epoch casts integers to pointers,
-      # so provenance stays permissive, and it leaves garbage at exit,
-      # hence ignoring leaks.
-      - name: Commit ring and slot cells (Tree Borrows)
-        env:
-          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-ignore-leaks
-        run: cargo +nightly miri test --lib -- ring::tests sync::tests
-
-      # Everything else goes through crossbeam-skiplist 0.1.3, which frees
-      # nodes through pointers derived from shared references and so fails
-      # both aliasing models, so they are disabled here. Miri still checks
-      # for use-after-free, out-of-bounds and uninitialised accesses, and
-      # data races. Epoch-based reclamation leaves garbage at exit, hence
+      # The engine runs under the Tree Borrows aliasing model.
+      # crossbeam-epoch casts integers to pointers, so provenance stays
+      # permissive, and epoch-based reclamation leaves garbage at exit, hence
       # ignoring leaks; persistence tests need the real filesystem.
-      - name: Engine
+      - name: Engine (Tree Borrows)
         env:
-          MIRIFLAGS: -Zmiri-disable-stacked-borrows -Zmiri-ignore-leaks -Zmiri-disable-isolation
+          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-ignore-leaks -Zmiri-disable-isolation
         run: cargo +nightly miri test --lib --test direct_operations
 
   wasm-check:

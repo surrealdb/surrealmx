@@ -19,8 +19,8 @@
 //! from a pool. Transactions read a consistent snapshot and are committed
 //! under one of the [`IsolationLevel`] variants, with conflicting commits
 //! rejected rather than serialised. Reads and writes never block on a global
-//! lock: the datastore is a lock-free skip list, and version visibility is
-//! resolved against a logical clock.
+//! lock: the datastore is a concurrent adaptive radix tree whose readers never
+//! block, and version visibility is resolved against a logical clock.
 //!
 //! On non-wasm targets the engine can additionally be backed by persistence
 //! (an append-only log plus periodic snapshots); see [`PersistenceOptions`].

@@ -22,9 +22,8 @@ license = "Apache-2.0"
 
 # The only `unsafe` in this engine is the epoch-protected `ArcCell` in
 # `src/sync.rs`, which allows it for that module alone. Every other lock-free
-# primitive is encapsulated behind a safe API by `artmap`,
-# `crossbeam-skiplist`, and `papaya`, and new `unsafe` anywhere else is an
-# error.
+# primitive is encapsulated behind a safe API by `artmap` and `papaya`, and
+# new `unsafe` anywhere else is an error.
 unsafe_code = "deny"
 
 # `missing_docs` is enforced on the library only, via the stricter `--lib`
@@ -221,7 +220,6 @@ byteslice = { version = "0.2.0", features = ["serde"] }
 crossbeam-deque = "0.8.8"
 crossbeam-epoch = "0.9.21"
 crossbeam-queue = "0.3.14"
-crossbeam-skiplist = "0.1.3"
 crossbeam-utils = "0.8"
 papaya = "0.2.5"
 parking_lot = "0.12.5"
