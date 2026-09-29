@@ -439,8 +439,7 @@ impl Inner {
 				// Remove the entry while still holding the version write lock,
 				// so a committer blocked on that lock observes `is_removed()`
 				// and re-inserts rather than writing into a node we are about
-				// to unlink. `Entry::remove` also unlinks at the cursor with
-				// no second key lookup.
+				// to unlink.
 				entry.remove();
 			} else if versions.needs_gc() {
 				// A reader watermark is pinning reclaimable versions. Track
