@@ -855,6 +855,7 @@ dependencies = [
  "byteslice",
  "criterion",
  "crossbeam-deque",
+ "crossbeam-epoch",
  "crossbeam-queue",
  "crossbeam-skiplist",
  "crossbeam-utils",

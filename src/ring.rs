@@ -33,10 +33,12 @@
 //! that was overwritten before the prefix reached it, and the completed
 //! prefix can never pass an entry that is still in flight.
 //!
-//! A slot's sequence number is only written while holding the slot's write
-//! lock, so a reader holding the read lock always sees the sequence number
-//! that matches the entry. A reader that finds a later occupant knows the
-//! entry it wanted is gone, and must treat it conservatively.
+//! Readers take no lock: a slot's entry is loaded atomically, and every
+//! entry records the sequence number it was published at, so a reader
+//! always knows which lap it is holding. The two writers of a slot, a
+//! publish and a release, serialise on the slot's writer lock. A reader
+//! that finds a later occupant knows the entry it wanted is gone, and must
+//! treat it conservatively.
 //!
 //! Once the retired prefix passes an entry, its slot releases the entry but
 //! keeps its sequence number, so retired commits stop pinning memory while
@@ -44,7 +46,7 @@
 //! completed prefix, so a released entry was complete, and a slot that
 //! holds its own sequence number without an entry reads as gone.
 
-use crate::sync::{AtomicU64, RwLock};
+use crate::sync::{ArcCell, AtomicU64, RwLock};
 use crossbeam_utils::CachePadded;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -68,6 +70,8 @@ pub(crate) trait RingEntry {
 	/// either published its merge version or aborted. Must be monotonic:
 	/// once it returns `true` it must never return `false` again.
 	fn is_complete(&self) -> bool;
+	/// The sequence number this entry was published at.
+	fn seq(&self) -> u64;
 }
 
 /// The outcome of reading a ring slot for a specific sequence number.
@@ -85,13 +89,14 @@ pub(crate) enum SlotRead<R> {
 /// A single pre-allocated slot in the commit ring.
 struct Slot<T> {
 	/// The sequence number of the current occupant, or [`SLOT_EMPTY`].
-	/// Only written while holding the `entry` write lock, after the entry
-	/// itself, so it is stable while the read lock is held and a lock-free
-	/// load that observes a sequence number is always backed by a
-	/// published entry.
+	/// Only written while holding the `writer` lock, after the entry
+	/// itself, so a load that observes a sequence number is always backed
+	/// by a published entry.
 	seq: AtomicU64,
-	/// The current occupant's entry.
-	entry: RwLock<Option<Arc<T>>>,
+	/// The current occupant's entry, loaded without locking.
+	entry: ArcCell<T>,
+	/// Held by a publish or a release while it changes the slot.
+	writer: RwLock<()>,
 }
 
 /// A fixed-size power-of-two lock-free ring buffer for OCC commits.
@@ -116,7 +121,7 @@ pub(crate) struct CommitRing<T> {
 	taken: CachePadded<AtomicU64>,
 }
 
-impl<T: RingEntry> CommitRing<T> {
+impl<T: RingEntry + Send + Sync + 'static> CommitRing<T> {
 	/// Creates a new commit ring buffer with a capacity rounded up to the next
 	/// power of two, handing out sequence numbers from `start_seq` (at least
 	/// one, since zero marks an empty slot).
@@ -126,7 +131,8 @@ impl<T: RingEntry> CommitRing<T> {
 		let slots = (0..capacity)
 			.map(|_| Slot {
 				seq: AtomicU64::new(SLOT_EMPTY),
-				entry: RwLock::new(None),
+				entry: ArcCell::empty(),
+				writer: RwLock::new(()),
 			})
 			.collect();
 		Self {
@@ -160,26 +166,26 @@ impl<T: RingEntry> CommitRing<T> {
 	/// unpublished or incomplete: see the module documentation for why
 	/// overwriting it then would be unsound.
 	pub(crate) fn publish(&self, seq: u64, entry: Arc<T>) {
+		debug_assert_eq!(entry.seq(), seq);
 		let slot = self.slot(seq);
 		// The sequence number this slot held one lap earlier, if any
 		let previous = seq.checked_sub(self.capacity).filter(|p| *p >= self.start);
 		let mut spins = 0;
 		loop {
-			let mut guard = slot.entry.write();
+			let guard = slot.writer.write();
 			let free = match previous {
 				// First lap: nothing has ever been stored in this slot
 				None => true,
 				Some(p) => {
 					slot.seq.load(Ordering::Relaxed) == p
-						&& guard.as_ref().is_none_or(|e| e.is_complete())
+						&& slot.entry.read(|e| e.is_none_or(|e| e.is_complete()))
 				}
 			};
 			if free {
-				let replaced = guard.replace(entry);
+				// The previous occupant is released once no reader can see it
+				slot.entry.swap(Some(entry));
 				slot.seq.store(seq, Ordering::Release);
 				drop(guard);
-				// Release the previous occupant outside the lock
-				drop(replaced);
 				return;
 			}
 			drop(guard);
@@ -189,26 +195,31 @@ impl<T: RingEntry> CommitRing<T> {
 	}
 
 	/// Reads the entry published at `seq`.
+	#[cfg(test)]
 	pub(crate) fn get(&self, seq: u64) -> SlotRead<Arc<T>> {
 		self.read(seq, Arc::clone)
 	}
 
-	/// Inspects the entry published at `seq` under the slot's read lock.
-	fn read<R>(&self, seq: u64, f: impl FnOnce(&Arc<T>) -> R) -> SlotRead<R> {
+	/// Inspects the entry published at `seq`, without locking.
+	pub(crate) fn read<R>(&self, seq: u64, f: impl FnOnce(&Arc<T>) -> R) -> SlotRead<R> {
 		let slot = self.slot(seq);
-		// Lock-free fast path while the sequence is unpublished
+		// The sequence number is written after the entry, so an entry for
+		// `seq` or a later lap is visible once it covers `seq`
 		if slot.seq.load(Ordering::Acquire) < seq {
 			return SlotRead::Pending;
 		}
-		let guard = slot.entry.read();
-		// Stable under the read lock, so it describes `guard`
-		let current = slot.seq.load(Ordering::Relaxed);
-		match (current.cmp(&seq), guard.as_ref()) {
-			(std::cmp::Ordering::Equal, Some(entry)) => SlotRead::Ready(f(entry)),
-			// Released after retirement, or overwritten by a later lap
-			(std::cmp::Ordering::Equal, None) | (std::cmp::Ordering::Greater, _) => SlotRead::Gone,
-			(std::cmp::Ordering::Less, _) => SlotRead::Pending,
-		}
+		slot.entry.read(|entry| match entry {
+			Some(e) => match e.seq().cmp(&seq) {
+				std::cmp::Ordering::Equal => SlotRead::Ready(f(e)),
+				// Overwritten by a later lap
+				std::cmp::Ordering::Greater => SlotRead::Gone,
+				// An earlier lap's entry, which the sequence load above rules
+				// out: read it as unpublished
+				std::cmp::Ordering::Less => SlotRead::Pending,
+			},
+			// Released after retirement
+			None => SlotRead::Gone,
+		})
 	}
 
 	/// Advances the contiguous published prefix as far as currently
@@ -244,6 +255,8 @@ impl<T: RingEntry> CommitRing<T> {
 	/// Advances the contiguous completed prefix as far as currently
 	/// possible. Never passes the published prefix.
 	pub(crate) fn advance_completed(&self) {
+		// One pin covers every slot read below
+		let _pin = crate::sync::pin();
 		let published = self.published.load(Ordering::Acquire);
 		let mut cur = self.completed.load(Ordering::Acquire);
 		loop {
@@ -299,13 +312,13 @@ impl<T: RingEntry> CommitRing<T> {
 	/// Drops the entry of a retired sequence, keeping its sequence number.
 	fn release(&self, seq: u64) {
 		let slot = self.slot(seq);
-		let mut guard = slot.entry.write();
+		let guard = slot.writer.write();
 		// A later lap may already own the slot
 		if slot.seq.load(Ordering::Relaxed) == seq {
-			let released = guard.take();
-			drop(guard);
-			drop(released);
+			// Released once no reader can see it
+			slot.entry.swap(None);
 		}
+		drop(guard);
 	}
 
 	/// The contiguous published prefix bound.
@@ -336,7 +349,7 @@ impl<T: RingEntry> CommitRing<T> {
 	/// The number of slots currently holding an entry.
 	#[cfg(test)]
 	pub(crate) fn occupied(&self) -> usize {
-		self.slots.iter().filter(|s| s.entry.read().is_some()).count()
+		self.slots.iter().filter(|s| s.entry.read(|e| e.is_some())).count()
 	}
 }
 
@@ -355,6 +368,10 @@ mod tests {
 	impl RingEntry for Entry {
 		fn is_complete(&self) -> bool {
 			self.done.load(Ordering::SeqCst)
+		}
+
+		fn seq(&self) -> u64 {
+			self.seq
 		}
 	}
 
@@ -776,6 +793,10 @@ mod loom_tests {
 	impl RingEntry for Entry {
 		fn is_complete(&self) -> bool {
 			self.done.load(Ordering::SeqCst)
+		}
+
+		fn seq(&self) -> u64 {
+			self.seq
 		}
 	}
 
