@@ -20,8 +20,8 @@ use crate::persistence::Persistence;
 use crate::queue::{Commit, Merge};
 use crate::readers::Readers;
 use crate::ring::{CommitRing, DEFAULT_COMMIT_RING_CAPACITY};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::sync::RwLock;
-use crate::versions::Versions;
 use crate::DatabaseOptions;
 use byteslice::ByteSlice;
 use crossbeam_skiplist::SkipMap;
@@ -80,7 +80,7 @@ pub struct Inner {
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
 	/// The underlying concurrent ART datastructure
-	pub(crate) datastore: artmap::ArtMap<ByteSlice, RwLock<Versions>>,
+	pub(crate) datastore: artmap::VersionedArtMap<ByteSlice, Option<ByteSlice>>,
 	/// Registered transaction snapshot slots, partitioned across cache-padded
 	/// shards. Contains exactly the live transactions: slots are inserted at
 	/// registration and removed on transaction drop, so watermark scans
@@ -145,7 +145,7 @@ impl Inner {
 	pub fn new(opts: &DatabaseOptions) -> Self {
 		Self {
 			oracle: Oracle::new(),
-			datastore: artmap::ArtMap::new(),
+			datastore: artmap::VersionedArtMap::new(),
 			readers: Readers::new(),
 			reader_slot_id: CachePadded::new(AtomicU64::new(0)),
 			commit_ring: CommitRing::new(DEFAULT_COMMIT_RING_CAPACITY, 1),
@@ -214,11 +214,8 @@ impl Inner {
 	/// transaction by mutable reference and marks it done, so no further
 	/// reads can occur at its snapshot. Excluding ANY other slot is
 	/// forbidden — in particular a concurrent committer's slot (pinned at
-	/// its start version, strictly below its merge version) is what
-	/// prevents a delete-collapse from unlinking a chain that a slower
-	/// committer is still about to push an earlier version into, which
-	/// would otherwise resurrect deleted data through the
-	/// `get_or_insert_with` re-seed path.
+	/// its start version, strictly below its merge version) holds the
+	/// watermark below every version that committer has yet to apply.
 	pub(crate) fn inline_gc_watermark(&self, own_slot: u64) -> Option<u64> {
 		// Load the clock bound before the fence-and-scan
 		let now = self.oracle.timestamp.load(Ordering::SeqCst);
@@ -358,99 +355,64 @@ impl Inner {
 	/// A key is removed from the candidate set BEFORE its chain is
 	/// examined. That ordering makes the untrack race-free against
 	/// concurrent commits: a committer inserts its key only after
-	/// pushing the garbage-leaving version under the chain write lock,
-	/// so any garbage added after this sweep's trim re-inserts the key
-	/// for the next pass — the removal here can never orphan it. When
+	/// pushing the garbage-leaving version into the chain, so any
+	/// garbage added after this sweep's trim re-inserts the key for the
+	/// next pass — the removal here can never orphan it. When
 	/// the trimmed chain still holds reclaimable versions (a reader
 	/// watermark is pinning them), the key is re-tracked for the next
 	/// sweep.
-	#[expect(
-		clippy::significant_drop_tightening,
-		reason = "the version write guard must cover entry.remove() so a committer blocked on it observes is_removed() and re-inserts"
-	)]
 	pub(crate) fn run_gc_tracked(&self, cleanup_ts: u64) {
-		// A single map guard serves the whole sweep: guard churn per
-		// candidate costs more than holding one across the pass, and the
-		// candidate map holds only keys, so delaying its internal
-		// reclamation for the duration of a sweep is immaterial.
 		let candidates = self.gc_candidates.pin();
-		// The steady state is an empty candidate set: every chain fully
-		// trimmed at commit time. Skip the snapshot allocation entirely.
 		if candidates.is_empty() {
 			return;
 		}
-		// Snapshot the candidate keys: the snapshot is the sweep's
-		// working set, and keys tracked by commits racing with this
-		// sweep are picked up by the next pass.
 		let mut keys: Vec<ByteSlice> = Vec::with_capacity(candidates.len());
 		keys.extend(candidates.iter().cloned());
-		// Process each candidate key in turn
 		for key in keys {
-			// Untrack the key first — see the ordering argument above
 			candidates.remove(&key);
-			// The chain may have been unlinked by an earlier collapse
-			let Some(entry) = self.datastore.get(&key) else {
-				continue;
-			};
-			// Get a mutable reference to the versions list. The write guard is
-			// deliberately held across `entry.remove()` below: a committer
-			// blocked on this lock must observe `is_removed()` and re-insert,
-			// rather than writing into a node we are about to unlink.
-			let mut versions = entry.value().write();
-			// A sweep or commit-time collapse unlinked this node between
-			// lookup and lock; any recreation re-tracks the key itself
-			if entry.is_removed() {
-				continue;
-			}
-			// Clean up unnecessary older versions
-			if versions.gc_older_versions(cleanup_ts) == 0 {
-				// Remove the entry while still holding the version write
-				// lock — see the equivalent removal in `run_gc_full`.
-				entry.remove();
-			} else if versions.needs_gc() {
-				// Versions remain pinned by a reader watermark: re-track
-				// the key so a later sweep can finish the job.
+			self.datastore.prune_key(&key, cleanup_ts, Option::is_none);
+			if self.datastore.version_count(&key) > 1 {
 				candidates.insert(key);
 			}
 		}
 	}
 
 	/// Scan the entire datastore, reclaiming stale versions on every key.
-	///
-	/// The background sweep visits only tracked candidate keys (see
-	/// [`Inner::run_gc_tracked`]); this full scan backs the manual
-	/// [`crate::Database::run_gc`] entry point and the one-shot pass at
-	/// persistence load time, which collapses the multi-version chains
-	/// that append-only-log replay builds up. Since a full scan visits
-	/// every key, it supersedes the candidate set: callers clear the set
-	/// before scanning (commits racing with the scan re-track their keys
-	/// as usual).
-	#[expect(
-		clippy::significant_drop_tightening,
-		reason = "the version write guard must cover entry.remove() so a committer blocked on it observes is_removed() and re-inserts"
-	)]
 	pub(crate) fn run_gc_full(&self, cleanup_ts: u64) {
-		// Iterate over the entire datastore
 		for entry in &self.datastore {
-			// Get a mutable reference to the versions list
-			let mut versions = entry.value().write();
-			// Clean up unnecessary older versions
-			if versions.gc_older_versions(cleanup_ts) == 0 {
-				// Remove the entry while still holding the version write lock,
-				// so a committer blocked on that lock observes `is_removed()`
-				// and re-inserts rather than writing into a node we are about
-				// to unlink. `Entry::remove` also unlinks at the cursor with
-				// no second key lookup.
-				entry.remove();
-			} else if versions.needs_gc() {
-				// A reader watermark is pinning reclaimable versions. Track
-				// the key so the targeted sweep revisits it once the pin
-				// clears: the caller cleared the candidate set before this
-				// scan, and no future commit or sweep would otherwise ever
-				// visit a key that is never written again.
-				self.gc_candidates.pin().insert(entry.key().clone());
+			let key = entry.key();
+			self.datastore.prune_key(key, cleanup_ts, Option::is_none);
+			if self.datastore.version_count(key) > 1 {
+				self.gc_candidates.pin().insert(key.clone());
 			}
 		}
+	}
+
+	/// The value a reader without a pinned snapshot observes at `version`:
+	/// that of the newest version at or below it, or failing that of the
+	/// oldest one above it.
+	///
+	/// An unpinned reader does not hold back garbage collection, so the
+	/// versions at or below its clock value may have been pruned by the
+	/// time it reaches the chain. Every version in a chain was published
+	/// before it was applied, and one above the reader's clock value was
+	/// published after the read began, so returning it is a linearizable
+	/// read of a value committed while the read was in progress.
+	#[inline]
+	pub(crate) fn fetch_unpinned(&self, key: &ByteSlice, version: u64) -> Option<ByteSlice> {
+		if let Some((_, value)) = self.datastore.get_version_le(key, version) {
+			return value;
+		}
+		// Nothing live at or below the clock value: the key is missing or
+		// deleted, was created after the read began, or garbage collection
+		// pruned the versions this read would have seen. Walk the chain,
+		// newest first, applying the full rule.
+		let mut chain = self.datastore.get_all_versions(key);
+		let (_, value) = match chain.iter().position(|&(v, _)| v <= version) {
+			Some(idx) => chain.swap_remove(idx),
+			None => chain.pop()?,
+		};
+		value.flatten()
 	}
 }
 

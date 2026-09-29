@@ -1047,9 +1047,9 @@ fn bench_gc_full_scan(c: &mut Criterion) {
 }
 
 // Inline commit-time GC overhead: the per-commit cost of the watermark
-// slot scan plus the chain trim under the already-held write lock. The
-// hot-key arm overwrites a single key per commit (worst-case relative
-// overhead); the wide arm amortises the scan across a large writeset.
+// slot scan plus the chain trim. The hot-key arm overwrites a single key
+// per commit (worst-case relative overhead); the wide arm amortises the
+// scan across a large writeset.
 fn bench_commit_inline_gc(c: &mut Criterion) {
 	let mut group = c.benchmark_group("commit_inline_gc");
 

@@ -45,7 +45,7 @@ mod substitute {
 	use loom::sync as imp;
 	#[cfg(not(loom))]
 	use std::sync as imp;
-	use std::sync::{PoisonError, TryLockError};
+	use std::sync::PoisonError;
 
 	/// A read-write lock with the non-poisoning `parking_lot` API.
 	pub(crate) struct RwLock<T>(imp::RwLock<T>);
@@ -61,14 +61,6 @@ mod substitute {
 
 		pub(crate) fn write(&self) -> imp::RwLockWriteGuard<'_, T> {
 			self.0.write().unwrap_or_else(PoisonError::into_inner)
-		}
-
-		pub(crate) fn try_read(&self) -> Option<imp::RwLockReadGuard<'_, T>> {
-			match self.0.try_read() {
-				Ok(guard) => Some(guard),
-				Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
-				Err(TryLockError::WouldBlock) => None,
-			}
 		}
 	}
 }

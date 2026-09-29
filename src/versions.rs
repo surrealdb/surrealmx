@@ -27,6 +27,7 @@ use thin_vec::{thin_vec, ThinVec};
 /// buffer in a single 8-byte pointer allocation. When GC trims the chain back
 /// to 1 live version, it transitions back to `Single(Version)`, immediately
 /// freeing heap memory.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Versions {
 	/// No versions stored (e.g. empty chain or collapsed tombstone).
@@ -49,6 +50,7 @@ impl From<Version> for Versions {
 	}
 }
 
+#[allow(dead_code)]
 impl Versions {
 	/// Create a new empty versions object.
 	#[inline]
