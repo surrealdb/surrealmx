@@ -3901,7 +3901,6 @@ mod tests {
 	}
 
 	#[test]
-	#[cfg_attr(miri, ignore = "artmap 0.5.0 races on concurrent node inserts, reported by Miri")]
 	fn test_atomic_transaction_id_generation() {
 		use std::sync::{Arc, Barrier};
 		use std::thread;
@@ -3970,7 +3969,6 @@ mod tests {
 	}
 
 	#[test]
-	#[cfg_attr(miri, ignore = "artmap 0.5.0 races on concurrent node inserts, reported by Miri")]
 	fn test_atomic_commit_ordering() {
 		use std::sync::{Arc, Barrier};
 		use std::thread;
@@ -4583,7 +4581,6 @@ mod tests {
 	}
 
 	#[test]
-	#[cfg_attr(miri, ignore = "artmap 0.5.0 races on concurrent node inserts, reported by Miri")]
 	fn test_gc_concurrent_readers() {
 		use std::sync::Arc;
 		use std::thread;
@@ -4696,7 +4693,6 @@ mod tests {
 	}
 
 	#[test]
-	#[cfg_attr(miri, ignore = "artmap 0.5.0 races on concurrent node inserts, reported by Miri")]
 	fn test_concurrent_write_read_merge_queue_race() {
 		// Verifies atomic visibility of committed writes between the merge
 		// queue overlay and the datastore version chains: a reader must observe
@@ -4768,7 +4764,6 @@ mod tests {
 	}
 
 	#[test]
-	#[cfg_attr(miri, ignore = "artmap 0.5.0 races on concurrent node inserts, reported by Miri")]
 	fn test_high_concurrency_merge_queue_visibility() {
 		// Simulate the crud-bench scenario: many concurrent writers and readers
 		// This stresses the merge queue under high contention
