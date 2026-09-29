@@ -108,6 +108,9 @@ pub struct Inner {
 	/// Bounded by, and advanced only after, the published merge clock
 	/// (`oracle.timestamp`).
 	pub(crate) merge_retire_id: CachePadded<AtomicU64>,
+	/// Set while a thread is retiring merge-queue entries (see
+	/// [`Inner::advance_merge_retirement`]).
+	pub(crate) merge_retiring: CachePadded<AtomicBool>,
 	/// Keys whose version chains may still hold reclaimable garbage:
 	/// chains a commit could not trim to a single live value because a
 	/// reader watermark pinned older versions (or the watermark scan was
@@ -151,6 +154,7 @@ impl Inner {
 			commit_ring: CommitRing::new(DEFAULT_COMMIT_RING_CAPACITY, 1),
 			transaction_merge_queue: SkipMap::new(),
 			merge_retire_id: CachePadded::new(AtomicU64::new(0)),
+			merge_retiring: CachePadded::new(AtomicBool::new(false)),
 			gc_candidates: HashSet::new(),
 			#[cfg(not(target_arch = "wasm32"))]
 			persistence: RwLock::new(None),
@@ -323,27 +327,49 @@ impl Inner {
 	/// and a missing entry means it was already retired by a racer or
 	/// removed early on the persistence-failure path — in either case its
 	/// data is in the datastore chains, so the watermark may pass it.
+	///
+	/// One thread retires at a time: concurrent walks would repeat the
+	/// same queue lookups and removals over the same prefix, so a caller
+	/// that finds `merge_retiring` set returns at once. Its entry is not
+	/// left behind: every caller marks its entry applied before checking
+	/// the flag, and the retirer re-checks the next entry after clearing
+	/// the flag. In the `SeqCst` order, either the caller sees the flag
+	/// clear and retires, or the retirer sees the entry applied and walks
+	/// again.
 	pub(crate) fn advance_merge_retirement(&self) {
-		let max_published = self.oracle.timestamp.load(Ordering::SeqCst);
-		let wm = self.merge_retire_id.load(Ordering::SeqCst);
-		let mut target = wm;
-		while target < max_published {
-			let next = target + 1;
-			if let Some(entry) = self.transaction_merge_queue.get(&next) {
-				if !entry.value().applied.load(Ordering::SeqCst) {
-					break;
-				}
-				entry.remove();
+		loop {
+			// Leave the walk to a retirer that is already running
+			if self.merge_retiring.load(Ordering::SeqCst)
+				|| self.merge_retiring.swap(true, Ordering::SeqCst)
+			{
+				return;
 			}
-			target = next;
-		}
-		if target > wm {
-			let _ = self.merge_retire_id.compare_exchange(
-				wm,
-				target,
-				Ordering::SeqCst,
-				Ordering::SeqCst,
-			);
+			let max_published = self.oracle.timestamp.load(Ordering::SeqCst);
+			let mut target = self.merge_retire_id.load(Ordering::SeqCst);
+			while target < max_published {
+				let next = target + 1;
+				if let Some(entry) = self.transaction_merge_queue.get(&next) {
+					if !entry.value().applied.load(Ordering::SeqCst) {
+						break;
+					}
+					entry.remove();
+				}
+				target = next;
+			}
+			self.merge_retire_id.fetch_max(target, Ordering::SeqCst);
+			self.merge_retiring.store(false, Ordering::SeqCst);
+			// Walk again if the next entry was applied while the flag was held
+			let next = target + 1;
+			if next > self.oracle.timestamp.load(Ordering::SeqCst) {
+				return;
+			}
+			let applied = self
+				.transaction_merge_queue
+				.get(&next)
+				.is_none_or(|e| e.value().applied.load(Ordering::SeqCst));
+			if !applied {
+				return;
+			}
 		}
 	}
 
