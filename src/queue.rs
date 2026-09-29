@@ -77,9 +77,12 @@ pub struct Commit {
 	pub(crate) keys: Arc<[ByteSlice]>,
 	/// Bloom filter over writeset keys for fast conflict pre-checks.
 	/// Kept as `Option<Box<BloomFilter>>` so that `size_of::<Commit>()`
-	/// is only 32 bytes and small writesets (<= 2 keys) avoid allocating
+	/// is only 40 bytes and small writesets (<= 2 keys) avoid allocating
 	/// the 512-byte filter entirely.
 	pub(crate) writeset_bloom: Option<Box<BloomFilter>>,
+	/// The commit-ring sequence number this entry is published at, set by
+	/// the committing transaction once it has claimed its slot.
+	pub(crate) seq: u64,
 	/// The merge version this commit published, zero while the commit is
 	/// still in flight, or [`crate::inner::COMMIT_ABORTED`] when the
 	/// owning transaction unwound without completing. Set by the owning
@@ -100,6 +103,11 @@ impl RingEntry for Commit {
 	#[inline]
 	fn is_complete(&self) -> bool {
 		self.merge_version.load(Ordering::SeqCst) != 0
+	}
+
+	#[inline]
+	fn seq(&self) -> u64 {
+		self.seq
 	}
 }
 
@@ -162,6 +170,7 @@ impl Commit {
 		Self {
 			keys,
 			writeset_bloom,
+			seq: 0,
 			merge_version: AtomicU64::new(0),
 		}
 	}
@@ -394,9 +403,9 @@ mod tests {
 
 	#[test]
 	fn commit_memory_footprint_and_adaptive_bloom() {
-		// Commit struct is strictly 32 bytes (Arc<[ByteSlice]>: 16B +
-		// Option<Box<BloomFilter>>: 8B + AtomicU64: 8B)
-		assert_eq!(std::mem::size_of::<Commit>(), 32);
+		// Commit struct is strictly 40 bytes (Arc<[ByteSlice]>: 16B +
+		// Option<Box<BloomFilter>>: 8B + u64: 8B + AtomicU64: 8B)
+		assert_eq!(std::mem::size_of::<Commit>(), 40);
 
 		// <= 2 keys skips bloom allocation entirely
 		let small = commit(&["a", "b"]);

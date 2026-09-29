@@ -20,12 +20,11 @@ license = "Apache-2.0"
 
 [lints.rust]
 
-# This engine contains no `unsafe` at all: every lock-free primitive it uses
-# is encapsulated behind a safe API by `crossbeam-skiplist`, `papaya`, and
-# `arc-swap`. That is a property worth keeping deliberately rather than
-# accidentally, so it is forbidden (which, unlike `deny`, cannot be
-# re-enabled by an inner `#[allow]` further down the tree).
-unsafe_code = "forbid"
+# The only `unsafe` in this engine is the epoch-protected `ArcCell` in
+# `src/sync.rs`, which allows it for that module alone. Every other lock-free
+# primitive is encapsulated behind a safe API by `crossbeam-skiplist`,
+# `papaya`, and `arc-swap`, and new `unsafe` anywhere else is an error.
+unsafe_code = "deny"
 
 # `missing_docs` is enforced on the library only, via the stricter `--lib`
 # clippy pass in CI. Applied crate-wide it would demand a `//!` header on
@@ -40,6 +39,9 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 # --- Guardrails ----------------------------------------------------------
 # All of these are at zero across every target today, so denying them costs
 # nothing now and stops the pattern from reappearing later.
+
+# Every `unsafe` block states why it is sound.
+undocumented_unsafe_blocks = "deny"
 
 # Unfinished work must not reach a release.
 todo = "deny"
@@ -217,6 +219,7 @@ bincode = { version = "2.0.1", features = ["serde"] }
 bytes = { version = "1.12.1", features = ["serde"] }
 byteslice = { version = "0.2.0", features = ["serde"] }
 crossbeam-deque = "0.8.8"
+crossbeam-epoch = "0.9.21"
 crossbeam-queue = "0.3.14"
 crossbeam-skiplist = "0.1.3"
 crossbeam-utils = "0.8"

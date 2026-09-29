@@ -1864,6 +1864,54 @@ mod tests {
 	}
 
 	#[test]
+	fn concurrent_commits_retire_every_merge_entry() {
+		use std::sync::atomic::Ordering;
+		use std::sync::{Arc, Barrier};
+		let db = Arc::new(Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		));
+		let (threads, rounds) = if cfg!(miri) {
+			(4, 10)
+		} else {
+			(16, 2_000)
+		};
+		// Every round ends with all threads committing at once, so the
+		// last merges of each round race to retire
+		let start = Arc::new(Barrier::new(threads + 1));
+		let done = Arc::new(Barrier::new(threads + 1));
+		let handles: Vec<_> = (0..threads)
+			.map(|t| {
+				let db = Arc::clone(&db);
+				let start = Arc::clone(&start);
+				let done = Arc::clone(&done);
+				std::thread::spawn(move || {
+					for round in 0..rounds {
+						start.wait();
+						let mut tx = db.transaction(true);
+						tx.set(format!("t{t}-r{round}"), "value").unwrap();
+						tx.commit().unwrap();
+						done.wait();
+					}
+				})
+			})
+			.collect();
+		for round in 0..rounds {
+			start.wait();
+			done.wait();
+			// A committer that finds another thread retiring returns without
+			// retiring, so this only holds if the retirers picked up every
+			// entry applied while they held the flag
+			let published = db.oracle.timestamp.load(Ordering::SeqCst);
+			assert_eq!(published, ((round + 1) * threads) as u64);
+			assert_eq!(db.merge_retire_id.load(Ordering::SeqCst), published, "round {round}");
+			assert!(db.transaction_merge_queue.is_empty(), "round {round}");
+		}
+		for handle in handles {
+			handle.join().unwrap();
+		}
+	}
+
+	#[test]
 	fn inline_gc_trims_hot_key_at_commit() {
 		// The deterministic memory bound: with no readers pinning older
 		// versions, every commit trims the chain it touches down to the

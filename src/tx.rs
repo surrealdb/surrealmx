@@ -881,12 +881,18 @@ impl TransactionInner {
 				return Err(Error::KeyWriteConflict);
 			}
 
-			// Retrieve all transactions committed since we began.
+			// Retrieve all transactions committed since we began, under one
+			// pin for every slot read
+			let _pin = crate::sync::pin();
 			for s in (self.commit + 1)..commit_slot {
 				let mut spins = 0;
-				let tx = loop {
-					match self.database.commit_ring.get(s) {
-						SlotRead::Ready(tx) => break tx,
+				let outcome = loop {
+					let read = self
+						.database
+						.commit_ring
+						.read(s, |tx| self.check_concurrent_commit(tx, &commit_entry, has_writes));
+					match read {
+						SlotRead::Ready(outcome) => break outcome,
 						// Claimed before us but not yet published: wait
 						SlotRead::Pending => {
 							backoff(spins);
@@ -896,35 +902,10 @@ impl TransactionInner {
 						// our conflict window, so its writeset is unknown.
 						// Released entries sit at or below the retired
 						// watermark, which a live window never reaches.
-						SlotRead::Gone => {
-							commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
-							commit_guard.armed = false;
-							self.database.advance_commit_watermark();
-							self.database.readers.remove(self.slot_id);
-							self.clear_read_state();
-							self.writeset.clear();
-							self.savepoint_stack.clear();
-							self.undo_journal.clear();
-							return Err(Error::KeyWriteConflict);
-						}
+						SlotRead::Gone => break Err(Error::KeyWriteConflict),
 					}
 				};
-
-				// Skip aborted commits: their writes will never publish
-				let merge_version = tx.merge_version.load(Ordering::SeqCst);
-				if merge_version == COMMIT_ABORTED {
-					continue;
-				}
-				// Skip commits whose merge version is visible in our
-				// snapshot: a visible commit happened strictly before our
-				// snapshot in version order, so it is not concurrent with
-				// this transaction and first-committer-wins does not
-				// apply — we read its effects rather than raced with it.
-				if merge_version != 0 && merge_version <= self.version {
-					continue;
-				}
-				// Check if a previous transaction conflicts against writes
-				if has_writes && !tx.is_disjoint_writeset_bloom(&commit_entry) {
+				if let Err(e) = outcome {
 					commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
 					commit_guard.armed = false;
 					self.database.advance_commit_watermark();
@@ -933,82 +914,7 @@ impl TransactionInner {
 					self.writeset.clear();
 					self.savepoint_stack.clear();
 					self.undo_journal.clear();
-					return Err(Error::KeyWriteConflict);
-				}
-				// Locked reads are validated in every isolation mode, and
-				// even when the writeset is empty: a successful commit
-				// guarantees that no concurrent transaction committed a
-				// write to a key locked with `get_for_update`
-				if self.locked && !tx.is_disjoint_readset_bloom(&self.lockset, &self.lockset_bloom)
-				{
-					commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
-					commit_guard.armed = false;
-					self.database.advance_commit_watermark();
-					self.database.readers.remove(self.slot_id);
-					self.clear_read_state();
-					self.writeset.clear();
-					self.savepoint_stack.clear();
-					self.undo_journal.clear();
-					return Err(Error::KeyReadConflict);
-				}
-				// Plain reads and scans are validated only under
-				// serializable snapshot isolation, and only when this
-				// transaction publishes writes: a transaction with an empty
-				// writeset observes a consistent snapshot and commits no
-				// effects derived from it, so locking a key never arms
-				// validation of the transaction's other reads
-				if has_writes && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
-					// Check if a previous transaction conflicts against reads
-					if !tx.is_disjoint_readset_bloom(&self.readset, &self.readset_bloom) {
-						commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
-						commit_guard.armed = false;
-						self.database.advance_commit_watermark();
-						self.database.readers.remove(self.slot_id);
-						self.clear_read_state();
-						self.writeset.clear();
-						self.savepoint_stack.clear();
-						self.undo_journal.clear();
-						return Err(Error::KeyReadConflict);
-					}
-					// Check if the committed writeset may overlap any scan
-					// range
-					let scan_overlap = if let Some(scan_front) = self.scanset.front() {
-						// Get the upper bound of the last scan range
-						if let Some(scan_back) = self.scanset.back() {
-							let scan_max_end = Arc::clone(&scan_back.value().load());
-							tx.may_overlap_range(scan_front.key(), &scan_max_end)
-						} else {
-							false
-						}
-					} else {
-						false
-					};
-					// Only iterate writeset keys if ranges may overlap
-					if scan_overlap {
-						// A previous transaction has conflicts against scans
-						for k in tx.keys.iter() {
-							// Check if this key may be within a scan range
-							if let Some(entry) =
-								self.scanset.range::<ByteSlice, _>(..=k).next_back()
-							{
-								// Check if the range includes this key (load
-								// from ArcSwap)
-								if **entry.value().load() > *k {
-									commit_entry
-										.merge_version
-										.store(COMMIT_ABORTED, Ordering::SeqCst);
-									commit_guard.armed = false;
-									self.database.advance_commit_watermark();
-									self.database.readers.remove(self.slot_id);
-									self.clear_read_state();
-									self.writeset.clear();
-									self.savepoint_stack.clear();
-									self.undo_journal.clear();
-									return Err(Error::KeyReadConflict);
-								}
-							}
-						}
-					}
+					return Err(e);
 				}
 			}
 		}
@@ -2667,11 +2573,78 @@ impl TransactionInner {
 		})
 	}
 
+	/// Validate this committing transaction against one concurrent commit
+	/// from its conflict window.
+	fn check_concurrent_commit(
+		&self,
+		tx: &Arc<Commit>,
+		own: &Arc<Commit>,
+		has_writes: bool,
+	) -> Result<(), Error> {
+		// Skip aborted commits: their writes will never publish
+		let merge_version = tx.merge_version.load(Ordering::SeqCst);
+		if merge_version == COMMIT_ABORTED {
+			return Ok(());
+		}
+		// Skip commits whose merge version is visible in our snapshot: a
+		// visible commit happened strictly before our snapshot in version
+		// order, so it is not concurrent with this transaction and
+		// first-committer-wins does not apply — we read its effects rather
+		// than raced with it.
+		if merge_version != 0 && merge_version <= self.version {
+			return Ok(());
+		}
+		// Check if a previous transaction conflicts against writes
+		if has_writes && !tx.is_disjoint_writeset_bloom(own) {
+			return Err(Error::KeyWriteConflict);
+		}
+		// Locked reads are validated in every isolation mode, and even when
+		// the writeset is empty: a successful commit guarantees that no
+		// concurrent transaction committed a write to a key locked with
+		// `get_for_update`
+		if self.locked && !tx.is_disjoint_readset_bloom(&self.lockset, &self.lockset_bloom) {
+			return Err(Error::KeyReadConflict);
+		}
+		// Plain reads and scans are validated only under serializable
+		// snapshot isolation, and only when this transaction publishes
+		// writes: a transaction with an empty writeset observes a consistent
+		// snapshot and commits no effects derived from it, so locking a key
+		// never arms validation of the transaction's other reads
+		if has_writes && self.mode >= IsolationLevel::SerializableSnapshotIsolation {
+			// Check if a previous transaction conflicts against reads
+			if !tx.is_disjoint_readset_bloom(&self.readset, &self.readset_bloom) {
+				return Err(Error::KeyReadConflict);
+			}
+			// Check if the committed writeset may overlap any scan range
+			let scan_overlap = match (self.scanset.front(), self.scanset.back()) {
+				(Some(scan_front), Some(scan_back)) => {
+					let scan_max_end = Arc::clone(&scan_back.value().load());
+					tx.may_overlap_range(scan_front.key(), &scan_max_end)
+				}
+				_ => false,
+			};
+			// Only iterate writeset keys if ranges may overlap
+			if scan_overlap {
+				for k in tx.keys.iter() {
+					// Check if this key may be within a scan range
+					if let Some(entry) = self.scanset.range::<ByteSlice, _>(..=k).next_back() {
+						// Check if the range includes this key
+						if **entry.value().load() > *k {
+							return Err(Error::KeyReadConflict);
+						}
+					}
+				}
+			}
+		}
+		Ok(())
+	}
+
 	/// Atomically inserts the transaction into the commit ring
 	#[inline(always)]
-	fn atomic_commit(&self, updates: Commit) -> (u64, Arc<Commit>) {
-		let updates = Arc::new(updates);
+	fn atomic_commit(&self, mut updates: Commit) -> (u64, Arc<Commit>) {
 		let slot = self.database.commit_ring.claim();
+		updates.seq = slot;
+		let updates = Arc::new(updates);
 		self.database.commit_ring.publish(slot, Arc::clone(&updates));
 		self.database.commit_ring.advance_published();
 		(slot, updates)
@@ -2692,8 +2665,10 @@ impl TransactionInner {
 		// the equivalent comment in `atomic_commit`: a dense claim is
 		// always unique, so no collision retry is needed.
 		let version = oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
-		// Insert the merge entry at the claimed version
+		// Insert the merge entry at the claimed version, and record the
+		// insert so the clock can advance past it
 		let entry = queue.insert(version, Arc::clone(&updates));
+		oracle.mark_inserted(version);
 		// Publish strictly in claim order — see the equivalent comment
 		// in `atomic_commit` for why this must cover our own version
 		// before we return, and why we reload rather than retry a fixed
