@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
-use surrealmx::{Database, Error};
+use surrealmx::{Database, Error, Transaction};
 
 fn pkey(prefix: &str, n: usize) -> Vec<u8> {
 	format!("{prefix}:{n:010}").into_bytes()
@@ -267,16 +267,44 @@ fn ssi_increment_counter_under_contention() {
 	let max = (THREADS * ROUNDS) as u64;
 	let successes = successes.load(Ordering::Relaxed);
 	let conflicts = conflicts.load(Ordering::Relaxed);
-	assert!(final_val >= 1, "no increment landed");
-	assert!(final_val <= max, "counter exceeded {max}");
 	assert!(successes >= 1, "no successful commits");
-	// Under high contention with retry-on-conflict, SSI should detect at
-	// least some conflicts. If not, either the test isn't contending (small
-	// run-time, fewer threads) or the SSI check is suspect.
-	assert!(
-		conflicts > 0,
-		"no SSI conflicts detected under contention (final={final_val}, successes={successes})"
+	assert!(successes <= max, "more commits than increments attempted");
+	// Every successful commit added exactly one to the value it read, so any
+	// conflict that SSI missed would lose an update. How often the threads
+	// actually overlap depends on scheduling, so the conflict count itself
+	// is not asserted.
+	assert_eq!(
+		final_val, successes,
+		"lost updates under contention (successes={successes}, conflicts={conflicts})"
 	);
+}
+
+/// Two serializable increments that read the same snapshot of a key cannot
+/// both commit: the second must be rejected.
+#[test]
+fn ssi_rejects_an_overlapping_increment() {
+	let db = Database::new();
+	{
+		let mut tx = db.transaction(true);
+		tx.set(b"counter".to_vec(), b"0".to_vec()).unwrap();
+		tx.commit().unwrap();
+	}
+	let increment = |tx: &mut Transaction| {
+		let current: u64 = std::str::from_utf8(&tx.get(b"counter".as_slice()).unwrap().unwrap())
+			.unwrap()
+			.parse()
+			.unwrap();
+		tx.set(b"counter".to_vec(), format!("{}", current + 1).into_bytes()).unwrap();
+	};
+	let mut first = db.transaction(true).with_serializable_snapshot_isolation();
+	let mut second = db.transaction(true).with_serializable_snapshot_isolation();
+	increment(&mut first);
+	increment(&mut second);
+	first.commit().unwrap();
+	assert!(matches!(second.commit(), Err(Error::KeyReadConflict | Error::KeyWriteConflict)));
+	let mut tx = db.transaction(false);
+	assert_eq!(tx.get(b"counter".as_slice()).unwrap().as_deref(), Some(b"1".as_slice()));
+	tx.cancel().unwrap();
 }
 
 // =============================================================================
