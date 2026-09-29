@@ -18,7 +18,7 @@ use crate::bloom::AtomicBloomFilter;
 use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
-use crate::inner::{Inner, Slot, COMMIT_ABORTED, SLOT_PINNING};
+use crate::inner::{Inner, COMMIT_ABORTED, SLOT_PINNING};
 use crate::iter::{MergeIterator, MergeQueueIter};
 use crate::kv::IntoBytes;
 use crate::pool::Pool;
@@ -79,12 +79,11 @@ const _: fn() = || {
 impl Drop for Transaction {
 	fn drop(&mut self) {
 		if let Some(inner) = self.inner.take() {
-			// Unpin: remove this transaction's slot from the readers map.
-			// A sweeper holding the entry mid-scan reads our final
-			// snapshot values, which is only ever conservative. The slot
-			// allocation itself is retained on the pooled transaction and
-			// re-pinned on reuse.
-			inner.database.readers.remove(inner.slot_id);
+			// Unpin this transaction's slot. A sweeper that read it
+			// mid-scan saw our final snapshot values, which is only ever
+			// conservative. The slot stays registered to the pooled
+			// transaction and is re-pinned on reuse.
+			inner.database.readers.unpin(inner.slot);
 			// Put the transaction in to the pool
 			self.pool.put(inner);
 		}
@@ -543,10 +542,8 @@ pub(crate) struct TransactionInner {
 	pub(crate) writeset: BTreeMap<ByteSlice, Option<ByteSlice>>,
 	/// The parent database for this transaction
 	pub(crate) database: Arc<Inner>,
-	/// The reference to this transaction's pinned reader slot
-	pub(crate) slot: Arc<Slot>,
-	/// The key of this transaction's slot in the readers map
-	pub(crate) slot_id: u64,
+	/// The index of this transaction's slot in the readers registry
+	pub(crate) slot: usize,
 	/// Threshold after which transaction state is reset
 	reset_threshold: usize,
 	/// Stack of savepoint marks (journal offsets) for nested partial rollbacks.
@@ -556,14 +553,14 @@ pub(crate) struct TransactionInner {
 	pub(crate) undo_journal: Vec<UndoEntry>,
 }
 
-/// Register a transaction in the readers map and choose its snapshot.
+/// Pin a transaction's registered slot and choose its snapshot.
 ///
-/// Pin-then-read: the slot is published (in the pinning state) BEFORE
-/// the snapshot values are loaded, so every watermark scan computed
-/// after our insert either sees the pinning sentinel (and skips
-/// reclamation for that pass) or sees our final snapshot values (and is
-/// bounded by them). A scan computed before our insert loaded its
-/// bounds before our snapshot loads in the `SeqCst` total order, so our
+/// Pin-then-read: the slot enters the pinning state BEFORE the snapshot
+/// values are loaded, so every watermark scan that reads the slot after
+/// that store either sees the pinning sentinel (and skips reclamation
+/// for that pass) or sees our final snapshot values (and is bounded by
+/// them). A scan that read the slot before that store loaded its bounds
+/// before our snapshot loads in the `SeqCst` total order, so our
 /// snapshot is at or above every bound it used — and reclamation always
 /// retains the entry visible at its watermark. This closes the historic
 /// load-then-register race structurally, with no validate/rollback
@@ -580,12 +577,11 @@ pub(crate) struct TransactionInner {
 /// loads simply falls inside our conflict window, which is at worst a
 /// spurious conflict, never a missed one.
 #[inline]
-fn pin_slot(db: &Inner, slot: &Arc<Slot>) -> (u64, u64, u64) {
-	// Publish the pinning sentinels before the slot becomes visible
+fn pin_slot(db: &Inner, slot: usize) -> (u64, u64) {
+	let slot = db.readers.slot(slot);
+	// Publish the pinning sentinels before loading the snapshot
 	slot.version.store(SLOT_PINNING, Ordering::SeqCst);
 	slot.commit.store(SLOT_PINNING, Ordering::SeqCst);
-	// Insert the slot into the partitioned readers map under a fresh id
-	let slot_id = db.readers.pin(slot);
 	// Pair with the fence in every watermark scan
 	fence(Ordering::SeqCst);
 	// Load the commit snapshot, then the version snapshot
@@ -594,16 +590,16 @@ fn pin_slot(db: &Inner, slot: &Arc<Slot>) -> (u64, u64, u64) {
 	// Publish the chosen snapshot into the slot
 	slot.commit.store(commit, Ordering::SeqCst);
 	slot.version.store(version, Ordering::SeqCst);
-	// Return the slot id and the snapshot
-	(slot_id, commit, version)
+	// Return the snapshot
+	(commit, version)
 }
 
 impl TransactionInner {
 	/// Create a new read-only or writeable transaction
 	pub(crate) fn new(db: Arc<Inner>, write: bool) -> Self {
-		// Allocate this transaction's slot and pin it
-		let slot = Arc::new(Slot::pinning());
-		let (slot_id, commit, version) = pin_slot(&db, &slot);
+		// Register this transaction's slot and pin it
+		let slot = db.readers.register();
+		let (commit, version) = pin_slot(&db, slot);
 		// Store the threshold separately before moving db
 		let threshold = db.reset_threshold;
 		// Create the transaction
@@ -622,7 +618,6 @@ impl TransactionInner {
 			writeset: BTreeMap::new(),
 			database: db,
 			slot,
-			slot_id,
 			reset_threshold: threshold,
 			savepoint_stack: Vec::new(),
 			undo_journal: Vec::new(),
@@ -635,8 +630,8 @@ impl TransactionInner {
 		self.mode = IsolationLevel::SerializableSnapshotIsolation;
 		// Update the reset threshold from the database
 		self.reset_threshold = self.database.reset_threshold;
-		// Re-pin the retained slot allocation under a fresh id
-		let (slot_id, commit, version) = pin_slot(&self.database, &self.slot);
+		// Re-pin the retained slot
+		let (commit, version) = pin_slot(&self.database, self.slot);
 		// Store the threshold for the allocated state resets
 		let threshold = self.reset_threshold;
 		// Clear transaction state. `self.write` describes whether the
@@ -673,7 +668,6 @@ impl TransactionInner {
 		self.locked = false;
 		self.commit = commit;
 		self.version = version;
-		self.slot_id = slot_id;
 	}
 
 	/// Get the starting sequence number of this transaction
@@ -727,7 +721,7 @@ impl TransactionInner {
 		self.done = true;
 		// Unpin from readers immediately so queue cleanup and watermarks are
 		// unblocked
-		self.database.readers.remove(self.slot_id);
+		self.database.readers.unpin(self.slot);
 		// Clear the transaction state
 		self.clear_read_state();
 		self.writeset.clear();
@@ -825,7 +819,7 @@ impl TransactionInner {
 		// writeset is empty
 		if self.writeset.is_empty() && !self.locked {
 			// Unpin from readers immediately
-			self.database.readers.remove(self.slot_id);
+			self.database.readers.unpin(self.slot);
 			// Clear the transaction state
 			self.clear_read_state();
 			// Clear savepoint stack and undo journal
@@ -873,7 +867,7 @@ impl TransactionInner {
 				commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
 				commit_guard.armed = false;
 				self.database.advance_commit_watermark();
-				self.database.readers.remove(self.slot_id);
+				self.database.readers.unpin(self.slot);
 				self.clear_read_state();
 				self.writeset.clear();
 				self.savepoint_stack.clear();
@@ -909,7 +903,7 @@ impl TransactionInner {
 					commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
 					commit_guard.armed = false;
 					self.database.advance_commit_watermark();
-					self.database.readers.remove(self.slot_id);
+					self.database.readers.unpin(self.slot);
 					self.clear_read_state();
 					self.writeset.clear();
 					self.savepoint_stack.clear();
@@ -936,7 +930,7 @@ impl TransactionInner {
 			commit_guard.armed = false;
 			self.database.advance_commit_watermark();
 			// Unpin from readers immediately
-			self.database.readers.remove(self.slot_id);
+			self.database.readers.unpin(self.slot);
 			// Clear the transaction state
 			self.clear_read_state();
 			// Clear savepoint stack and undo journal
@@ -1020,7 +1014,7 @@ impl TransactionInner {
 					});
 					// Compute the inline-GC watermark lazily on demand
 					let w = *watermark
-						.get_or_insert_with(|| self.database.inline_gc_watermark(self.slot_id));
+						.get_or_insert_with(|| self.database.inline_gc_watermark(self.slot));
 					match w {
 						Some(w) => {
 							if versions.gc_older_versions(w) == 0 {
@@ -1076,7 +1070,7 @@ impl TransactionInner {
 				// pre-existing applied-but-unpersisted limitation of this
 				// error path).
 				// Unpin from readers immediately
-				self.database.readers.remove(self.slot_id);
+				self.database.readers.unpin(self.slot);
 				// Clear the transaction state
 				self.clear_read_state();
 				self.writeset.clear();
@@ -1097,7 +1091,7 @@ impl TransactionInner {
 		merge_guard.armed = false;
 		self.database.advance_merge_retirement();
 		// Unpin from readers immediately
-		self.database.readers.remove(self.slot_id);
+		self.database.readers.unpin(self.slot);
 		// Clear the transaction state
 		self.clear_read_state();
 		self.writeset.clear();
@@ -2694,6 +2688,13 @@ impl TransactionInner {
 			// Increase the number loop spins we have attempted
 			spins += 1;
 		}
+	}
+}
+
+impl Drop for TransactionInner {
+	fn drop(&mut self) {
+		// Hand the slot back to the registry for the next transaction
+		self.database.readers.release(self.slot);
 	}
 }
 

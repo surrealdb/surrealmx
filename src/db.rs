@@ -1796,25 +1796,24 @@ mod tests {
 		let db = Database::new_with_options(
 			crate::DatabaseOptions::default().with_all_workers_disabled(),
 		);
-		assert_eq!(db.readers.len(), 0);
+		assert_eq!(db.readers.pinned(), 0);
 		let tx = db.transaction(false);
-		assert_eq!(db.readers.len(), 1);
-		let first_id = *db.readers.front().unwrap().key();
+		assert_eq!(db.readers.pinned(), 1);
+		let first = tx.inner.as_ref().unwrap().slot;
 		drop(tx);
-		assert_eq!(db.readers.len(), 0);
-		// Pool reuse re-pins the retained slot under a fresh id
+		assert_eq!(db.readers.pinned(), 0);
+		// Pool reuse re-pins the retained slot
 		let tx = db.transaction(false);
-		assert_eq!(db.readers.len(), 1);
-		let second_id = *db.readers.front().unwrap().key();
-		assert!(second_id > first_id);
+		assert_eq!(db.readers.pinned(), 1);
+		assert_eq!(tx.inner.as_ref().unwrap().slot, first);
 		drop(tx);
-		assert_eq!(db.readers.len(), 0);
+		assert_eq!(db.readers.pinned(), 0);
 	}
 
 	#[test]
 	fn watermark_conservative_while_pinning() {
-		use crate::inner::Slot;
-		use std::sync::Arc;
+		use crate::inner::SLOT_PINNING;
+		use std::sync::atomic::Ordering;
 		let db = Database::new_with_options(
 			crate::DatabaseOptions::default().with_all_workers_disabled(),
 		);
@@ -1824,16 +1823,18 @@ mod tests {
 			tx.set(format!("key{i}"), "value").unwrap();
 			tx.commit().unwrap();
 		}
-		// Insert a slot stuck in the pinning state, simulating a
-		// transaction mid-registration
-		db.readers.insert(u64::MAX, Arc::new(Slot::pinning()));
+		// Register a slot stuck in the pinning state, simulating a
+		// transaction choosing its snapshot
+		let index = db.readers.register();
+		db.readers.slot(index).version.store(SLOT_PINNING, Ordering::SeqCst);
+		db.readers.slot(index).commit.store(SLOT_PINNING, Ordering::SeqCst);
 		// Every sweep must treat the watermark as unknown and skip
 		assert_eq!(db.compute_cleanup_ts(), None);
 		let before = db.unretired_commits();
 		db.run_cleanup();
 		assert_eq!(db.unretired_commits(), before);
-		// Remove the pinning slot; sweeps proceed again
-		db.readers.remove(u64::MAX);
+		// Release the pinning slot; sweeps proceed again
+		db.readers.release(index);
 		assert!(db.compute_cleanup_ts().is_some());
 		db.run_cleanup();
 		assert_eq!(db.unretired_commits(), 1);
