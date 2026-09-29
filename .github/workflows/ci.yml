@@ -207,9 +207,7 @@ jobs:
       # both aliasing models, so they are disabled here. Miri still checks
       # for use-after-free, out-of-bounds and uninitialised accesses, and
       # data races. Epoch-based reclamation leaves garbage at exit, hence
-      # ignoring leaks; persistence tests need the real filesystem. The
-      # integration tests in `tests/direct_operations.rs` race writers
-      # against readers on one database, so they run here too.
+      # ignoring leaks; persistence tests need the real filesystem.
       - name: Engine
         env:
           MIRIFLAGS: -Zmiri-disable-stacked-borrows -Zmiri-ignore-leaks -Zmiri-disable-isolation

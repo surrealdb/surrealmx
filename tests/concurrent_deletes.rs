@@ -312,15 +312,8 @@ fn ssi_delete_read_conflict() {
 
 /// Stress guard for delete-then-recreate under aggressive concurrent GC: a key
 /// that is deleted and immediately recreated must always read back as its new
-/// value, never `None`. This exercises the path the GC remove/commit-reinsert
-/// coordination protects — the sweeper unlinks a tombstoned entry while holding
-/// its write lock, and the committer re-checks `is_removed()` under that same
-/// lock so a recreate either lands in a fresh entry or blocks the removal.
-///
-/// Note: the specific remove-vs-reinsert window is extremely narrow and this
-/// test is not a deterministic reproducer of it (it did not fail even with the
-/// guard removed under `ThreadSanitizer`); it is a sanity/stress guard over the
-/// delete-recreate-under-GC pattern. A side thread hammers `run_gc()`.
+/// value, never `None`. A side thread hammers `run_gc()`, so sweeps collapse
+/// deleted chains while writers recreate the same keys.
 #[test]
 fn delete_then_recreate_under_gc_keeps_value() {
 	use std::sync::atomic::{AtomicBool, Ordering};

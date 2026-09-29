@@ -1841,7 +1841,7 @@ mod tests {
 	}
 
 	#[test]
-	fn inline_gc_unlinks_deleted_key_at_commit() {
+	fn inline_gc_collapses_deleted_key_at_commit() {
 		let db = Database::new_with_options(
 			crate::DatabaseOptions::default().with_all_workers_disabled(),
 		);
@@ -1854,7 +1854,7 @@ mod tests {
 		}
 		assert!(db.datastore.get(b"key".as_slice()).is_some());
 		// With no readers below the delete, the tombstone collapses the
-		// chain at commit time and the node is unlinked immediately.
+		// chain at commit time, so the key reads as absent immediately.
 		{
 			let mut tx = db.transaction(true);
 			tx.del("key").unwrap();
@@ -1862,7 +1862,7 @@ mod tests {
 		}
 		assert!(
 			db.datastore.get(b"key".as_slice()).is_none(),
-			"a delete with no readers should unlink the node at commit"
+			"a delete with no readers should collapse the chain at commit"
 		);
 	}
 
@@ -1955,10 +1955,10 @@ mod tests {
 	}
 
 	#[test]
-	fn tracked_sweep_unlinks_pinned_tombstone() {
+	fn tracked_sweep_collapses_pinned_tombstone() {
 		// A delete committed while a reader pins the prior value cannot
-		// collapse at commit time; the tracked sweep must unlink it after
-		// the reader departs.
+		// collapse at commit time; the tracked sweep must collapse it
+		// after the reader departs.
 		let db = Database::new_with_options(
 			crate::DatabaseOptions::default().with_all_workers_disabled(),
 		);
@@ -1973,15 +1973,15 @@ mod tests {
 			tx.del("key").unwrap();
 			tx.commit().unwrap();
 		}
-		// The pinned tombstone keeps the node linked and tracked
+		// The pinned tombstone stays uncollapsed and tracked
 		assert!(db.datastore.get(b"key".as_slice()).is_some());
 		assert!(db.gc_candidates.pin().contains(b"key".as_slice()));
-		// After the reader departs the sweep collapses and unlinks it
+		// After the reader departs the sweep collapses it
 		drop(reader);
 		db.run_gc_tracked();
 		assert!(
 			db.datastore.get(b"key".as_slice()).is_none(),
-			"the tracked sweep should unlink a departed-reader tombstone"
+			"the tracked sweep should collapse a departed-reader tombstone"
 		);
 		assert!(!db.gc_candidates.pin().contains(b"key".as_slice()));
 	}

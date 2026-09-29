@@ -573,7 +573,7 @@ fn hot_key_concurrent_writers_converge() {
 	const THREADS: usize = 8;
 	const PER_THREAD: usize = 200;
 	let db: Arc<Database> = Arc::new(Database::new());
-	// Pre-seed the key so all updates land on the same Versions entry.
+	// Pre-seed the key so all updates land on the same version chain.
 	{
 		let mut tx = db.transaction(true);
 		tx.set(b"hotkey".to_vec(), b"seed".to_vec()).unwrap();

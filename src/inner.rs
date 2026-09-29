@@ -214,11 +214,8 @@ impl Inner {
 	/// transaction by mutable reference and marks it done, so no further
 	/// reads can occur at its snapshot. Excluding ANY other slot is
 	/// forbidden — in particular a concurrent committer's slot (pinned at
-	/// its start version, strictly below its merge version) is what
-	/// prevents a delete-collapse from unlinking a chain that a slower
-	/// committer is still about to push an earlier version into, which
-	/// would otherwise resurrect deleted data through the
-	/// `get_or_insert_with` re-seed path.
+	/// its start version, strictly below its merge version) holds the
+	/// watermark below every version that committer has yet to apply.
 	pub(crate) fn inline_gc_watermark(&self, own_slot: u64) -> Option<u64> {
 		// Load the clock bound before the fence-and-scan
 		let now = self.oracle.timestamp.load(Ordering::SeqCst);
@@ -358,9 +355,9 @@ impl Inner {
 	/// A key is removed from the candidate set BEFORE its chain is
 	/// examined. That ordering makes the untrack race-free against
 	/// concurrent commits: a committer inserts its key only after
-	/// pushing the garbage-leaving version under the chain write lock,
-	/// so any garbage added after this sweep's trim re-inserts the key
-	/// for the next pass — the removal here can never orphan it. When
+	/// pushing the garbage-leaving version into the chain, so any
+	/// garbage added after this sweep's trim re-inserts the key for the
+	/// next pass — the removal here can never orphan it. When
 	/// the trimmed chain still holds reclaimable versions (a reader
 	/// watermark is pinning them), the key is re-tracked for the next
 	/// sweep.
