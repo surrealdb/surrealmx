@@ -119,6 +119,9 @@ pub struct Merge {
 	pub(crate) min_key: Option<ByteSlice>,
 	/// The largest key in the writeset (for O(1) point read filtering)
 	pub(crate) max_key: Option<ByteSlice>,
+	/// The merge version this entry is queued at, set by the committing
+	/// transaction once it has claimed the version.
+	pub(crate) version: u64,
 	/// Whether this merge has been fully applied to the datastore.
 	/// Consumed by the in-order retirement advance: merge entries are
 	/// removed from the queue strictly in version order, over the
@@ -138,6 +141,7 @@ impl Merge {
 			writeset,
 			min_key,
 			max_key,
+			version: 0,
 			applied: AtomicBool::new(false),
 		}
 	}

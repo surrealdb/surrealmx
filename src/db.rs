@@ -170,16 +170,15 @@ impl Database {
 	pub fn get<K: IntoBytes>(&self, key: K) -> Result<Option<ByteSlice>, Error> {
 		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
 		let lookup = key.as_slice();
-		if !self.inner.transaction_merge_queue.is_empty()
-			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
-		{
-			let iter = self.inner.transaction_merge_queue.range(..=version);
-			for entry in iter.rev() {
-				if !entry.is_removed() && entry.value().may_contain_key(lookup) {
-					if let Some(v) = entry.value().writeset.get(lookup) {
-						return Ok(v.clone());
-					}
-				}
+		let retired = self.inner.merge_retire_id.load(Ordering::Acquire);
+		if version > retired {
+			if let Some(v) = self.inner.transaction_merge_queue.newest_write(
+				retired,
+				version,
+				lookup,
+				Clone::clone,
+			) {
+				return Ok(v);
 			}
 		}
 		let res = ByteSlice::with_borrowed(lookup, |k| {
@@ -200,18 +199,20 @@ impl Database {
 	{
 		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
 		let lookup = key.as_slice();
-		if !self.inner.transaction_merge_queue.is_empty()
-			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
-		{
-			let iter = self.inner.transaction_merge_queue.range(..=version);
-			for entry in iter.rev() {
-				if !entry.is_removed() && entry.value().may_contain_key(lookup) {
-					if let Some(v) = entry.value().writeset.get(lookup) {
-						return Ok(v.as_deref().map(f));
-					}
-				}
+		// Only taken if the merge queue holds the key's newest write
+		let mut f = Some(f);
+		let retired = self.inner.merge_retire_id.load(Ordering::Acquire);
+		if version > retired {
+			if let Some(v) =
+				self.inner.transaction_merge_queue.newest_write(retired, version, lookup, |v| {
+					v.as_deref().and_then(|bytes| f.take().map(|f| f(bytes)))
+				}) {
+				return Ok(v);
 			}
 		}
+		let Some(f) = f else {
+			return Ok(None);
+		};
 		let res = ByteSlice::with_borrowed(lookup, |k| {
 			self.inner.datastore.get(k).and_then(|e| match e.value().try_read() {
 				Some(guard) => {
@@ -230,16 +231,15 @@ impl Database {
 	pub fn exists<K: IntoBytes>(&self, key: K) -> Result<bool, Error> {
 		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
 		let lookup = key.as_slice();
-		if !self.inner.transaction_merge_queue.is_empty()
-			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
-		{
-			let iter = self.inner.transaction_merge_queue.range(..=version);
-			for entry in iter.rev() {
-				if !entry.is_removed() && entry.value().may_contain_key(lookup) {
-					if let Some(v) = entry.value().writeset.get(lookup) {
-						return Ok(v.is_some());
-					}
-				}
+		let retired = self.inner.merge_retire_id.load(Ordering::Acquire);
+		if version > retired {
+			if let Some(v) = self.inner.transaction_merge_queue.newest_write(
+				retired,
+				version,
+				lookup,
+				Option::is_some,
+			) {
+				return Ok(v);
 			}
 		}
 		let exists = ByteSlice::with_borrowed(lookup, |k| {
@@ -273,9 +273,7 @@ impl Database {
 		let version = tx.version();
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
-		if !self.inner.transaction_merge_queue.is_empty()
-			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
-		{
+		if version > self.inner.merge_retire_id.load(Ordering::Acquire) {
 			return tx.scan_with(beg..end, skip, limit, f);
 		}
 		let mut count = 0;
@@ -337,9 +335,7 @@ impl Database {
 		let version = tx.version();
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
-		if !self.inner.transaction_merge_queue.is_empty()
-			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
-		{
+		if version > self.inner.merge_retire_id.load(Ordering::Acquire) {
 			return tx.keys_for_each(beg..end, skip, limit, f);
 		}
 		let mut count = 0;
@@ -388,9 +384,7 @@ impl Database {
 		let version = tx.version();
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
-		if !self.inner.transaction_merge_queue.is_empty()
-			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
-		{
+		if version > self.inner.merge_retire_id.load(Ordering::Acquire) {
 			return tx.total(beg..end, skip, limit);
 		}
 		let mut count = 0;

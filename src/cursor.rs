@@ -85,29 +85,11 @@ impl<'a> Cursor<'a> {
 	) -> Self {
 		// Snapshot the merge-queue writesets once (Arc bumps); the lazy
 		// iterator built in `create_iterator` ranges into them on demand.
-		let merge_sources: Vec<Arc<Merge>> = if version
-			<= database.merge_retire_id.load(std::sync::atomic::Ordering::Acquire)
-		{
+		let retired = database.merge_retire_id.load(std::sync::atomic::Ordering::Acquire);
+		let merge_sources: Vec<Arc<Merge>> = if version <= retired {
 			Vec::new()
 		} else {
-			database
-				.transaction_merge_queue
-				.range(..=version)
-				.rev()
-				.filter_map(|e| {
-					let m = e.value();
-					match (&m.min_key, &m.max_key) {
-						(Some(min), Some(max)) => {
-							if max.as_slice() < beg.as_slice() || min.as_slice() >= end.as_slice() {
-								None
-							} else {
-								Some(Arc::clone(m))
-							}
-						}
-						_ => None,
-					}
-				})
-				.collect()
+			database.transaction_merge_queue.overlapping(retired, version, &beg, &end)
 		};
 
 		Cursor {
