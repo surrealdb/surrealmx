@@ -28,9 +28,8 @@ use crate::sync::backoff;
 use crate::sync::RwLock;
 use crate::version::Version;
 use crate::versions::Versions;
-use arc_swap::ArcSwap;
+use artmap::ArtMap;
 use byteslice::ByteSlice;
-use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -538,7 +537,7 @@ pub(crate) struct TransactionInner {
 	/// pre-checks.
 	pub(crate) lockset_bloom: Box<AtomicBloomFilter>,
 	/// The local set of key scans
-	pub(crate) scanset: SkipMap<ByteSlice, ArcSwap<ByteSlice>>,
+	pub(crate) scanset: ArtMap<ByteSlice, ByteSlice>,
 	/// The local set of updates and deletes
 	pub(crate) writeset: BTreeMap<ByteSlice, Option<ByteSlice>>,
 	/// The parent database for this transaction
@@ -618,7 +617,7 @@ impl TransactionInner {
 			readset_bloom: Box::new(AtomicBloomFilter::new()),
 			lockset: HashSet::new(),
 			lockset_bloom: Box::new(AtomicBloomFilter::new()),
-			scanset: SkipMap::new(),
+			scanset: ArtMap::new(),
 			writeset: BTreeMap::new(),
 			database: db,
 			slot,
@@ -1986,19 +1985,19 @@ impl TransactionInner {
 
 	/// Helper to track a scan range in the scanset, keeping ranges disjoint
 	/// and merged so that:
-	/// 1. `scanset.front()` is the minimum start bound.
-	/// 2. `scanset.back()` is the maximum end bound.
+	/// 1. The first entry holds the minimum start bound.
+	/// 2. The last entry holds the maximum end bound.
 	/// 3. `range(..=k).next_back()` finds the unique enclosing range.
 	fn track_scan_range(&self, beg: &ByteSlice, end: &ByteSlice) {
 		let mut effective_beg = beg.clone();
 		let mut effective_end = end.clone();
 
 		// Check if a predecessor range covers or overlaps `beg`
-		if let Some(entry) = self.scanset.range::<ByteSlice, _>(..=beg).next_back() {
-			let prev_end = entry.value().load();
-			if **prev_end >= *beg {
+		if let Some(entry) = self.scanset.range::<_, ByteSlice>(..=beg).next_back() {
+			let prev_end = entry.value();
+			if *prev_end >= *beg {
 				// Overlaps with predecessor
-				if **prev_end >= *end {
+				if *prev_end >= *end {
 					// Already fully covered by predecessor
 					return;
 				}
@@ -2011,17 +2010,17 @@ impl TransactionInner {
 		// effective_end] Any range starting <= effective_end overlaps
 		// with us
 		let overlapping: Vec<_> =
-			self.scanset.range::<ByteSlice, _>(&effective_beg..=&effective_end).collect();
+			self.scanset.range::<_, ByteSlice>(&effective_beg..=&effective_end).collect();
 
 		for entry in overlapping {
-			let entry_end = entry.value().load();
-			if **entry_end > effective_end {
-				effective_end = (**entry_end).clone();
+			let entry_end = entry.value();
+			if *entry_end > effective_end {
+				effective_end = entry_end.clone();
 			}
 			entry.remove();
 		}
 
-		self.scanset.insert(effective_beg, ArcSwap::from_pointee(effective_end));
+		self.scanset.insert(effective_beg, effective_end);
 	}
 
 	/// Snapshot the merge-queue writesets visible at `version` within `[beg,
@@ -2616,10 +2615,9 @@ impl TransactionInner {
 				return Err(Error::KeyReadConflict);
 			}
 			// Check if the committed writeset may overlap any scan range
-			let scan_overlap = match (self.scanset.front(), self.scanset.back()) {
+			let scan_overlap = match (self.scanset.iter().next(), self.scanset.iter().next_back()) {
 				(Some(scan_front), Some(scan_back)) => {
-					let scan_max_end = Arc::clone(&scan_back.value().load());
-					tx.may_overlap_range(scan_front.key(), &scan_max_end)
+					tx.may_overlap_range(scan_front.key(), scan_back.value())
 				}
 				_ => false,
 			};
@@ -2627,9 +2625,9 @@ impl TransactionInner {
 			if scan_overlap {
 				for k in tx.keys.iter() {
 					// Check if this key may be within a scan range
-					if let Some(entry) = self.scanset.range::<ByteSlice, _>(..=k).next_back() {
+					if let Some(entry) = self.scanset.range::<_, ByteSlice>(..=k).next_back() {
 						// Check if the range includes this key
-						if **entry.value().load() > *k {
+						if *entry.value() > *k {
 							return Err(Error::KeyReadConflict);
 						}
 					}
@@ -4462,6 +4460,26 @@ mod tests {
 		);
 	}
 
+	#[test]
+	fn scan_ranges_are_tracked_disjoint_and_merged() {
+		let db = Database::new();
+		let tx = db.transaction(true);
+		let inner = tx.inner.as_ref().unwrap();
+		let bs = |s: &str| byteslice::ByteSlice::from(s);
+		let track = |b: &str, e: &str| inner.track_scan_range(&bs(b), &bs(e));
+		let ranges = || {
+			inner.scanset.iter().map(|e| (e.key().clone(), e.value().clone())).collect::<Vec<_>>()
+		};
+		track("c", "e");
+		track("m", "p");
+		// Already covered by a tracked range
+		track("c", "d");
+		assert_eq!(ranges(), vec![(bs("c"), bs("e")), (bs("m"), bs("p"))]);
+		// Overlaps the end of one range and the start of the next: all merge
+		track("d", "n");
+		track("x", "z");
+		assert_eq!(ranges(), vec![(bs("c"), bs("p")), (bs("x"), bs("z"))]);
+	}
 	#[test]
 	fn test_savepoint_rollback_preserves_earlier_scans() {
 		// Verify that rolling back a savepoint doesn't lose scans from before
