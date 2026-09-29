@@ -208,10 +208,10 @@ use_self = "warn"
 
 [dependencies]
 arc-swap = "1.9.2"
-artmap = "0.5.0"
+artmap = "0.6.0"
 bincode = { version = "2.0.1", features = ["serde"] }
 bytes = { version = "1.12.1", features = ["serde"] }
-byteslice = { version = "0.1.0", features = ["serde"] }
+byteslice = { version = "0.2.0", features = ["serde"] }
 crossbeam-deque = "0.8.8"
 crossbeam-queue = "0.3.14"
 crossbeam-skiplist = "0.1.3"

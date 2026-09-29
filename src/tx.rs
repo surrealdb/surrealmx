@@ -5267,14 +5267,20 @@ mod tests {
 		for w in chain.windows(2) {
 			assert!(w[0].0 < w[1].0, "versions not strictly monotonic: {} then {}", w[0].0, w[1].0);
 		}
-		// No tombstones: this key was never deleted.
-		assert!(chain.iter().all(|v| v.1.is_some()), "unexpected tombstone in chain");
+		// No tombstones: this key was never deleted, so every version holds
+		// a value (neither a datastore tombstone nor an artmap tombstone).
+		assert!(
+			chain.iter().all(|v| matches!(v.1, Some(Some(_)))),
+			"unexpected tombstone in chain"
+		);
 		// Lossless and duplicate-free: the chain holds the seed plus every
 		// successfully committed value, and nothing else.
 		let committed = written.lock().unwrap().clone();
 		assert_eq!(chain.len(), 1 + committed.len(), "chain length diverges from committed writes");
-		let mut got: std::collections::BTreeSet<Vec<u8>> =
-			chain.iter().filter_map(|v| v.1.as_ref().map(|b| b.to_vec())).collect();
+		let mut got: std::collections::BTreeSet<Vec<u8>> = chain
+			.iter()
+			.filter_map(|v| v.1.as_ref().and_then(Option::as_ref).map(|b| b.to_vec()))
+			.collect();
 		got.remove(b"seed".as_slice());
 		assert_eq!(got, committed, "chain values diverge from committed writes");
 		// Release the pinned reader
@@ -5316,7 +5322,7 @@ mod tests {
 			}
 			for (round, v) in chain.iter().enumerate() {
 				assert_eq!(
-					v.1.as_deref(),
+					v.1.as_ref().and_then(Option::as_deref),
 					Some(format!("round{round}-i{i}").as_bytes()),
 					"unexpected value at round {round} for key {i}"
 				);
