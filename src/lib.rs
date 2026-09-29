@@ -37,6 +37,7 @@ mod err;
 mod inner;
 mod iter;
 mod kv;
+mod merge_ring;
 mod options;
 mod oracle;
 mod persistence;

@@ -14,17 +14,17 @@
 
 //! This module stores the inner in-memory database type.
 
+use crate::merge_ring::{MergeRing, DEFAULT_MERGE_RING_CAPACITY};
 use crate::oracle::Oracle;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::persistence::Persistence;
-use crate::queue::{Commit, Merge};
+use crate::queue::Commit;
 use crate::readers::Readers;
 use crate::ring::{CommitRing, DEFAULT_COMMIT_RING_CAPACITY};
 use crate::sync::RwLock;
 use crate::versions::Versions;
 use crate::DatabaseOptions;
 use byteslice::ByteSlice;
-use crossbeam_skiplist::SkipMap;
 use crossbeam_utils::CachePadded;
 use papaya::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -94,8 +94,8 @@ pub struct Inner {
 	/// completed prefix is the commit watermark: every commit with an id
 	/// at or below it has either published its merge version or aborted.
 	pub(crate) commit_ring: CommitRing<Commit>,
-	/// Transaction updates which are committed but not yet applied
-	pub(crate) transaction_merge_queue: SkipMap<u64, Arc<Merge>>,
+	/// Transaction updates which are committed but not yet retired
+	pub(crate) transaction_merge_queue: MergeRing,
 	/// The contiguous retired prefix of the merge queue: every merge
 	/// version at or below this watermark has been fully applied to the
 	/// datastore and its queue entry removed. Merge entries are retired
@@ -153,7 +153,7 @@ impl Inner {
 			datastore: artmap::ArtMap::new(),
 			readers: Readers::new(),
 			commit_ring: CommitRing::new(DEFAULT_COMMIT_RING_CAPACITY, 1),
-			transaction_merge_queue: SkipMap::new(),
+			transaction_merge_queue: MergeRing::new(DEFAULT_MERGE_RING_CAPACITY),
 			merge_retire_id: CachePadded::new(AtomicU64::new(0)),
 			merge_retiring: CachePadded::new(AtomicBool::new(false)),
 			gc_candidates: HashSet::new(),
@@ -270,13 +270,12 @@ impl Inner {
 
 	/// Opportunistically advance the published merge clock as far as
 	/// currently possible, through consecutive claimed versions whose
-	/// merge-queue entries have been inserted (see
-	/// [`Oracle::is_inserted`](crate::oracle::Oracle::is_inserted)).
+	/// merge-queue entries have been inserted.
 	pub(crate) fn try_advance_merge_clock(&self) {
 		let max_claimed = self.oracle.alloc.load(Ordering::SeqCst);
 		let cur = self.oracle.timestamp.load(Ordering::SeqCst);
 		let mut target = cur;
-		while target < max_claimed && self.oracle.is_inserted(target + 1) {
+		while target < max_claimed && self.transaction_merge_queue.contains(target + 1) {
 			target += 1;
 		}
 		if target > cur {
@@ -344,11 +343,10 @@ impl Inner {
 			let mut target = self.merge_retire_id.load(Ordering::SeqCst);
 			while target < max_published {
 				let next = target + 1;
-				if let Some(entry) = self.transaction_merge_queue.get(&next) {
-					if !entry.value().applied.load(Ordering::SeqCst) {
-						break;
-					}
-					entry.remove();
+				match self.transaction_merge_queue.get(next, |m| m.applied.load(Ordering::SeqCst)) {
+					Some(false) => break,
+					Some(true) => self.transaction_merge_queue.remove(next),
+					None => {}
 				}
 				target = next;
 			}
@@ -361,8 +359,8 @@ impl Inner {
 			}
 			let applied = self
 				.transaction_merge_queue
-				.get(&next)
-				.is_none_or(|e| e.value().applied.load(Ordering::SeqCst));
+				.get(next, |m| m.applied.load(Ordering::SeqCst))
+				.unwrap_or(true);
 			if !applied {
 				return;
 			}

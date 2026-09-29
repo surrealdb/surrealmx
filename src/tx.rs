@@ -2031,27 +2031,11 @@ impl TransactionInner {
 		beg: &ByteSlice,
 		end: &ByteSlice,
 	) -> Vec<Arc<Merge>> {
-		if version <= self.database.merge_retire_id.load(Ordering::Acquire) {
+		let retired = self.database.merge_retire_id.load(Ordering::Acquire);
+		if version <= retired {
 			return Vec::new();
 		}
-		self.database
-			.transaction_merge_queue
-			.range(..=version)
-			.rev()
-			.filter_map(|e| {
-				let m = e.value();
-				match (&m.min_key, &m.max_key) {
-					(Some(min), Some(max)) => {
-						if max.as_slice() < beg.as_slice() || min.as_slice() >= end.as_slice() {
-							None
-						} else {
-							Some(Arc::clone(m))
-						}
-					}
-					_ => None,
-				}
-			})
-			.collect()
+		self.database.transaction_merge_queue.overlapping(retired, version, beg, end)
 	}
 
 	/// Retrieve a count of keys from the database
@@ -2434,16 +2418,15 @@ impl TransactionInner {
 		// If the merge queue is empty or the snapshot version has already
 		// retired, no in-flight entry <= version can exist in the merge
 		// queue.
-		if !self.database.transaction_merge_queue.is_empty()
-			&& version > self.database.merge_retire_id.load(Ordering::Acquire)
-		{
-			let iter = self.database.transaction_merge_queue.range(..=version);
-			for entry in iter.rev() {
-				if !entry.is_removed() && entry.value().may_contain_key(key) {
-					if let Some(v) = entry.value().writeset.get(key) {
-						return v.clone();
-					}
-				}
+		let retired = self.database.merge_retire_id.load(Ordering::Acquire);
+		if version > retired {
+			if let Some(v) = self.database.transaction_merge_queue.newest_write(
+				retired,
+				version,
+				key,
+				Clone::clone,
+			) {
+				return v;
 			}
 		}
 		// Check the key in the datastore using ByteSlice::cmp with 4-byte
@@ -2464,18 +2447,18 @@ impl TransactionInner {
 		F: FnOnce(&[u8]) -> R,
 	{
 		let key = key.as_slice();
-		if !self.database.transaction_merge_queue.is_empty()
-			&& version > self.database.merge_retire_id.load(Ordering::Acquire)
-		{
-			let iter = self.database.transaction_merge_queue.range(..=version);
-			for entry in iter.rev() {
-				if !entry.is_removed() && entry.value().may_contain_key(key) {
-					if let Some(v) = entry.value().writeset.get(key) {
-						return v.as_deref().map(f);
-					}
-				}
+		// Only taken if the merge queue holds the key's newest write
+		let mut f = Some(f);
+		let retired = self.database.merge_retire_id.load(Ordering::Acquire);
+		if version > retired {
+			if let Some(v) =
+				self.database.transaction_merge_queue.newest_write(retired, version, key, |v| {
+					v.as_deref().and_then(|bytes| f.take().map(|f| f(bytes)))
+				}) {
+				return v;
 			}
 		}
+		let f = f?;
 		ByteSlice::with_borrowed(key, |k| {
 			self.database.datastore.get(k).and_then(|e| match e.value().try_read() {
 				Some(guard) => guard.with_version(version, f),
@@ -2495,16 +2478,15 @@ impl TransactionInner {
 		// If the merge queue is empty or the snapshot version has already
 		// retired, no in-flight entry <= version can exist in the merge
 		// queue.
-		if !self.database.transaction_merge_queue.is_empty()
-			&& version > self.database.merge_retire_id.load(Ordering::Acquire)
-		{
-			let iter = self.database.transaction_merge_queue.range(..=version);
-			for entry in iter.rev() {
-				if !entry.is_removed() && entry.value().may_contain_key(key) {
-					if let Some(v) = entry.value().writeset.get(key) {
-						return v.is_some();
-					}
-				}
+		let retired = self.database.merge_retire_id.load(Ordering::Acquire);
+		if version > retired {
+			if let Some(v) = self.database.transaction_merge_queue.newest_write(
+				retired,
+				version,
+				key,
+				Option::is_some,
+			) {
+				return v;
 			}
 		}
 		// Check the key in the datastore using ByteSlice::cmp with 4-byte
@@ -2533,20 +2515,19 @@ impl TransactionInner {
 		// If the merge queue is empty or the snapshot version has already
 		// retired, no in-flight entry <= version can exist in the merge
 		// queue.
-		if !self.database.transaction_merge_queue.is_empty()
-			&& version > self.database.merge_retire_id.load(Ordering::Acquire)
-		{
-			let iter = self.database.transaction_merge_queue.range(..=version);
-			for entry in iter.rev() {
-				if !entry.is_removed() && entry.value().may_contain_key(key) {
-					if let Some(v) = entry.value().writeset.get(key) {
-						return match (chk.as_ref(), v.as_ref()) {
-							(Some(x), Some(y)) => x.as_slice() == y.as_slice(),
-							(None, None) => true,
-							_ => false,
-						};
-					}
-				}
+		let retired = self.database.merge_retire_id.load(Ordering::Acquire);
+		if version > retired {
+			if let Some(v) = self.database.transaction_merge_queue.newest_write(
+				retired,
+				version,
+				key,
+				|v| match (chk.as_ref(), v.as_ref()) {
+					(Some(x), Some(y)) => x.as_slice() == y.as_slice(),
+					(None, None) => true,
+					_ => false,
+				},
+			) {
+				return v;
 			}
 		}
 		// Check the key in the datastore using ByteSlice::cmp with 4-byte
@@ -2647,23 +2628,20 @@ impl TransactionInner {
 
 	/// Atomimcally inserts the transaction into the merge queue
 	#[inline(always)]
-	fn atomic_merge(&self, updates: Merge) -> (u64, Arc<Merge>) {
+	fn atomic_merge(&self, mut updates: Merge) -> (u64, Arc<Merge>) {
 		// Store the number of spins
 		let mut spins = 0;
-		// Store the commit in an Arc
-		let updates = Arc::new(updates);
 		// Get the database logical clock
 		let oracle = Arc::clone(&self.database.oracle);
-		// Get the database transaction merge queue
-		let queue = &self.database.transaction_merge_queue;
 		// Claim a unique merge version from the allocation counter. See
 		// the equivalent comment in `atomic_commit`: a dense claim is
 		// always unique, so no collision retry is needed.
 		let version = oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
-		// Insert the merge entry at the claimed version, and record the
-		// insert so the clock can advance past it
-		let entry = queue.insert(version, Arc::clone(&updates));
-		oracle.mark_inserted(version);
+		updates.version = version;
+		let updates = Arc::new(updates);
+		// Insert the merge entry at the claimed version, where the clock
+		// can see it and advance past it
+		self.database.transaction_merge_queue.insert(Arc::clone(&updates));
 		// Publish strictly in claim order — see the equivalent comment
 		// in `atomic_commit` for why this must cover our own version
 		// before we return, and why we reload rather than retry a fixed
@@ -2672,7 +2650,7 @@ impl TransactionInner {
 		loop {
 			let cur = oracle.timestamp.load(Ordering::SeqCst);
 			if cur >= version {
-				return (version, Arc::clone(entry.value()));
+				return (version, updates);
 			}
 			if cur == version - 1
 				&& oracle
@@ -2680,7 +2658,7 @@ impl TransactionInner {
 					.compare_exchange_weak(cur, version, Ordering::SeqCst, Ordering::Acquire)
 					.is_ok()
 			{
-				return (version, Arc::clone(entry.value()));
+				return (version, updates);
 			}
 			// Help advance the published merge clock
 			self.database.try_advance_merge_clock();
