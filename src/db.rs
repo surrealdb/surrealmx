@@ -24,7 +24,6 @@ use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
 use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
-use crate::queue::Commit;
 use crate::tx::Transaction;
 use byteslice::ByteSlice;
 use std::ops::{Bound, Deref, Range};
@@ -163,6 +162,11 @@ impl Database {
 	}
 
 	/// Fetch a key directly from the database without allocating a transaction.
+	///
+	/// The read is linearizable: it returns the latest value committed
+	/// before the call, or a value committed while the call was in
+	/// progress. It holds no snapshot, so use a transaction to read several
+	/// keys consistently.
 	pub fn get<K: IntoBytes>(&self, key: K) -> Result<Option<ByteSlice>, Error> {
 		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
 		let lookup = key.as_slice();
@@ -178,14 +182,12 @@ impl Database {
 				}
 			}
 		}
-		let res = ByteSlice::with_borrowed(lookup, |k| {
-			self.inner.datastore.get_version_le(k, version).and_then(|(_, val)| val)
-		});
+		let res = ByteSlice::with_borrowed(lookup, |k| self.inner.fetch_unpinned(k, version));
 		Ok(res)
 	}
 
 	/// Inspect a key's value directly via closure without allocating a
-	/// transaction or cloning.
+	/// transaction or cloning. Linearizable, as [`Database::get`].
 	pub fn with_value<K, F, R>(&self, key: K, f: F) -> Result<Option<R>, Error>
 	where
 		K: IntoBytes,
@@ -206,15 +208,13 @@ impl Database {
 			}
 		}
 		let res = ByteSlice::with_borrowed(lookup, |k| {
-			self.inner
-				.datastore
-				.get_version_le(k, version)
-				.and_then(|(_, val)| val.as_deref().map(f))
+			self.inner.fetch_unpinned(k, version).as_deref().map(f)
 		});
 		Ok(res)
 	}
 
 	/// Check if a key exists directly without allocating a transaction.
+	/// Linearizable, as [`Database::get`].
 	pub fn exists<K: IntoBytes>(&self, key: K) -> Result<bool, Error> {
 		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
 		let lookup = key.as_slice();
@@ -230,15 +230,16 @@ impl Database {
 				}
 			}
 		}
-		let exists = ByteSlice::with_borrowed(lookup, |k| {
-			self.inner.datastore.get_version_le(k, version).is_some_and(|(_, val)| val.is_some())
-		});
+		let exists =
+			ByteSlice::with_borrowed(lookup, |k| self.inner.fetch_unpinned(k, version).is_some());
 		Ok(exists)
 	}
 
-	/// Scan key-value pairs in a range directly from the database without
-	/// allocating a transaction. Calls a closure with borrowed key and value
-	/// bytes, stopping early if the closure returns `false`.
+	/// Scan key-value pairs in a range directly from the database at a
+	/// consistent snapshot, calling a closure with borrowed key and value
+	/// bytes and stopping early if the closure returns `false`. A pooled
+	/// read transaction pins the snapshot, and the datastore is read in
+	/// place whenever no merge is still being applied.
 	pub fn scan_with<K, F>(
 		&self,
 		rng: Range<K>,
@@ -250,13 +251,15 @@ impl Database {
 		K: IntoBytes,
 		F: FnMut(&ByteSlice, &[u8]) -> bool,
 	{
-		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		// Pin a snapshot for the whole scan: without it, inline GC in
+		// concurrent commits can reclaim the versions being scanned
+		let tx = self.transaction(false);
+		let version = tx.version();
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
 		if !self.inner.transaction_merge_queue.is_empty()
 			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
 		{
-			let tx = self.transaction(false);
 			return tx.scan_with(beg..end, skip, limit, f);
 		}
 		let mut count = 0;
@@ -283,8 +286,9 @@ impl Database {
 		Ok(count)
 	}
 
-	/// Iterate keys in a range directly from the database without allocating a
-	/// transaction, stopping early if the closure returns `false`.
+	/// Iterate keys in a range directly from the database at a consistent
+	/// snapshot, stopping early if the closure returns `false`. See
+	/// [`Database::scan_with`].
 	pub fn keys_for_each<K, F>(
 		&self,
 		rng: Range<K>,
@@ -296,13 +300,15 @@ impl Database {
 		K: IntoBytes,
 		F: FnMut(&ByteSlice) -> bool,
 	{
-		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		// Pin a snapshot for the whole scan: without it, inline GC in
+		// concurrent commits can reclaim the versions being scanned
+		let tx = self.transaction(false);
+		let version = tx.version();
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
 		if !self.inner.transaction_merge_queue.is_empty()
 			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
 		{
-			let tx = self.transaction(false);
 			return tx.keys_for_each(beg..end, skip, limit, f);
 		}
 		let mut count = 0;
@@ -329,8 +335,8 @@ impl Database {
 		Ok(count)
 	}
 
-	/// Count keys in a range directly from the database without allocating a
-	/// transaction.
+	/// Count keys in a range directly from the database at a consistent
+	/// snapshot. See [`Database::scan_with`].
 	pub fn total<K>(
 		&self,
 		rng: Range<K>,
@@ -340,13 +346,15 @@ impl Database {
 	where
 		K: IntoBytes,
 	{
-		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		// Pin a snapshot for the whole scan: without it, inline GC in
+		// concurrent commits can reclaim the versions being scanned
+		let tx = self.transaction(false);
+		let version = tx.version();
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
 		if !self.inner.transaction_merge_queue.is_empty()
 			&& version > self.inner.merge_retire_id.load(Ordering::Acquire)
 		{
-			let tx = self.transaction(false);
 			return tx.total(beg..end, skip, limit);
 		}
 		let mut count = 0;
@@ -417,8 +425,8 @@ impl Database {
 		Ok(())
 	}
 
-	/// Scan key-value pairs in a range directly from the database without
-	/// allocating a transaction.
+	/// Scan key-value pairs in a range directly from the database at a
+	/// consistent snapshot. See [`Database::scan_with`].
 	pub fn scan<K>(
 		&self,
 		rng: Range<K>,
@@ -433,8 +441,8 @@ impl Database {
 		Ok(res)
 	}
 
-	/// Scan keys in a range directly from the database without allocating a
-	/// transaction.
+	/// Scan keys in a range directly from the database at a consistent
+	/// snapshot. See [`Database::scan_with`].
 	pub fn keys<K>(
 		&self,
 		rng: Range<K>,
@@ -452,36 +460,14 @@ impl Database {
 	/// Set a key to a value in an auto-committed write transaction.
 	///
 	/// Atomically sets the key to the specified value and commits the write.
-	/// Overwrites any existing value at the key.
+	/// Overwrites any existing value at the key. The write reads nothing, so
+	/// a write-write conflict with a concurrent transaction is retried
+	/// against a fresh snapshot rather than returned.
 	#[inline]
 	pub fn set<K: IntoBytes, V: IntoBytes>(&self, key: K, val: V) -> Result<(), Error> {
 		let key = key.into_bytes();
 		let val = val.into_bytes();
-
-		let commit_slot = self.inner.commit_ring.claim();
-		let version = self.inner.oracle.alloc.fetch_add(1, Ordering::Relaxed) + 1;
-		self.inner.oracle.timestamp.fetch_max(version, Ordering::Release);
-		self.inner.merge_retire_id.fetch_max(version, Ordering::Release);
-
-		let commit = Commit::new_single(key.clone(), version);
-		self.inner.commit_ring.publish(commit_slot, Arc::new(commit));
-		if commit_slot.trailing_zeros() >= 3 {
-			self.inner.commit_ring.advance_published_prefix();
-			self.inner.advance_commit_watermark();
-		}
-
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			let persistence = self.inner.persistence.read().clone();
-			if let Some(p) = persistence {
-				let mut map = std::collections::BTreeMap::new();
-				map.insert(key.clone(), Some(val.clone()));
-				p.append(version, &map).map_err(Error::TxCommitNotPersisted)?;
-			}
-		}
-
-		self.inner.datastore.insert(key, version, Some(val));
-		Ok(())
+		self.blind_write(|tx| tx.set(key.clone(), val.clone()))
 	}
 
 	/// Put a key to a value in an auto-committed write transaction.
@@ -515,34 +501,39 @@ impl Database {
 	/// Delete a key in an auto-committed write transaction.
 	///
 	/// Atomically creates a tombstone at the key and commits the deletion.
+	/// Like [`Database::set`], a write-write conflict is retried rather than
+	/// returned.
 	#[inline]
 	pub fn del<K: IntoBytes>(&self, key: K) -> Result<(), Error> {
 		let key = key.into_bytes();
+		self.blind_write(|tx| tx.del(key.clone()))
+	}
 
-		let commit_slot = self.inner.commit_ring.claim();
-		let version = self.inner.oracle.alloc.fetch_add(1, Ordering::Relaxed) + 1;
-		self.inner.oracle.timestamp.fetch_max(version, Ordering::Release);
-		self.inner.merge_retire_id.fetch_max(version, Ordering::Release);
-
-		let commit = Commit::new_single(key.clone(), version);
-		self.inner.commit_ring.publish(commit_slot, Arc::new(commit));
-		if commit_slot.trailing_zeros() >= 3 {
-			self.inner.commit_ring.advance_published_prefix();
-			self.inner.advance_commit_watermark();
-		}
-
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			let persistence = self.inner.persistence.read().clone();
-			if let Some(p) = persistence {
-				let mut map = std::collections::BTreeMap::new();
-				map.insert(key.clone(), None);
-				p.append(version, &map).map_err(Error::TxCommitNotPersisted)?;
+	/// Commit a write that reads nothing, retrying on write-write conflicts.
+	///
+	/// This goes through a full transaction on purpose: a direct write must
+	/// be pinned while it applies (or inline GC can collapse a chain under
+	/// it), publish through the merge queue in version order (or a snapshot
+	/// can see the clock pass it before its write lands), and be validated
+	/// against concurrent commits (or first-committer-wins is lost). With no
+	/// reads to invalidate, any snapshot is as good as another, so a
+	/// conflict is always safe to retry.
+	fn blind_write(
+		&self,
+		write: impl Fn(&mut Transaction) -> Result<(), Error>,
+	) -> Result<(), Error> {
+		let mut spins = 0;
+		loop {
+			let mut tx = self.transaction(true);
+			write(&mut tx)?;
+			match tx.commit() {
+				Err(Error::KeyWriteConflict) => {
+					crate::sync::backoff(spins);
+					spins += 1;
+				}
+				res => return res,
 			}
 		}
-
-		self.inner.datastore.insert(key, version, None);
-		Ok(())
 	}
 
 	/// Conditionally delete a key in an auto-committed write transaction.
@@ -1643,6 +1634,7 @@ mod tests {
 			tx.commit().unwrap();
 		}
 		assert_eq!(db.unretired_commits(), 10);
+		assert_eq!(db.inner.commit_ring.occupied(), 10);
 		db.run_cleanup();
 		// With no registered readers the trim bound falls back to the
 		// current commit id: everything below it is unreachable by any
@@ -1650,6 +1642,8 @@ mod tests {
 		// above the commit id the transaction registers at. The exclusive
 		// bound leaves exactly the entry at the current commit id.
 		assert_eq!(db.unretired_commits(), 1);
+		// The retired entries are released, not just counted as retired
+		assert_eq!(db.inner.commit_ring.occupied(), 1);
 	}
 
 	#[test]
@@ -1678,10 +1672,35 @@ mod tests {
 		// 1-4 are trimmed; the entry at the reader's snapshot (5) and
 		// everything above remain.
 		assert_eq!(db.unretired_commits(), 6);
+		assert_eq!(db.inner.commit_ring.occupied(), 6);
 		drop(reader);
 		db.run_cleanup();
 		// With the reader gone the idle fallback applies again
 		assert_eq!(db.unretired_commits(), 1);
+		assert_eq!(db.inner.commit_ring.occupied(), 1);
+	}
+
+	#[test]
+	fn cleanup_keeps_entries_in_a_live_conflict_window() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("pre{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		let mut writer = db.transaction(true);
+		writer.set("mine", "value").unwrap();
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("post{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		db.run_cleanup();
+		// The writer validates against every commit in its window, so a
+		// released entry there would read as gone and abort it
+		writer.commit().unwrap();
 	}
 
 	#[test]
@@ -1781,7 +1800,6 @@ mod tests {
 
 	#[test]
 	fn commit_watermark_tracks_commits() {
-		use std::sync::atomic::Ordering;
 		let db = Database::new_with_options(
 			crate::DatabaseOptions::default().with_all_workers_disabled(),
 		);
@@ -1791,8 +1809,8 @@ mod tests {
 			tx.commit().unwrap();
 		}
 		// Every commit completed, so the watermark covers all claimed ids
-		assert_eq!(db.commit_watermark.load(Ordering::SeqCst), 5);
-		assert_eq!(db.inner.commit_ring.published_prefix.load(Ordering::SeqCst), 5);
+		assert_eq!(db.commit_watermark(), 5);
+		assert_eq!(db.inner.commit_ring.published(), 5);
 		// An aborted commit removes its entry, which also counts as
 		// complete: the watermark must still cover the aborted id.
 		let mut tx1 = db.transaction(true);
@@ -1801,10 +1819,7 @@ mod tests {
 		tx2.set("conflict", "b").unwrap();
 		tx1.commit().unwrap();
 		assert!(tx2.commit().is_err());
-		assert_eq!(
-			db.commit_watermark.load(Ordering::SeqCst),
-			db.inner.commit_ring.published_prefix.load(Ordering::SeqCst)
-		);
+		assert_eq!(db.commit_watermark(), db.inner.commit_ring.published());
 	}
 
 	#[test]

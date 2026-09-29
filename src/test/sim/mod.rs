@@ -30,14 +30,43 @@ mod tests {
 	use std::sync::Arc;
 	use std::thread;
 
+	/// Miri interprets the engine several orders of magnitude slower than
+	/// native code, so there each simulation is cut down to a short run of
+	/// its first seed: enough to drive every code path through Miri's
+	/// undefined behaviour and data race checks.
+	const fn steps(native: usize) -> usize {
+		if cfg!(miri) {
+			30
+		} else {
+			native
+		}
+	}
+
+	/// The seeds to simulate: all of them natively, the first under Miri.
+	fn sample<T>(all: &[T]) -> &[T] {
+		if cfg!(miri) {
+			&all[..1]
+		} else {
+			all
+		}
+	}
+
 	#[test]
 	fn test_dst_differential_seeds() {
 		// Read environment variables or default to a robust testing set
-		let steps: usize =
-			std::env::var("SURREALMX_SIM_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(500);
+		let steps: usize = std::env::var("SURREALMX_SIM_STEPS")
+			.ok()
+			.and_then(|s| s.parse().ok())
+			.unwrap_or(steps(500));
 
-		let seed_count: usize =
-			std::env::var("SURREALMX_SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(50);
+		let seed_count: usize = std::env::var("SURREALMX_SIM_SEEDS")
+			.ok()
+			.and_then(|s| s.parse().ok())
+			.unwrap_or(if cfg!(miri) {
+				1
+			} else {
+				50
+			});
 
 		let base_seeds: Vec<u64> =
 			vec![1, 42, 1337, 2026, 99_999, 777_777, 1_234_567, 3_141_592, 2_718_281, 8_888_888];
@@ -82,7 +111,7 @@ mod tests {
 		let seed = 0x1234_5678_9ABC_DEF0;
 		let mut runner = SimRunner::new_in_memory(seed);
 		let gen = WorkloadGenerator::new(seed, 20);
-		runner.run(gen, 500);
+		runner.run(gen, steps(500));
 	}
 
 	#[test]
@@ -100,10 +129,10 @@ mod tests {
 			314_159_265,
 		];
 
-		for &seed in &seeds {
+		for &seed in sample(&seeds) {
 			let mut runner = SimRunner::new_in_memory(seed);
 			let gen = WorkloadGenerator::new(seed, 25);
-			runner.run(gen, 1000);
+			runner.run(gen, steps(1000));
 		}
 	}
 
@@ -112,7 +141,7 @@ mod tests {
 		let seed = 0x5555_AAAA_5555_AAAA;
 		let mut runner = SimRunner::new_in_memory(seed);
 		let gen = WorkloadGenerator::new(seed, 5).with_max_concurrent_txns(12);
-		runner.run(gen, 3000);
+		runner.run(gen, steps(3000));
 	}
 
 	#[test]
@@ -120,7 +149,7 @@ mod tests {
 		let seed = 0x9876_5432_10FE_DCBA;
 		let mut runner = SimRunner::new_in_memory(seed);
 		let gen = WorkloadGenerator::new(seed, 15).with_max_concurrent_txns(6);
-		runner.run(gen, 2000);
+		runner.run(gen, steps(2000));
 	}
 
 	#[test]
@@ -152,10 +181,10 @@ mod tests {
 				0xA000_000A,
 			];
 
-			for &seed in &base_seeds {
+			for &seed in sample(&base_seeds) {
 				let mut runner = SimRunner::new_in_memory(seed);
 				let gen = WorkloadGenerator::new(seed, 30).with_max_concurrent_txns(12);
-				runner.run(gen, 10_000);
+				runner.run(gen, steps(10_000));
 			}
 		}
 	}
@@ -170,7 +199,7 @@ mod tests {
 			crate::FsyncMode::Never,
 		);
 		let gen = WorkloadGenerator::new(seed, 20).with_persistence_faults(true);
-		runner.run(gen, 1000);
+		runner.run(gen, steps(1000));
 	}
 
 	#[cfg(not(target_arch = "wasm32"))]
@@ -183,13 +212,17 @@ mod tests {
 			crate::FsyncMode::Never,
 		);
 		let gen = WorkloadGenerator::new(seed, 15).with_persistence_faults(true);
-		runner.run(gen, 1500);
+		runner.run(gen, steps(1500));
 	}
 
 	#[test]
 	fn multithreaded_parallel_simulation_runners() {
-		const THREADS: usize = 8;
-		const STEPS_PER_THREAD: usize = 5_000;
+		const THREADS: usize = if cfg!(miri) {
+			2
+		} else {
+			8
+		};
+		const STEPS_PER_THREAD: usize = steps(5_000);
 
 		let mut handles = Vec::new();
 

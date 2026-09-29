@@ -33,31 +33,25 @@ It is designed as an independent, standalone embedded storage engine and caching
 
 Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Processor @ 5.48 GHz, 128 GB DDR5 RAM**, 5,000,000 keys across 48 concurrent worker threads with 128 clients via [`crud-bench`](https://github.com/surrealdb/crud-bench)):
 
-| Engine | Point&nbsp;Read&nbsp;(OPS) | Create&nbsp;(OPS) | Update&nbsp;(OPS) | Delete&nbsp;(OPS) | Scan&nbsp;(OPS) |
+| Engine | Point&nbsp;Read&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Create&nbsp;(OPS) | Update&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Delete&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Scan&nbsp;(OPS) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**18,794,285** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**3,953,111** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**4,825,481** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,416,383** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**320,616** |
-| LMDB | 896,110 | 695 | 704 | 705 | 252,972 |
-| RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 |
-| Fjall | 767,353 | 1,327 | 1,315 | 1,172 | 143,141 |
-| SlateDB | 273,033 | 8,433 | 8,393 | 8,339 | 1,080 |
-| Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**19,002,983** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**4,265,023** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,113,599** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5,744,968** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**329,574** |
+| LMDB<br><sup>(In-Memory)</sup> | 1,188,844 | 234,230 | 218,400 | 172,182 | 132,397 |
+| RocksDB<br><sup>(In-Memory)</sup> | 788,066 | 664,999 | 581,861 | 740,588 | 134,237 |
 
-- **Point Reads**: Over **18,700,000 OPS** sustained (266ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **20× faster** than LMDB and **27× faster** than RocksDB.
-- **Writes & Creates**: Over **3,950,000 OPS** (1.26s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **124× faster** than RocksDB.
-- **Updates**: Over **4,820,000 OPS** (1.03s for 5,000,000 updates): **145× faster** than RocksDB.
-- **Deletes**: Over **5,410,000 OPS** (923ms for 5,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **156× faster** than RocksDB.
-- **Range Scans**: Over **320,000 OPS** using zero-allocation cursor traversal (`scan_with` / `keys_for_each`).
+- **Point Reads**: Over **19,000,000 OPS** sustained (263ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **15× faster** than LMDB and **24× faster** than RocksDB.
+- **Writes & Creates**: Over **4,260,000 OPS** (1.17s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **6.4× faster** than RocksDB and **18× faster** than LMDB.
+- **Updates**: Over **5,110,000 OPS** (977ms for 5,000,000 updates): **8.7× faster** than RocksDB and **23× faster** than LMDB.
+- **Deletes**: Over **5,740,000 OPS** (870ms for 5,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **7.7× faster** than RocksDB and **33× faster** than LMDB.
+- **Range Scans**: Over **329,000 OPS** using zero-allocation cursor traversal (`scan_with` / `keys_for_each`): over **2.4× faster** than RocksDB and LMDB.
 
 ### Memory Profile
 
 | Engine | Resting&nbsp;Memory | Peak&nbsp;Memory |
 | :--- | ---: | ---: |
-| **SurrealMX** | 5.5 GiB | 10.3 GiB |
-| LMDB | ~421 MB | 580 MB |
-| RocksDB | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**~356 MB** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**442 MB** |
-| Fjall | ~405 MB | 669 MB |
-| SlateDB | ~449 MB | 1.71 GB |
-| Libmdbx | ~373 MB | 643 MB |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5.5 GiB** | 10.9 GiB |
+| LMDB<br><sup>(In-Memory)</sup> | 7.0 GiB | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**8.4 GiB** |
+| RocksDB<br><sup>(In-Memory)</sup> | 8.7 GiB | 32.2 GiB |
 
 - **In-Memory Dataset**: True in-memory database holding all 5,000,000 documents resident at **5.5 GiB** resting memory (~1KB per full multi-version document).
 - **Concurrent Scaling**: Peak memory expands dynamically under high-throughput 48-worker commits before settling back to resting baseline.
@@ -106,7 +100,7 @@ fn main() {
 
 ## Direct Database Operations
 
-For single-key reads, writes, and scans, `Database` exposes direct methods that execute with full ACID snapshot isolation while bypassing transaction pool checkout and reader slot registration:
+For single-key reads, writes, and scans, `Database` exposes direct methods. Point reads (`get`, `exists`, `with_value`) bypass transaction pool checkout and reader slot registration entirely, and are linearizable: each returns the latest committed value. Writes commit as single-key auto-committed transactions with full snapshot isolation, retrying write-write conflicts internally since they read nothing. Scans read a consistent snapshot pinned by a pooled read transaction:
 
 ```rust
 use surrealmx::Database;

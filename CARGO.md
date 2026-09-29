@@ -32,16 +32,14 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 
 | Engine | Point Read (OPS) | Create (OPS) | Update (OPS) | Delete (OPS) | Scan (OPS) | Peak Memory |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SurrealMX** | **11,338,303** | **2,396,041** | **2,223,502** | **6,172,414** | **284,419** | **5.2 GiB** |
-| LMDB | 896,110 | 695 | 704 | 705 | 252,972 | 580 MB |
-| RocksDB | 692,597 | 31,777 | 33,228 | 34,563 | 284,228 | 442 MB |
-| Fjall | 767,353 | 1,327 | 1,315 | 1,172 | 143,141 | 669 MB |
-| Libmdbx | 264,133 | 697 | 701 | 681 | 168,041 | 643 MB |
+| **SurrealMX** | **19,002,983** | **4,265,023** | **5,113,599** | **5,744,968** | **329,574** | **10.9 GiB** |
+| LMDB<br><sup>(In-Memory)</sup> | 1,188,844 | 234,230 | 218,400 | 172,182 | 132,397 | 8.4 GiB |
+| RocksDB<br><sup>(In-Memory)</sup> | 788,066 | 664,999 | 581,861 | 740,588 | 134,237 | 32.2 GiB |
 
-- **Point Reads**: Over **11,300,000 OPS** sustained (440ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`) — over **12× faster** than LMDB and **16× faster** than RocksDB.
-- **Writes & Creates**: Over **2,390,000 OPS** (peaking at **2,830,000 OPS**) via the lock-free circular commit ring buffer and direct auto-commit datastore bypass — **75× faster** than RocksDB.
-- **Deletes**: Over **6,170,000 OPS** (810ms for 5,000,000 deletions) via optimized inline tombstone collapse — **178× faster** than RocksDB.
-- **Range Scans**: **284,419 OPS** using zero-allocation closure traversal (`scan_with` / `keys_for_each`).
+- **Point Reads**: Over **19,000,000 OPS** sustained (263ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`) — over **15× faster** than LMDB and **24× faster** than RocksDB.
+- **Writes & Creates**: Over **4,260,000 OPS** via the lock-free circular commit ring buffer and direct auto-commit datastore bypass — **6.4× faster** than RocksDB and **18× faster** than LMDB.
+- **Deletes**: Over **5,740,000 OPS** (870ms for 5,000,000 deletions) via optimized inline tombstone collapse — **7.7× faster** than RocksDB and **33× faster** than LMDB.
+- **Range Scans**: **329,574 OPS** using zero-allocation closure traversal (`scan_with` / `keys_for_each`).
 
 <details>
 <summary><b>SurrealMX 1.0.0 vs 0.27.0</b></summary>
@@ -106,7 +104,7 @@ fn main() {
 
 ## Direct Database Operations
 
-For single-key reads, writes, and scans, `Database` exposes direct methods that execute with full ACID snapshot isolation while bypassing transaction pool checkout and reader slot registration:
+For single-key reads, writes, and scans, `Database` exposes direct methods. Point reads (`get`, `exists`, `with_value`) bypass transaction pool checkout and reader slot registration entirely, and are linearizable: each returns the latest committed value. Writes commit as single-key auto-committed transactions with full snapshot isolation, retrying write-write conflicts internally since they read nothing. Scans read a consistent snapshot pinned by a pooled read transaction:
 
 ```rust
 use surrealmx::Database;

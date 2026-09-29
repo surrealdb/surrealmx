@@ -15,12 +15,13 @@
 //! This module stores the transaction commit and merge queues.
 
 use crate::bloom::{AtomicBloomFilter, BloomFilter};
+use crate::ring::RingEntry;
 #[cfg(debug_assertions)]
 use crate::LOG_TARGET_CONFLICTS;
 use byteslice::ByteSlice;
 use papaya::HashSet;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(debug_assertions)]
 use tracing::debug;
@@ -93,6 +94,15 @@ pub struct Commit {
 	pub(crate) merge_version: AtomicU64,
 }
 
+impl RingEntry for Commit {
+	/// A commit is complete once it has published its merge version or
+	/// aborted: the merge version only ever moves away from zero.
+	#[inline]
+	fn is_complete(&self) -> bool {
+		self.merge_version.load(Ordering::SeqCst) != 0
+	}
+}
+
 /// A transaction entry in the transaction merge queue
 pub struct Merge {
 	/// The local set of updates and deletes
@@ -153,16 +163,6 @@ impl Commit {
 			keys,
 			writeset_bloom,
 			merge_version: AtomicU64::new(0),
-		}
-	}
-
-	/// Create a new commit queue entry for a single-key direct write.
-	#[inline]
-	pub(crate) fn new_single(key: ByteSlice, merge_version: u64) -> Self {
-		Self {
-			keys: Arc::from([key]),
-			writeset_bloom: None,
-			merge_version: AtomicU64::new(merge_version),
 		}
 	}
 
