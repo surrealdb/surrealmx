@@ -2692,8 +2692,10 @@ impl TransactionInner {
 		// the equivalent comment in `atomic_commit`: a dense claim is
 		// always unique, so no collision retry is needed.
 		let version = oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
-		// Insert the merge entry at the claimed version
+		// Insert the merge entry at the claimed version, and record the
+		// insert so the clock can advance past it
 		let entry = queue.insert(version, Arc::clone(&updates));
+		oracle.mark_inserted(version);
 		// Publish strictly in claim order — see the equivalent comment
 		// in `atomic_commit` for why this must cover our own version
 		// before we return, and why we reload rather than retry a fixed

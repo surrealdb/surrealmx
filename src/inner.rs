@@ -268,19 +268,14 @@ impl Inner {
 	}
 
 	/// Opportunistically advance the published merge clock as far as
-	/// currently possible. See [`Inner::try_advance_commit_prefix`] for
-	/// the non-blocking shape; the same safety argument applies with
-	/// `oracle.alloc` in place of `transaction_queue_id` and
-	/// `transaction_merge_queue` in place of the commit queue — a merge
-	/// entry is likewise never physically removed (by ordinary
-	/// retirement, which is bounded by this very clock, or by the
-	/// persistence-failure path, which marks rather than removes) before
-	/// the clock has confirmably passed it.
+	/// currently possible, through consecutive claimed versions whose
+	/// merge-queue entries have been inserted (see
+	/// [`Oracle::is_inserted`](crate::oracle::Oracle::is_inserted)).
 	pub(crate) fn try_advance_merge_clock(&self) {
 		let max_claimed = self.oracle.alloc.load(Ordering::SeqCst);
 		let cur = self.oracle.timestamp.load(Ordering::SeqCst);
 		let mut target = cur;
-		while target < max_claimed && self.transaction_merge_queue.get(&(target + 1)).is_some() {
+		while target < max_claimed && self.oracle.is_inserted(target + 1) {
 			target += 1;
 		}
 		if target > cur {
