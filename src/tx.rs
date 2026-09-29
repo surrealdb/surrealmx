@@ -3907,8 +3907,11 @@ mod tests {
 
 		// Test that transaction queue IDs are unique under high concurrency
 		let db = Arc::new(Database::default());
-		let num_threads = 100;
-		let commits_per_thread = 50;
+		let (num_threads, commits_per_thread) = if cfg!(miri) {
+			(8, 10)
+		} else {
+			(100, 50)
+		};
 		let barrier = Arc::new(Barrier::new(num_threads));
 
 		// Collect all generated IDs
@@ -3976,7 +3979,11 @@ mod tests {
 
 		// Test that the atomic_commit function maintains ordering guarantees
 		let db = Arc::new(Database::default());
-		let num_threads = 50;
+		let num_threads = if cfg!(miri) {
+			8
+		} else {
+			50
+		};
 		let barrier = Arc::new(Barrier::new(num_threads));
 
 		let mut handles = vec![];
@@ -4587,11 +4594,16 @@ mod tests {
 
 		// Create a database
 		let db = Database::new();
+		let keys = if cfg!(miri) {
+			100
+		} else {
+			1000
+		};
 
 		// Insert initial data
 		{
 			let mut tx = db.transaction(true);
-			for i in 0..1000 {
+			for i in 0..keys {
 				let key = format!("key_{i:08}").into_bytes();
 				let value = format!("value_{i:08}").into_bytes();
 				tx.put(key, value).unwrap();
@@ -4608,7 +4620,7 @@ mod tests {
 			let db = Arc::clone(&db);
 			let handle = thread::spawn(move || {
 				// Each thread reads all keys
-				for i in 0..1000 {
+				for i in 0..keys {
 					let key = format!("key_{i:08}").into_bytes();
 					let mut tx = db.transaction(false);
 					let result = tx.get(key.clone());
@@ -4622,7 +4634,7 @@ mod tests {
 
 					// Interleave with some writes to trigger GC
 					// Each thread writes to its own keys to avoid conflicts
-					if i % 100 == 0 {
+					if i % (keys / 10) == 0 {
 						let mut write_tx = db.transaction(true);
 						let update_key = format!("thread_{thread_id}_key_{i:08}").into_bytes();
 						let update_value = format!("updated_by_thread_{thread_id}").into_bytes();
@@ -5321,7 +5333,11 @@ mod tests {
 	#[test]
 	fn test_version_chain_monotonic_under_concurrent_writers() {
 		const THREADS: usize = 8;
-		const PER_THREAD: usize = 200;
+		const PER_THREAD: usize = if cfg!(miri) {
+			25
+		} else {
+			200
+		};
 		let db: Arc<Database> = Arc::new(Database::new_with_options(
 			crate::DatabaseOptions::default().with_all_workers_disabled(),
 		));
