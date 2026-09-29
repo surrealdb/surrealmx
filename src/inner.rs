@@ -38,6 +38,11 @@ use std::thread::JoinHandle;
 /// can never reach this value.
 pub(crate) const SLOT_PINNING: u64 = u64::MAX;
 
+/// Sentinel held in both fields of a registered slot whose transaction has
+/// no snapshot pinned, so watermark scans skip it. Guarded like
+/// [`SLOT_PINNING`].
+pub(crate) const SLOT_UNPINNED: u64 = u64::MAX - 1;
+
 /// Sentinel stored in a commit-queue entry's `merge_version` when the
 /// owning transaction unwound without completing its commit. An aborted
 /// entry counts as complete for the commit-watermark advance (its writes
@@ -46,9 +51,10 @@ pub(crate) const SLOT_PINNING: u64 = u64::MAX;
 /// value.
 pub(crate) const COMMIT_ABORTED: u64 = u64::MAX;
 
-/// A pinned transaction registration.
+/// A transaction's registration in [`Inner::readers`].
 ///
-/// A slot is inserted into [`Inner::readers`] with both fields holding
+/// A transaction registers one slot for as long as it exists. Both fields
+/// hold [`SLOT_UNPINNED`] while it has no snapshot. Pinning sets both to
 /// [`SLOT_PINNING`] BEFORE the owning transaction loads its snapshot
 /// (pin-then-read), so every watermark scan either observes the final
 /// snapshot values or the sentinel — and a sentinel forces the sweeper
@@ -66,11 +72,11 @@ pub(crate) struct Slot {
 }
 
 impl Slot {
-	/// Create a new slot in the pinning state
-	pub(crate) const fn pinning() -> Self {
+	/// Create a new slot in the unpinned state
+	pub(crate) const fn unpinned() -> Self {
 		Self {
-			version: AtomicU64::new(SLOT_PINNING),
-			commit: AtomicU64::new(SLOT_PINNING),
+			version: AtomicU64::new(SLOT_UNPINNED),
+			commit: AtomicU64::new(SLOT_UNPINNED),
 		}
 	}
 }
@@ -81,13 +87,9 @@ pub struct Inner {
 	pub(crate) oracle: Arc<Oracle>,
 	/// The underlying concurrent ART datastructure
 	pub(crate) datastore: artmap::ArtMap<ByteSlice, RwLock<Versions>>,
-	/// Registered transaction snapshot slots, partitioned across cache-padded
-	/// shards. Contains exactly the live transactions: slots are inserted at
-	/// registration and removed on transaction drop, so watermark scans
-	/// walk a map sized by concurrency, not by the transaction pool.
+	/// Registered transaction snapshot slots, one per transaction, including
+	/// transactions held in the pool. Watermark scans skip unpinned slots.
 	pub(crate) readers: Readers,
-	/// Monotonic slot id allocator for the readers map
-	pub(crate) reader_slot_id: CachePadded<AtomicU64>,
 	/// The fixed-size, lock-free OCC circular commit ring buffer. Its
 	/// completed prefix is the commit watermark: every commit with an id
 	/// at or below it has either published its merge version or aborted.
@@ -150,7 +152,6 @@ impl Inner {
 			oracle: Oracle::new(),
 			datastore: artmap::ArtMap::new(),
 			readers: Readers::new(),
-			reader_slot_id: CachePadded::new(AtomicU64::new(0)),
 			commit_ring: CommitRing::new(DEFAULT_COMMIT_RING_CAPACITY, 1),
 			transaction_merge_queue: SkipMap::new(),
 			merge_retire_id: CachePadded::new(AtomicU64::new(0)),
@@ -223,7 +224,7 @@ impl Inner {
 	/// committer is still about to push an earlier version into, which
 	/// would otherwise resurrect deleted data through the
 	/// `get_or_insert_with` re-seed path.
-	pub(crate) fn inline_gc_watermark(&self, own_slot: u64) -> Option<u64> {
+	pub(crate) fn inline_gc_watermark(&self, own_slot: usize) -> Option<u64> {
 		// Load the clock bound before the fence-and-scan
 		let now = self.oracle.timestamp.load(Ordering::SeqCst);
 		// Bound by every other registered transaction
