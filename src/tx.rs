@@ -28,10 +28,9 @@ use crate::sync::backoff;
 use crate::sync::RwLock;
 use crate::version::Version;
 use crate::versions::Versions;
-use arc_swap::ArcSwap;
 use byteslice::ByteSlice;
-use crossbeam_skiplist::SkipMap;
 use papaya::HashSet;
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::Range;
@@ -536,8 +535,10 @@ pub(crate) struct TransactionInner {
 	/// Lock-free atomic bloom filter over the lockset for fast conflict
 	/// pre-checks.
 	pub(crate) lockset_bloom: Box<AtomicBloomFilter>,
-	/// The local set of key scans
-	pub(crate) scanset: SkipMap<ByteSlice, ArcSwap<ByteSlice>>,
+	/// The local set of key scans, as disjoint ranges keyed by start bound.
+	/// Scans take `&self`, so the set sits behind a lock that only this
+	/// transaction's own calls take.
+	pub(crate) scanset: Mutex<BTreeMap<ByteSlice, ByteSlice>>,
 	/// The local set of updates and deletes
 	pub(crate) writeset: BTreeMap<ByteSlice, Option<ByteSlice>>,
 	/// The parent database for this transaction
@@ -614,7 +615,7 @@ impl TransactionInner {
 			readset_bloom: Box::new(AtomicBloomFilter::new()),
 			lockset: HashSet::new(),
 			lockset_bloom: Box::new(AtomicBloomFilter::new()),
-			scanset: SkipMap::new(),
+			scanset: Mutex::new(BTreeMap::new()),
 			writeset: BTreeMap::new(),
 			database: db,
 			slot,
@@ -639,7 +640,7 @@ impl TransactionInner {
 		// transaction never populates scanset, readset, writeset, or
 		// savepoints, so all clears are skipped when `!self.write`.
 		if self.write {
-			self.scanset.clear();
+			self.scanset.get_mut().clear();
 			self.readset.pin().clear();
 			self.readset_bloom.clear();
 			if self.writeset.len() > threshold {
@@ -686,7 +687,7 @@ impl TransactionInner {
 	/// was locked, so clearing is skipped for sets those gates guarantee
 	/// are empty
 	fn clear_read_state(&self) {
-		self.scanset.clear();
+		self.scanset.lock().clear();
 		if self.mode >= IsolationLevel::SerializableSnapshotIsolation {
 			self.readset.pin().clear();
 			self.readset_bloom.clear();
@@ -1980,23 +1981,23 @@ impl TransactionInner {
 
 	/// Helper to track a scan range in the scanset, keeping ranges disjoint
 	/// and merged so that:
-	/// 1. `scanset.front()` is the minimum start bound.
-	/// 2. `scanset.back()` is the maximum end bound.
+	/// 1. The first entry holds the minimum start bound.
+	/// 2. The last entry holds the maximum end bound.
 	/// 3. `range(..=k).next_back()` finds the unique enclosing range.
 	fn track_scan_range(&self, beg: &ByteSlice, end: &ByteSlice) {
+		let mut scanset = self.scanset.lock();
 		let mut effective_beg = beg.clone();
 		let mut effective_end = end.clone();
 
 		// Check if a predecessor range covers or overlaps `beg`
-		if let Some(entry) = self.scanset.range::<ByteSlice, _>(..=beg).next_back() {
-			let prev_end = entry.value().load();
-			if **prev_end >= *beg {
+		if let Some((prev_beg, prev_end)) = scanset.range::<ByteSlice, _>(..=beg).next_back() {
+			if *prev_end >= *beg {
 				// Overlaps with predecessor
-				if **prev_end >= *end {
+				if *prev_end >= *end {
 					// Already fully covered by predecessor
 					return;
 				}
-				effective_beg = entry.key().clone();
+				effective_beg = prev_beg.clone();
 				effective_end = end.clone();
 			}
 		}
@@ -2004,18 +2005,20 @@ impl TransactionInner {
 		// Clean up and merge any subsequent ranges that overlap [effective_beg,
 		// effective_end] Any range starting <= effective_end overlaps
 		// with us
-		let overlapping: Vec<_> =
-			self.scanset.range::<ByteSlice, _>(&effective_beg..=&effective_end).collect();
+		let overlapping: Vec<_> = scanset
+			.range::<ByteSlice, _>(&effective_beg..=&effective_end)
+			.map(|(k, _)| k.clone())
+			.collect();
 
-		for entry in overlapping {
-			let entry_end = entry.value().load();
-			if **entry_end > effective_end {
-				effective_end = (**entry_end).clone();
+		for k in overlapping {
+			if let Some(entry_end) = scanset.remove(&k) {
+				if entry_end > effective_end {
+					effective_end = entry_end;
+				}
 			}
-			entry.remove();
 		}
 
-		self.scanset.insert(effective_beg, ArcSwap::from_pointee(effective_end));
+		scanset.insert(effective_beg, effective_end);
 	}
 
 	/// Snapshot the merge-queue writesets visible at `version` within `[beg,
@@ -2610,20 +2613,18 @@ impl TransactionInner {
 				return Err(Error::KeyReadConflict);
 			}
 			// Check if the committed writeset may overlap any scan range
-			let scan_overlap = match (self.scanset.front(), self.scanset.back()) {
-				(Some(scan_front), Some(scan_back)) => {
-					let scan_max_end = Arc::clone(&scan_back.value().load());
-					tx.may_overlap_range(scan_front.key(), &scan_max_end)
-				}
+			let scanset = self.scanset.lock();
+			let scan_overlap = match (scanset.first_key_value(), scanset.last_key_value()) {
+				(Some((front, _)), Some((_, back_end))) => tx.may_overlap_range(front, back_end),
 				_ => false,
 			};
 			// Only iterate writeset keys if ranges may overlap
 			if scan_overlap {
 				for k in tx.keys.iter() {
 					// Check if this key may be within a scan range
-					if let Some(entry) = self.scanset.range::<ByteSlice, _>(..=k).next_back() {
+					if let Some((_, end)) = scanset.range::<ByteSlice, _>(..=k).next_back() {
 						// Check if the range includes this key
-						if **entry.value().load() > *k {
+						if *end > *k {
 							return Err(Error::KeyReadConflict);
 						}
 					}
@@ -4239,7 +4240,7 @@ mod tests {
 			"Readset should be cleared after cancel"
 		);
 		assert!(
-			tx4.inner.as_ref().unwrap().scanset.is_empty(),
+			tx4.inner.as_ref().unwrap().scanset.lock().is_empty(),
 			"Scanset should be cleared after cancel"
 		);
 
@@ -4464,6 +4465,26 @@ mod tests {
 	}
 
 	#[test]
+	fn scan_ranges_are_tracked_disjoint_and_merged() {
+		let db = Database::new();
+		let tx = db.transaction(true);
+		let inner = tx.inner.as_ref().unwrap();
+		let bs = |s: &str| byteslice::ByteSlice::from(s);
+		let track = |b: &str, e: &str| inner.track_scan_range(&bs(b), &bs(e));
+		let ranges =
+			|| inner.scanset.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>();
+		track("c", "e");
+		track("m", "p");
+		// Already covered by a tracked range
+		track("c", "d");
+		assert_eq!(ranges(), vec![(bs("c"), bs("e")), (bs("m"), bs("p"))]);
+		// Overlaps the end of one range and the start of the next: all merge
+		track("d", "n");
+		track("x", "z");
+		assert_eq!(ranges(), vec![(bs("c"), bs("p")), (bs("x"), bs("z"))]);
+	}
+
+	#[test]
 	fn test_savepoint_rollback_preserves_earlier_scans() {
 		// Verify that rolling back a savepoint doesn't lose scans from before
 		// the savepoint
@@ -4482,8 +4503,8 @@ mod tests {
 		let _ = tx.scan("key0".."key5", None, None).unwrap();
 
 		// Verify scanset is populated
-		assert!(!tx.inner.as_ref().unwrap().scanset.is_empty());
-		let scanset_before_len = tx.inner.as_ref().unwrap().scanset.len();
+		assert!(!tx.inner.as_ref().unwrap().scanset.lock().is_empty());
+		let scanset_before_len = tx.inner.as_ref().unwrap().scanset.lock().len();
 
 		// Set savepoint
 		tx.set_savepoint().unwrap();
@@ -4492,7 +4513,7 @@ mod tests {
 		let _ = tx.scan("key5".."key9", None, None).unwrap();
 
 		// Scanset should now have both ranges
-		assert!(tx.inner.as_ref().unwrap().scanset.len() >= scanset_before_len);
+		assert!(tx.inner.as_ref().unwrap().scanset.lock().len() >= scanset_before_len);
 
 		// Rollback to savepoint
 		tx.rollback_to_savepoint().unwrap();
@@ -4502,7 +4523,7 @@ mod tests {
 		// is retained too, keeping conflict detection conservative for
 		// any write that survives
 		assert!(
-			tx.inner.as_ref().unwrap().scanset.len() >= scanset_before_len,
+			tx.inner.as_ref().unwrap().scanset.lock().len() >= scanset_before_len,
 			"Scans from before the savepoint should never be lost by a rollback"
 		);
 
