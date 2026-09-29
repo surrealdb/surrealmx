@@ -299,22 +299,24 @@ fn snapshot_reader_sees_consistent_value_for_pinned_key() {
 	let read_tx = db.transaction(false).with_snapshot_isolation();
 
 	let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+	let committed = Arc::new(AtomicU64::new(0));
 	let writer_db = Arc::clone(&db);
 	let writer_stop = Arc::clone(&stop);
+	let writer_committed = Arc::clone(&committed);
 	let writer = thread::spawn(move || {
-		let mut rev = 0u32;
+		let mut rev = 0u64;
 		while !writer_stop.load(Ordering::Relaxed) {
 			rev += 1;
 			let mut tx = writer_db.transaction(true);
 			tx.set(b"pinned".to_vec(), format!("rev{rev}").into_bytes()).unwrap();
 			tx.commit().unwrap();
+			writer_committed.store(rev, Ordering::Release);
 		}
+		rev
 	});
 
-	// Poll the pinned key from the snapshot through 50 iterations spread
-	// across a small window. The value the snapshot returns must never
-	// change.
-	for _ in 0..50 {
+	// The value the snapshot returns must never change
+	let assert_snapshot = || {
 		let v = read_tx.get(b"pinned".as_slice()).unwrap().unwrap();
 		assert_eq!(
 			v.as_ref(),
@@ -322,17 +324,35 @@ fn snapshot_reader_sees_consistent_value_for_pinned_key() {
 			"snapshot saw a write-after value (got {:?})",
 			std::str::from_utf8(v.as_ref()).unwrap_or("<bytes>")
 		);
+	};
+
+	// Poll the pinned key from the snapshot through 50 iterations spread
+	// across a small window
+	for _ in 0..50 {
+		assert_snapshot();
 		thread::sleep(Duration::from_micros(50));
 	}
+	// The writer thread may not have been scheduled yet, so keep polling
+	// until at least one concurrent write has committed
+	while committed.load(Ordering::Acquire) == 0 {
+		assert_snapshot();
+		thread::sleep(Duration::from_micros(50));
+	}
+	assert_snapshot();
 
 	stop.store(true, Ordering::Relaxed);
-	writer.join().unwrap();
+	let commits = writer.join().unwrap();
 	drop(read_tx);
 
 	// And a fresh transaction observes the latest write
 	let new_tx = db.transaction(false);
 	let v = new_tx.get(b"pinned".as_slice()).unwrap().unwrap();
-	assert!(v.as_ref().starts_with(b"rev"), "expected revN, got {:?}", v.as_ref());
+	assert_eq!(
+		v.as_ref(),
+		format!("rev{commits}").as_bytes(),
+		"after {commits} writer commits, got {:?}",
+		std::str::from_utf8(v.as_ref()).unwrap_or("<bytes>")
+	);
 }
 
 /// Many readers point-looking up while a writer inserts new keys: every

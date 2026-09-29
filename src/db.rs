@@ -1898,7 +1898,12 @@ mod tests {
 			let published = db.oracle.timestamp.load(Ordering::SeqCst);
 			assert_eq!(published, ((round + 1) * threads) as u64);
 			assert_eq!(db.merge_retire_id.load(Ordering::SeqCst), published, "round {round}");
-			assert!(db.transaction_merge_queue.is_empty(), "round {round}");
+			// Earlier rounds were checked already, so only this round's
+			// merges could remain in the ring
+			let first = (round * threads) as u64 + 1;
+			for version in first..=published {
+				assert!(!db.transaction_merge_queue.contains(version), "round {round}");
+			}
 		}
 		for handle in handles {
 			handle.join().unwrap();
