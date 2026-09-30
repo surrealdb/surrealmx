@@ -35,21 +35,21 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 
 | Engine | Point&nbsp;Read&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Create&nbsp;(OPS) | Update&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Delete&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Scan&nbsp;(OPS) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**20,428,835** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**2,033,379** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**1,568,015** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**2,034,556** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**3,147,150** |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**23,464,596** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**2,077,580** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**1,642,464** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**2,010,186** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**3,825,112** |
 | LMDB<br><sup>(In-Memory)</sup> | 1,196,173 | 224,909 | 243,045 | 176,188 | 1,186,447 |
 | RocksDB<br><sup>(In-Memory)</sup> | 750,476 | 627,071 | 599,129 | 681,996 | 839,268 |
 
-- **Point Reads**: Over **20,400,000 OPS** sustained (734ms for 15,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **17× faster** than LMDB and **27× faster** than RocksDB.
-- **Writes & Creates**: Over **2,030,000 OPS** (7.38s for 15,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **3.2× faster** than RocksDB and **9.0× faster** than LMDB.
-- **Updates**: Over **1,560,000 OPS** (9.57s for 15,000,000 updates): **2.6× faster** than RocksDB and **6.5× faster** than LMDB.
-- **Deletes**: Over **2,030,000 OPS** (7.37s for 15,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **3.0× faster** than RocksDB and **11× faster** than LMDB.
-- **Range Scans**: Over **3,140,000 OPS** (1.59s for 5,000,000 `select(*) limit(100)` scans) using zero-allocation cursor traversal (`scan_with` / `keys_for_each`): **3.7× faster** than RocksDB and **2.7× faster** than LMDB.
+- **Point Reads**: Over **23,400,000 OPS** sustained (639ms for 15,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **19× faster** than LMDB and **31× faster** than RocksDB.
+- **Writes & Creates**: Over **2,070,000 OPS** (7.22s for 15,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **3.3× faster** than RocksDB and **9.2× faster** than LMDB.
+- **Updates**: Over **1,640,000 OPS** (9.13s for 15,000,000 updates): **2.7× faster** than RocksDB and **6.8× faster** than LMDB.
+- **Deletes**: Over **2,010,000 OPS** (7.46s for 15,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **2.9× faster** than RocksDB and **11× faster** than LMDB.
+- **Range Scans**: Over **3,820,000 OPS** (1.31s for 5,000,000 `select(*) limit(100)` scans) using zero-allocation cursor traversal (`scan_with` / `keys_for_each`): **4.6× faster** than RocksDB and **3.2× faster** than LMDB.
 
 ### Memory Profile
 
 | Engine | Resting&nbsp;Memory | Peak&nbsp;Memory |
 | :--- | ---: | ---: |
-| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**15.8 GiB** | 31.5 GiB |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**15.8 GiB** | 31.4 GiB |
 | LMDB<br><sup>(In-Memory)</sup> | 19.9 GiB | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**20.3 GiB** |
 | RocksDB<br><sup>(In-Memory)</sup> | 19.3 GiB | 95.3 GiB |
 
