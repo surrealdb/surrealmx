@@ -16,13 +16,12 @@
 //!
 //! Readers load the current chain through an epoch-protected cell, so a read
 //! writes no shared memory, however many threads read the same key. Writers
-//! serialise on a per-key mutex, build the next chain from a copy of the
+//! serialise on a per-key lock, build the next chain from a copy of the
 //! current one, and swap it in. A replaced chain is freed only once every
 //! reader that could still hold it has finished.
 
-use crate::sync::ArcCell;
+use crate::sync::{ArcCell, RwLock, RwLockWriteGuard};
 use crate::versions::Versions;
-use parking_lot::{Mutex, MutexGuard};
 use std::sync::Arc;
 
 /// The chain every empty cell reads as.
@@ -30,8 +29,8 @@ static EMPTY: Versions = Versions::Empty;
 
 /// A key's version chain in the datastore.
 pub(crate) struct VersionCell {
-	/// Serialises the writers of this chain
-	writer: Mutex<()>,
+	/// Serialises the writers of this chain; readers never take it
+	writer: RwLock<()>,
 	/// The current chain, or `None` when it is empty
 	chain: ArcCell<Versions>,
 }
@@ -40,7 +39,7 @@ impl VersionCell {
 	/// Create a cell holding `versions`.
 	pub(crate) fn new(versions: Versions) -> Self {
 		let cell = Self {
-			writer: Mutex::new(()),
+			writer: RwLock::new(()),
 			chain: ArcCell::empty(),
 		};
 		cell.store(versions);
@@ -60,7 +59,7 @@ impl VersionCell {
 	#[inline]
 	pub(crate) fn lock(&self) -> ChainWriter<'_> {
 		ChainWriter {
-			_guard: self.writer.lock(),
+			_guard: self.writer.write(),
 			cell: self,
 		}
 	}
@@ -77,7 +76,7 @@ impl VersionCell {
 /// Exclusive write access to a key's chain.
 pub(crate) struct ChainWriter<'a> {
 	/// Held until the writer is dropped
-	_guard: MutexGuard<'a, ()>,
+	_guard: RwLockWriteGuard<'a, ()>,
 	/// The cell being written
 	cell: &'a VersionCell,
 }
