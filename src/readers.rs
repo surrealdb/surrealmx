@@ -107,6 +107,13 @@ impl Readers {
 		slot.commit.store(SLOT_UNPINNED, Ordering::SeqCst);
 	}
 
+	/// Returns the number of registered slots that have not been released.
+	#[cfg(test)]
+	pub(crate) fn registered(&self) -> usize {
+		let free = self.free.lock().unwrap_or_else(PoisonError::into_inner).len();
+		self.len.load(Ordering::SeqCst) - free
+	}
+
 	/// Returns the number of pinned slots.
 	#[cfg(test)]
 	pub(crate) fn pinned(&self) -> usize {

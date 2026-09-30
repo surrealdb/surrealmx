@@ -24,6 +24,7 @@ use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
 use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
+use crate::thread_slot::ThreadSnapshot;
 use crate::tx::Transaction;
 use byteslice::ByteSlice;
 use std::ops::{Bound, Deref, Range};
@@ -253,9 +254,11 @@ impl Database {
 
 	/// Scan key-value pairs in a range directly from the database at a
 	/// consistent snapshot, calling a closure with borrowed key and value
-	/// bytes and stopping early if the closure returns `false`. A pooled
-	/// read transaction pins the snapshot, and the datastore is read in
-	/// place whenever no merge is still being applied.
+	/// bytes and stopping early if the closure returns `false`. The calling
+	/// thread's own reader slot pins the snapshot, and the datastore is read
+	/// in place whenever no merge is still being applied. Otherwise, or when
+	/// called from within another direct scan on the same thread, a pooled
+	/// read transaction serves the scan.
 	pub fn scan_with<K, F>(
 		&self,
 		rng: Range<K>,
@@ -267,15 +270,17 @@ impl Database {
 		K: IntoBytes,
 		F: FnMut(&ByteSlice, &[u8]) -> bool,
 	{
-		// Pin a snapshot for the whole scan: without it, inline GC in
-		// concurrent commits can reclaim the versions being scanned
-		let tx = self.transaction(false);
-		let version = tx.version();
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
-		if version > self.inner.merge_retire_id.load(Ordering::Acquire) {
-			return tx.scan_with(beg..end, skip, limit, f);
-		}
+		// Pin a snapshot for the whole scan: without it, inline GC in
+		// concurrent commits can reclaim the versions being scanned. The
+		// datastore is read in place only once every merge is applied
+		let snapshot = ThreadSnapshot::pin(&self.inner)
+			.filter(|s| s.version() <= self.inner.merge_retire_id.load(Ordering::Acquire));
+		let Some(snapshot) = snapshot else {
+			return self.transaction(false).scan_with(beg..end, skip, limit, f);
+		};
+		let version = snapshot.version();
 		let mut count = 0;
 		let mut skip = skip.unwrap_or_default();
 		let datastore_range =
@@ -329,15 +334,17 @@ impl Database {
 		K: IntoBytes,
 		F: FnMut(&ByteSlice) -> bool,
 	{
-		// Pin a snapshot for the whole scan: without it, inline GC in
-		// concurrent commits can reclaim the versions being scanned
-		let tx = self.transaction(false);
-		let version = tx.version();
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
-		if version > self.inner.merge_retire_id.load(Ordering::Acquire) {
-			return tx.keys_for_each(beg..end, skip, limit, f);
-		}
+		// Pin a snapshot for the whole scan: without it, inline GC in
+		// concurrent commits can reclaim the versions being scanned. The
+		// datastore is read in place only once every merge is applied
+		let snapshot = ThreadSnapshot::pin(&self.inner)
+			.filter(|s| s.version() <= self.inner.merge_retire_id.load(Ordering::Acquire));
+		let Some(snapshot) = snapshot else {
+			return self.transaction(false).keys_for_each(beg..end, skip, limit, f);
+		};
+		let version = snapshot.version();
 		let mut count = 0;
 		let mut skip = skip.unwrap_or_default();
 		let datastore_range =
@@ -378,15 +385,17 @@ impl Database {
 	where
 		K: IntoBytes,
 	{
-		// Pin a snapshot for the whole scan: without it, inline GC in
-		// concurrent commits can reclaim the versions being scanned
-		let tx = self.transaction(false);
-		let version = tx.version();
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
-		if version > self.inner.merge_retire_id.load(Ordering::Acquire) {
-			return tx.total(beg..end, skip, limit);
-		}
+		// Pin a snapshot for the whole scan: without it, inline GC in
+		// concurrent commits can reclaim the versions being scanned. The
+		// datastore is read in place only once every merge is applied
+		let snapshot = ThreadSnapshot::pin(&self.inner)
+			.filter(|s| s.version() <= self.inner.merge_retire_id.load(Ordering::Acquire));
+		let Some(snapshot) = snapshot else {
+			return self.transaction(false).total(beg..end, skip, limit);
+		};
+		let version = snapshot.version();
 		let mut count = 0;
 		let mut skip = skip.unwrap_or_default();
 		let datastore_range =
@@ -1802,6 +1811,69 @@ mod tests {
 		assert_eq!(tx.inner.as_ref().unwrap().slot, first);
 		drop(tx);
 		assert_eq!(db.readers.pinned(), 0);
+	}
+
+	#[test]
+	fn direct_scans_pin_the_threads_own_slot() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		db.set("a", "1").unwrap();
+		db.set("b", "2").unwrap();
+		let before = db.inner.readers.registered();
+		// The scan's snapshot is pinned only while the scan runs
+		let mut pinned = 0;
+		let count = db
+			.scan_with("a".."z", None, None, |_, _| {
+				pinned = db.inner.readers.pinned();
+				true
+			})
+			.unwrap();
+		assert_eq!(count, 2);
+		assert_eq!(pinned, 1);
+		assert_eq!(db.inner.readers.pinned(), 0);
+		// The thread keeps its slot for later direct scans
+		let registered = db.inner.readers.registered();
+		assert_eq!(registered, before + 1);
+		assert_eq!(db.keys_for_each("a".."z", None, None, |_| true).unwrap(), 2);
+		assert_eq!(db.total("a".."z", None, None).unwrap(), 2);
+		assert_eq!(db.inner.readers.registered(), registered);
+	}
+
+	#[test]
+	fn nested_direct_scans_fall_back_to_a_transaction() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		db.set("a", "1").unwrap();
+		db.set("b", "2").unwrap();
+		let mut nested = Vec::new();
+		let count = db
+			.scan_with("a".."z", None, None, |_, _| {
+				nested.push(db.total("a".."z", None, None).unwrap());
+				true
+			})
+			.unwrap();
+		assert_eq!(count, 2);
+		assert_eq!(nested, vec![2, 2]);
+		assert_eq!(db.inner.readers.pinned(), 0);
+	}
+
+	#[test]
+	fn thread_slots_are_released_when_the_thread_exits() {
+		use std::sync::Arc;
+		let db = Arc::new(Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		));
+		db.set("a", "1").unwrap();
+		let before = db.inner.readers.registered();
+		let scanner = Arc::clone(&db);
+		std::thread::spawn(move || {
+			assert_eq!(scanner.total("a".."z", None, None).unwrap(), 1);
+		})
+		.join()
+		.unwrap();
+		assert_eq!(db.inner.readers.registered(), before);
 	}
 
 	#[test]
