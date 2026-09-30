@@ -554,7 +554,7 @@ pub(crate) struct TransactionInner {
 	pub(crate) undo_journal: Vec<UndoEntry>,
 }
 
-/// Pin a transaction's registered slot and choose its snapshot.
+/// Pin a registered reader slot and choose its snapshot.
 ///
 /// Pin-then-read: the slot enters the pinning state BEFORE the snapshot
 /// values are loaded, so every watermark scan that reads the slot after
@@ -578,7 +578,7 @@ pub(crate) struct TransactionInner {
 /// loads simply falls inside our conflict window, which is at worst a
 /// spurious conflict, never a missed one.
 #[inline]
-fn pin_slot(db: &Inner, slot: usize) -> (u64, u64) {
+pub(crate) fn pin_slot(db: &Inner, slot: usize) -> (u64, u64) {
 	let slot = db.readers.slot(slot);
 	// Publish the pinning sentinels before loading the snapshot
 	slot.version.store(SLOT_PINNING, Ordering::SeqCst);

@@ -46,6 +46,7 @@ mod queue;
 mod readers;
 mod ring;
 mod sync;
+mod thread_slot;
 mod tx;
 mod version;
 mod versions;
