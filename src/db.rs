@@ -183,9 +183,8 @@ impl Database {
 			}
 		}
 		let res = ByteSlice::with_borrowed(lookup, |k| {
-			self.inner.datastore.get(k).and_then(|e| match e.value().try_read() {
-				Some(guard) => guard.fetch_unpinned(version).and_then(|v| v.value.clone()),
-				None => e.value().read().fetch_unpinned(version).and_then(|v| v.value.clone()),
+			self.inner.datastore.get(k).and_then(|e| {
+				e.value().read(|v| v.fetch_unpinned(version).and_then(|v| v.value.clone()))
 			})
 		});
 		Ok(res)
@@ -215,13 +214,9 @@ impl Database {
 			return Ok(None);
 		};
 		let res = ByteSlice::with_borrowed(lookup, |k| {
-			self.inner.datastore.get(k).and_then(|e| match e.value().try_read() {
-				Some(guard) => {
-					guard.fetch_unpinned(version).and_then(|v| v.value.as_deref().map(f))
-				}
-				None => {
-					e.value().read().fetch_unpinned(version).and_then(|v| v.value.as_deref().map(f))
-				}
+			self.inner.datastore.get(k).and_then(|e| {
+				e.value()
+					.read(|v| v.fetch_unpinned(version).and_then(|v| v.value.as_deref().map(f)))
 			})
 		});
 		Ok(res)
@@ -244,9 +239,8 @@ impl Database {
 			}
 		}
 		let exists = ByteSlice::with_borrowed(lookup, |k| {
-			self.inner.datastore.get(k).is_some_and(|e| match e.value().try_read() {
-				Some(guard) => guard.fetch_unpinned(version).is_some_and(|v| v.value.is_some()),
-				None => e.value().read().fetch_unpinned(version).is_some_and(|v| v.value.is_some()),
+			self.inner.datastore.get(k).is_some_and(|e| {
+				e.value().read(|v| v.fetch_unpinned(version).is_some_and(|v| v.value.is_some()))
 			})
 		});
 		Ok(exists)
@@ -286,8 +280,8 @@ impl Database {
 		let datastore_range =
 			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
 		for entry in datastore_range {
-			let matched = match entry.value().try_read() {
-				Some(g) => g.with_version(version, |bytes| {
+			let matched = entry.value().read(|v| {
+				v.with_version(version, |bytes| {
 					if skip > 0 {
 						skip -= 1;
 						true
@@ -295,17 +289,8 @@ impl Database {
 						count += 1;
 						f(entry.key(), bytes)
 					}
-				}),
-				None => entry.value().read().with_version(version, |bytes| {
-					if skip > 0 {
-						skip -= 1;
-						true
-					} else {
-						count += 1;
-						f(entry.key(), bytes)
-					}
-				}),
-			};
+				})
+			});
 			if let Some(continue_iter) = matched {
 				if !continue_iter {
 					break;
@@ -350,10 +335,7 @@ impl Database {
 		let datastore_range =
 			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
 		for entry in datastore_range {
-			let exists = match entry.value().try_read() {
-				Some(g) => g.exists_version(version),
-				None => entry.value().read().exists_version(version),
-			};
+			let exists = entry.value().read(|v| v.exists_version(version));
 			if !exists {
 				continue;
 			}
@@ -401,10 +383,7 @@ impl Database {
 		let datastore_range =
 			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
 		for entry in datastore_range {
-			let exists = match entry.value().try_read() {
-				Some(g) => g.exists_version(version),
-				None => entry.value().read().exists_version(version),
-			};
+			let exists = entry.value().read(|v| v.exists_version(version));
 			if !exists {
 				continue;
 			}
@@ -1761,9 +1740,9 @@ mod tests {
 		// publish exactly versions 1 through 10.
 		assert_eq!(db.oracle.timestamp.load(std::sync::atomic::Ordering::SeqCst), 10);
 		let entry = db.datastore.get(b"key0".as_slice()).expect("key0 missing");
-		assert_eq!(entry.value().read().as_slice()[0].version, 1);
+		assert_eq!(entry.value().read(|v| v.as_slice()[0].version), 1);
 		let entry = db.datastore.get(b"key9".as_slice()).expect("key9 missing");
-		assert_eq!(entry.value().read().as_slice()[0].version, 10);
+		assert_eq!(entry.value().read(|v| v.as_slice()[0].version), 10);
 	}
 
 	#[test]
@@ -1787,7 +1766,7 @@ mod tests {
 		tx.commit().unwrap();
 		// The next minted version continues strictly above the seed
 		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
-		assert_eq!(entry.value().read().as_slice()[0].version, seed + 1);
+		assert_eq!(entry.value().read(|v| v.as_slice()[0].version), seed + 1);
 		// And the write is visible to a fresh reader
 		let mut tx = db.transaction(false);
 		assert_eq!(tx.get("key").unwrap().as_deref(), Some(b"value" as &[u8]));
@@ -1998,7 +1977,7 @@ mod tests {
 			tx.commit().unwrap();
 		}
 		let entry = db.datastore.get(b"hotkey".as_slice()).expect("hotkey missing");
-		let chain = entry.value().read().as_slice().to_vec();
+		let chain = entry.value().read(|v| v.as_slice().to_vec());
 		assert_eq!(chain.len(), 1, "inline GC should trim superseded versions at commit");
 		assert_eq!(chain[0].value.as_deref(), Some(b"v99" as &[u8]));
 	}
@@ -2051,7 +2030,7 @@ mod tests {
 		}
 		{
 			let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
-			let len = entry.value().read().as_slice().len();
+			let len = entry.value().read(|v| v.as_slice().len());
 			assert!(len > 1, "the pinned reader should retain history");
 		}
 		// Drop the reader; no further commits touch the key, so only the
@@ -2059,7 +2038,7 @@ mod tests {
 		drop(reader);
 		db.run_gc();
 		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
-		let chain = entry.value().read().as_slice().to_vec();
+		let chain = entry.value().read(|v| v.as_slice().to_vec());
 		assert_eq!(chain.len(), 1, "the safety-net sweep should reclaim departed-reader garbage");
 		assert_eq!(chain[0].value.as_deref(), Some(b"v50" as &[u8]));
 	}
@@ -2094,7 +2073,7 @@ mod tests {
 		db.run_gc_tracked();
 		{
 			let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
-			assert!(entry.value().read().as_slice().len() > 1);
+			assert!(entry.value().read(|v| v.as_slice().len()) > 1);
 			assert!(
 				db.gc_candidates.pin().contains(b"key".as_slice()),
 				"a still-pinned chain should stay tracked after a sweep"
@@ -2104,11 +2083,9 @@ mod tests {
 		drop(reader);
 		db.run_gc_tracked();
 		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
-		let guard = entry.value().read();
-		let chain = guard.as_slice();
+		let chain = entry.value().read(|v| v.as_slice().to_vec());
 		assert_eq!(chain.len(), 1, "the tracked sweep should reclaim departed-reader garbage");
 		assert_eq!(chain[0].value.as_deref(), Some(b"v50" as &[u8]));
-		drop(guard);
 		assert!(
 			!db.gc_candidates.pin().contains(b"key".as_slice()),
 			"a terminal chain should be untracked after the sweep"
@@ -2170,7 +2147,7 @@ mod tests {
 		db.run_gc();
 		assert_eq!(db.gc_candidates.pin().len(), 0, "the full scan should clear the candidate set");
 		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
-		assert_eq!(entry.value().read().as_slice().len(), 1);
+		assert_eq!(entry.value().read(|v| v.as_slice().len()), 1);
 	}
 
 	#[cfg(not(target_arch = "wasm32"))]
@@ -2202,7 +2179,7 @@ mod tests {
 		let db =
 			Database::new_with_persistence(crate::DatabaseOptions::default(), persistence).unwrap();
 		let entry = db.datastore.get(b"key".as_slice()).expect("key missing after reload");
-		let chain = entry.value().read().as_slice().to_vec();
+		let chain = entry.value().read(|v| v.as_slice().to_vec());
 		assert_eq!(chain.len(), 1, "the load-time sweep should collapse replayed chains");
 		assert_eq!(chain[0].value.as_deref(), Some(b"v4" as &[u8]));
 	}
@@ -2237,7 +2214,7 @@ mod tests {
 		drop(reader);
 		db.run_gc_tracked();
 		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
-		assert_eq!(entry.value().read().as_slice().len(), 1);
+		assert_eq!(entry.value().read(|v| v.as_slice().len()), 1);
 	}
 
 	#[test]

@@ -23,6 +23,7 @@ use crate::err::PersistenceError;
 use crate::inner::Inner;
 use crate::sync::RwLock;
 use crate::version::Version;
+use crate::version_cell::VersionCell;
 use crate::versions::Versions;
 use bincode::config;
 use byteslice::ByteSlice;
@@ -451,7 +452,7 @@ impl Persistence {
 				// guard is released at the end of this
 				// statement rather than being held across
 				// the encode and write below.
-				let latest = entry.value().read().latest();
+				let latest = entry.value().read(Versions::latest);
 				if let Some((version, value)) = latest {
 					// Serialize and write this single entry
 					bincode::serde::encode_into_std_write(
@@ -552,7 +553,7 @@ impl Persistence {
 										value,
 									});
 									// Insert the entry into the datastore
-									self.inner.datastore.insert(k, RwLock::new(entries));
+									self.inner.datastore.insert(k, VersionCell::new(entries));
 								}
 							}
 						}
@@ -602,15 +603,17 @@ impl Persistence {
 							// Check if the key already exists
 							if let Some(entry) = self.inner.datastore.get(&k) {
 								// Update existing key with stored version
-								entry.value().write().push(Version {
-									version,
-									value: val,
+								entry.value().lock().update(|v| {
+									v.push(Version {
+										version,
+										value: val,
+									});
 								});
 							} else {
 								// Insert new key with stored version
 								self.inner.datastore.insert(
 									k.clone(),
-									RwLock::new(Versions::from(Version {
+									VersionCell::new(Versions::from(Version {
 										version,
 										value: val,
 									})),
@@ -845,7 +848,7 @@ impl Persistence {
 							// released at the end of this statement rather than
 							// being held across the
 							// encode and write below.
-							let latest = entry.value().read().latest();
+							let latest = entry.value().read(Versions::latest);
 							if let Some((version, value)) = latest {
 								// Serialize and write this single entry
 								bincode::serde::encode_into_std_write(

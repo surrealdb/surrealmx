@@ -21,8 +21,9 @@ use crate::persistence::Persistence;
 use crate::queue::Commit;
 use crate::readers::Readers;
 use crate::ring::{CommitRing, DEFAULT_COMMIT_RING_CAPACITY};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::sync::RwLock;
-use crate::versions::Versions;
+use crate::version_cell::VersionCell;
 use crate::DatabaseOptions;
 use byteslice::ByteSlice;
 use crossbeam_utils::CachePadded;
@@ -86,7 +87,7 @@ pub struct Inner {
 	/// The timestamp version oracle
 	pub(crate) oracle: Arc<Oracle>,
 	/// The underlying concurrent ART datastructure
-	pub(crate) datastore: artmap::ArtMap<ByteSlice, RwLock<Versions>>,
+	pub(crate) datastore: artmap::ArtMap<ByteSlice, VersionCell>,
 	/// Registered transaction snapshot slots, one per transaction, including
 	/// transactions held in the pool. Watermark scans skip unpinned slots.
 	pub(crate) readers: Readers,
@@ -412,22 +413,24 @@ impl Inner {
 			let Some(entry) = self.datastore.get(&key) else {
 				continue;
 			};
-			// Get a mutable reference to the versions list. The write guard is
-			// deliberately held across `entry.remove()` below: a committer
-			// blocked on this lock must observe `is_removed()` and re-insert,
-			// rather than writing into a node we are about to unlink.
-			let mut versions = entry.value().write();
+			// Lock the chain for writing. The writer is deliberately held
+			// across `entry.remove()` below: a committer blocked on this lock
+			// must observe `is_removed()` and re-insert, rather than writing
+			// into a node we are about to unlink.
+			let mut versions = entry.value().lock();
 			// A sweep or commit-time collapse unlinked this node between
 			// lookup and lock; any recreation re-tracks the key itself
 			if entry.is_removed() {
 				continue;
 			}
 			// Clean up unnecessary older versions
-			if versions.gc_older_versions(cleanup_ts) == 0 {
+			let (remaining, needs_gc) =
+				versions.update(|v| (v.gc_older_versions(cleanup_ts), v.needs_gc()));
+			if remaining == 0 {
 				// Remove the entry while still holding the version write
 				// lock — see the equivalent removal in `run_gc_full`.
 				entry.remove();
-			} else if versions.needs_gc() {
+			} else if needs_gc {
 				// Versions remain pinned by a reader watermark: re-track
 				// the key so a later sweep can finish the job.
 				candidates.insert(key);
@@ -452,16 +455,18 @@ impl Inner {
 	pub(crate) fn run_gc_full(&self, cleanup_ts: u64) {
 		// Iterate over the entire datastore
 		for entry in &self.datastore {
-			// Get a mutable reference to the versions list
-			let mut versions = entry.value().write();
+			// Lock the chain for writing
+			let mut versions = entry.value().lock();
 			// Clean up unnecessary older versions
-			if versions.gc_older_versions(cleanup_ts) == 0 {
+			let (remaining, needs_gc) =
+				versions.update(|v| (v.gc_older_versions(cleanup_ts), v.needs_gc()));
+			if remaining == 0 {
 				// Remove the entry while still holding the version write lock,
 				// so a committer blocked on that lock observes `is_removed()`
 				// and re-inserts rather than writing into a node we are about
 				// to unlink.
 				entry.remove();
-			} else if versions.needs_gc() {
+			} else if needs_gc {
 				// A reader watermark is pinning reclaimable versions. Track
 				// the key so the targeted sweep revisits it once the pin
 				// clears: the caller cleared the candidate set before this
