@@ -1571,10 +1571,12 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			// One pin covers the whole datastore scan
+			let guard = self.database.datastore.pin();
+			let datastore_range = self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			);
 			for entry in datastore_range {
 				let matched = match entry.value().try_read() {
 					Some(g) => g.with_version(self.version, |bytes| {
@@ -1646,10 +1648,12 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			// One pin covers the whole datastore scan
+			let guard = self.database.datastore.pin();
+			let datastore_range = self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			);
 			for entry in datastore_range {
 				let value = match entry.value().try_read() {
 					Some(g) => g.fetch_version(self.version),
@@ -1678,10 +1682,13 @@ impl TransactionInner {
 		let join_iter =
 			MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), Direction::Forward);
 		// Create the 3-way merge iterator
+		// One pin covers the whole datastore scan
+		let guard = self.database.datastore.pin();
 		let iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			),
 			join_iter,
 			self.writeset.range::<ByteSlice, _>(beg..end),
 			Direction::Forward,
@@ -1742,10 +1749,12 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			// One pin covers the whole datastore scan
+			let guard = self.database.datastore.pin();
+			let datastore_range = self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			);
 			for entry in datastore_range {
 				let exists = match entry.value().try_read() {
 					Some(g) => g.exists_version(self.version),
@@ -1774,10 +1783,13 @@ impl TransactionInner {
 		let join_iter =
 			MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), Direction::Forward);
 		// Create the 3-way merge iterator
+		// One pin covers the whole datastore scan
+		let guard = self.database.datastore.pin();
 		let mut iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			),
 			join_iter,
 			self.writeset.range::<ByteSlice, _>(beg..end),
 			Direction::Forward,
@@ -1836,10 +1848,12 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			// One pin covers the whole datastore scan
+			let guard = self.database.datastore.pin();
+			let datastore_range = self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			);
 			for entry in datastore_range {
 				let value = match entry.value().try_read() {
 					Some(g) => g.fetch_version(self.version),
@@ -1865,10 +1879,13 @@ impl TransactionInner {
 		let join_iter =
 			MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), Direction::Forward);
 		// Create the 3-way merge iterator
+		// One pin covers the whole datastore scan
+		let guard = self.database.datastore.pin();
 		let iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			),
 			join_iter,
 			self.writeset.range::<ByteSlice, _>(beg..end),
 			Direction::Forward,
@@ -1924,10 +1941,12 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			// One pin covers the whole datastore scan
+			let guard = self.database.datastore.pin();
+			let datastore_range = self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			);
 			for entry in datastore_range {
 				let exists = match entry.value().try_read() {
 					Some(g) => g.exists_version(self.version),
@@ -1953,10 +1972,13 @@ impl TransactionInner {
 		let join_iter =
 			MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), Direction::Forward);
 		// Create the 3-way merge iterator
+		// One pin covers the whole datastore scan
+		let guard = self.database.datastore.pin();
 		let mut iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			),
 			join_iter,
 			self.writeset.range::<ByteSlice, _>(beg..end),
 			Direction::Forward,
@@ -2075,10 +2097,12 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			// One pin covers the whole datastore scan
+			let guard = self.database.datastore.pin();
+			let datastore_range = self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			);
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
 					for entry in $iter {
@@ -2111,10 +2135,13 @@ impl TransactionInner {
 		// Lazy k-way merge over the merge-queue writesets.
 		let join_iter = MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), direction);
 		// Create the 3-way merge iterator
+		// One pin covers the whole datastore scan
+		let guard = self.database.datastore.pin();
 		let mut iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			),
 			join_iter,
 			self.writeset.range::<ByteSlice, _>(beg..end),
 			direction,
@@ -2177,10 +2204,12 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			// One pin covers the whole datastore scan
+			let guard = self.database.datastore.pin();
+			let datastore_range = self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			);
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
 					for entry in $iter {
@@ -2213,10 +2242,13 @@ impl TransactionInner {
 		// Lazy k-way merge over the merge-queue writesets.
 		let join_iter = MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), direction);
 		// Create the 3-way merge iterator
+		// One pin covers the whole datastore scan
+		let guard = self.database.datastore.pin();
 		let mut iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			),
 			join_iter,
 			self.writeset.range::<ByteSlice, _>(beg..end),
 			direction,
@@ -2280,10 +2312,12 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
+			// One pin covers the whole datastore scan
+			let guard = self.database.datastore.pin();
+			let datastore_range = self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			);
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
 					for entry in $iter {
@@ -2316,10 +2350,13 @@ impl TransactionInner {
 		// Lazy k-way merge over the merge-queue writesets.
 		let join_iter = MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), direction);
 		// Create the 3-way merge iterator
+		// One pin covers the whole datastore scan
+		let guard = self.database.datastore.pin();
 		let iter = MergeIterator::new(
-			self.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone()))),
+			self.database.datastore.range_with_guard::<_, ByteSlice>(
+				(Bound::Included(beg), Bound::Excluded(end)),
+				&guard,
+			),
 			join_iter,
 			self.writeset.range::<ByteSlice, _>(beg..end),
 			direction,

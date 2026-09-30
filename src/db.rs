@@ -278,8 +278,12 @@ impl Database {
 		}
 		let mut count = 0;
 		let mut skip = skip.unwrap_or_default();
-		let datastore_range =
-			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
+		// One pin covers the whole datastore scan
+		let guard = self.inner.datastore.pin();
+		let datastore_range = self
+			.inner
+			.datastore
+			.range_with_guard((Bound::Included(beg), Bound::Excluded(end)), &guard);
 		for entry in datastore_range {
 			let matched = match entry.value().try_read() {
 				Some(g) => g.with_version(version, |bytes| {
@@ -340,8 +344,12 @@ impl Database {
 		}
 		let mut count = 0;
 		let mut skip = skip.unwrap_or_default();
-		let datastore_range =
-			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
+		// One pin covers the whole datastore scan
+		let guard = self.inner.datastore.pin();
+		let datastore_range = self
+			.inner
+			.datastore
+			.range_with_guard((Bound::Included(beg), Bound::Excluded(end)), &guard);
 		for entry in datastore_range {
 			let exists = match entry.value().try_read() {
 				Some(g) => g.exists_version(version),
@@ -389,8 +397,12 @@ impl Database {
 		}
 		let mut count = 0;
 		let mut skip = skip.unwrap_or_default();
-		let datastore_range =
-			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
+		// One pin covers the whole datastore scan
+		let guard = self.inner.datastore.pin();
+		let datastore_range = self
+			.inner
+			.datastore
+			.range_with_guard((Bound::Included(beg), Bound::Excluded(end)), &guard);
 		for entry in datastore_range {
 			let exists = match entry.value().try_read() {
 				Some(g) => g.exists_version(version),
