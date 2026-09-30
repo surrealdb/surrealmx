@@ -23,7 +23,7 @@
 	<a href="https://github.com/surrealdb/surrealmx"><img src="https://img.shields.io/badge/license-Apache_License_2.0-00bfff.svg?style=flat-square"></a>
 </p>
 
-SurrealMX is an ultra-high-throughput, in-memory, lock-free key-value database engine built on a multi-version concurrency control (MVCC) skiplist architecture and a circular commit ring buffer.
+SurrealMX is an ultra-high-throughput, in-memory, lock-free key-value database engine built on multi-version concurrency control (MVCC) over a concurrent adaptive radix tree, with a circular commit ring buffer.
 
 It is designed as an independent, standalone embedded storage engine and caching layer suitable for microsecond-latency workloads, high-concurrency server applications, and browser WebAssembly environments.
 
@@ -516,7 +516,7 @@ SurrealMX provides powerful range-based operations for scanning, counting, and i
 
 - **Forward and reverse iteration**
 - **Skip and limit parameters** for pagination  
-- **Efficient range scans** using the underlying lock-free skiplist structure
+- **Efficient range scans** over the ordered adaptive radix tree that holds the datastore
 - **Zero-allocation closure scans** (`scan_with`, `keys_for_each`) inspecting borrowed slices directly without vector allocations or value clones
 - **Buffer-reusing scans** (`scan_into`, `keys_into`) avoiding repeated vector reallocations across query loops
 
