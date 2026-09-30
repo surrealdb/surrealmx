@@ -1,8 +1,8 @@
 <br>
 
 <p align="center">
-    <a href="https://github.com/surrealdb/surrealmx" target="_blank">
-        <img width="200" src="https://raw.githubusercontent.com/surrealdb/surrealmx/master/img/logo.svg" alt="SurrealMX Logo">
+    <a href="https://surrealdb.com" target="_blank">
+        <img width="200" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/black/logo.svg" alt="SurrealMX Logo">
     </a>
 </p>
 
@@ -30,35 +30,28 @@ It is designed as an independent, standalone embedded storage engine and caching
 
 Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Processor @ 5.48 GHz, 128 GB DDR5 RAM**, 5,000,000 keys across 48 concurrent worker threads with 128 clients via [`crud-bench`](https://github.com/surrealdb/crud-bench)):
 
-| Engine | Point Read (OPS) | Create (OPS) | Update (OPS) | Delete (OPS) | Scan (OPS) | Peak Memory |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SurrealMX** | **23,029,946** | **2,071,189** | **1,752,320** | **1,999,892** | **161,353** | **10.7 GiB** |
-| LMDB<br><sup>(In-Memory)</sup> | 1,199,521 | 248,458 | 228,816 | 190,841 | 247,098 | 7.0 GiB |
-| RocksDB<br><sup>(In-Memory)</sup> | 791,699 | 682,867 | 611,568 | 763,018 | 327,049 | 30.9 GiB |
+| Engine | Point&nbsp;Read&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Create&nbsp;(OPS) | Update&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Delete&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Scan&nbsp;(OPS) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **SurrealMX** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**23,029,946** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**2,071,189** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**1,752,320** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**1,999,892** | 161,353 |
+| LMDB<br><sup>(In-Memory)</sup> | 1,199,521 | 248,458 | 228,816 | 190,841 | 247,098 |
+| RocksDB<br><sup>(In-Memory)</sup> | 791,699 | 682,867 | 611,568 | 763,018 | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**327,049** |
 
-- **Point Reads**: Over **23,000,000 OPS** sustained (217ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`) — over **19× faster** than LMDB and **29× faster** than RocksDB.
-- **Writes & Creates**: Over **2,070,000 OPS** (2.41s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer — **3.0× faster** than RocksDB and **8.3× faster** than LMDB.
-- **Deletes**: Over **1,990,000 OPS** (2.50s for 5,000,000 deletions) via optimized inline tombstone collapse — **2.6× faster** than RocksDB and **10× faster** than LMDB.
-- **Range Scans**: **161,353 OPS** using zero-allocation closure traversal (`scan_with` / `keys_for_each`), with the lowest mean per-scan latency of the three engines: **0.02ms**, against 0.03ms for LMDB and 0.07ms for RocksDB.
+- **Point Reads**: Over **23,000,000 OPS** sustained (217ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **19× faster** than LMDB and **29× faster** than RocksDB.
+- **Writes & Creates**: Over **2,070,000 OPS** (2.41s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **3.0× faster** than RocksDB and **8.3× faster** than LMDB.
+- **Updates**: Over **1,750,000 OPS** (2.85s for 5,000,000 updates): **2.9× faster** than RocksDB and **7.7× faster** than LMDB.
+- **Deletes**: Over **1,990,000 OPS** (2.50s for 5,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **2.6× faster** than RocksDB and **10× faster** than LMDB.
+- **Range Scans**: Over **161,000 OPS** using zero-allocation cursor traversal (`scan_with` / `keys_for_each`). The 10,000 scans finish in 62ms, so the OPS figure mostly reflects scheduling: SurrealMX has the lowest mean per-scan latency, **0.02ms** against 0.03ms for LMDB and 0.07ms for RocksDB.
 
-<details>
-<summary><b>SurrealMX 1.0.0 vs 0.27.0</b></summary>
+### Memory Profile
 
-<br>
+| Engine | Resting&nbsp;Memory | Peak&nbsp;Memory |
+| :--- | ---: | ---: |
+| **SurrealMX** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**5.5 GiB** | 10.7 GiB |
+| LMDB<br><sup>(In-Memory)</sup> | 6.8 GiB | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**7.0 GiB** |
+| RocksDB<br><sup>(In-Memory)</sup> | 7.1 GiB | 30.9 GiB |
 
-Comparison against the previous release (`0.27.0`) under the same 5,000,000 key workload:
-
-| Operation | SurrealMX 0.27.0 | SurrealMX 1.0.0 | Improvement |
-| :--- | :--- | :--- | :--- |
-| **Point Read** | 2,302,499 OPS | **11,338,303 OPS** | **4.92× faster** |
-| **Create** | 32,858 OPS | **2,396,041 OPS** | **73× faster** (peaking at 2.83M OPS) |
-| **Update** | 32,997 OPS | **2,223,502 OPS** | **67× faster** |
-| **Delete** | 32,392 OPS | **6,172,414 OPS** | **190× faster** |
-| **Bounded Scan** | 34,880 OPS | **44,794 OPS** | **1.28× faster** |
-| **Full Table Scan** | 26.58 OPS | **35.30 OPS** | **1.33× faster** |
-| **Peak Memory** | 16.1 GiB | **5.2 GiB** | **-68% RAM reduction** |
-
-</details>
+- **In-Memory Dataset**: True in-memory database holding all 5,000,000 documents resident at **5.5 GiB** resting memory (~1KB per full multi-version document).
+- **Concurrent Scaling**: Peak memory expands dynamically under high-throughput 48-worker commits before settling back to resting baseline.
 
 ---
 
@@ -137,7 +130,7 @@ Background worker threads perform cleanup and garbage collection at regular
 intervals. These workers can be disabled through `DatabaseOptions` by setting
 `enable_cleanup` or `enable_gc` to `false`. When disabled, trigger the tasks
 manually: `run_cleanup` trims the transaction commit queue, `run_gc_tracked`
-sweeps just the keys tracked as holding reclaimable version garbage (cheap —
+sweeps just the keys tracked as holding reclaimable version garbage (cheap,
 its cost scales with the amount of pinned garbage, not the dataset size), and
 `run_gc` performs a full datastore scan, useful as an occasional deep sweep.
 
@@ -489,8 +482,8 @@ tx.commit().unwrap();
 
 Every `set_savepoint` should be paired with exactly one of:
 
-- `rollback_to_savepoint` — undo every write made since the savepoint, and discard it.
-- `release_savepoint` — keep every write made since the savepoint, and discard it.
+- `rollback_to_savepoint`: undo every write made since the savepoint, and discard it.
+- `release_savepoint`: keep every write made since the savepoint, and discard it.
 
 Releasing is what a nested scope does when it succeeds. Its writes join the enclosing scope, so a later rollback of that enclosing scope still undoes them:
 
@@ -512,7 +505,7 @@ assert_eq!(tx.get("b").unwrap(), None);
 
 Both methods return `Error::NoSavepoint` when no savepoint is set, and `Error::TxNotWritable` on a read-only transaction. Savepoints are anonymous, so releasing more savepoints than were set cannot be detected once the stack is non-empty again: a later rollback will silently unwind further than intended.
 
-Note that a rollback rewinds writes only. Keys read and ranges scanned inside a rolled back scope stay tracked for conflict detection, because a write that survives the rollback may have been derived from a value that scope read. This keeps serializable transactions conservative — it can produce a retryable conflict error, never a missed one.
+Note that a rollback rewinds writes only. Keys read and ranges scanned inside a rolled back scope stay tracked for conflict detection, because a write that survives the rollback may have been derived from a value that scope read. This keeps serializable transactions conservative: it can produce a retryable conflict error, never a missed one.
 
 ## Range Operations
 
@@ -639,4 +632,4 @@ fn main() {
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+Licensed under the Apache License, Version 2.0. See [LICENSE](https://github.com/surrealdb/surrealmx/blob/main/LICENSE) for details.
