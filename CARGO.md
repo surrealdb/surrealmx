@@ -32,14 +32,14 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 
 | Engine | Point Read (OPS) | Create (OPS) | Update (OPS) | Delete (OPS) | Scan (OPS) | Peak Memory |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SurrealMX** | **19,002,983** | **4,265,023** | **5,113,599** | **5,744,968** | **329,574** | **10.9 GiB** |
-| LMDB<br><sup>(In-Memory)</sup> | 1,188,844 | 234,230 | 218,400 | 172,182 | 132,397 | 8.4 GiB |
-| RocksDB<br><sup>(In-Memory)</sup> | 788,066 | 664,999 | 581,861 | 740,588 | 134,237 | 32.2 GiB |
+| **SurrealMX** | **23,029,946** | **2,071,189** | **1,752,320** | **1,999,892** | **161,353** | **10.7 GiB** |
+| LMDB<br><sup>(In-Memory)</sup> | 1,199,521 | 248,458 | 228,816 | 190,841 | 247,098 | 7.0 GiB |
+| RocksDB<br><sup>(In-Memory)</sup> | 791,699 | 682,867 | 611,568 | 763,018 | 327,049 | 30.9 GiB |
 
-- **Point Reads**: Over **19,000,000 OPS** sustained (263ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`) — over **15× faster** than LMDB and **24× faster** than RocksDB.
-- **Writes & Creates**: Over **4,260,000 OPS** via the lock-free circular commit ring buffer and direct auto-commit datastore bypass — **6.4× faster** than RocksDB and **18× faster** than LMDB.
-- **Deletes**: Over **5,740,000 OPS** (870ms for 5,000,000 deletions) via optimized inline tombstone collapse — **7.7× faster** than RocksDB and **33× faster** than LMDB.
-- **Range Scans**: **329,574 OPS** using zero-allocation closure traversal (`scan_with` / `keys_for_each`).
+- **Point Reads**: Over **23,000,000 OPS** sustained (217ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`) — over **19× faster** than LMDB and **29× faster** than RocksDB.
+- **Writes & Creates**: Over **2,070,000 OPS** (2.41s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer — **3.0× faster** than RocksDB and **8.3× faster** than LMDB.
+- **Deletes**: Over **1,990,000 OPS** (2.50s for 5,000,000 deletions) via optimized inline tombstone collapse — **2.6× faster** than RocksDB and **10× faster** than LMDB.
+- **Range Scans**: **161,353 OPS** using zero-allocation closure traversal (`scan_with` / `keys_for_each`), with the lowest mean per-scan latency of the three engines: **0.02ms**, against 0.03ms for LMDB and 0.07ms for RocksDB.
 
 <details>
 <summary><b>SurrealMX 1.0.0 vs 0.27.0</b></summary>
