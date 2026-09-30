@@ -275,6 +275,8 @@ impl Database {
 			return self.transaction(false).scan_with(beg..end, skip, limit, f);
 		};
 		let version = snapshot.version();
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		let mut count = 0;
 		let mut skip = skip.unwrap_or_default();
 		let datastore_range =
@@ -330,6 +332,8 @@ impl Database {
 			return self.transaction(false).keys_for_each(beg..end, skip, limit, f);
 		};
 		let version = snapshot.version();
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		let mut count = 0;
 		let mut skip = skip.unwrap_or_default();
 		let datastore_range =
@@ -378,6 +382,8 @@ impl Database {
 			return self.transaction(false).total(beg..end, skip, limit);
 		};
 		let version = snapshot.version();
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		let mut count = 0;
 		let mut skip = skip.unwrap_or_default();
 		let datastore_range =

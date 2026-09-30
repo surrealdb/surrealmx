@@ -406,6 +406,8 @@ impl Inner {
 		let mut keys: Vec<ByteSlice> = Vec::with_capacity(candidates.len());
 		keys.extend(candidates.iter().cloned());
 		// Process each candidate key in turn
+		// One epoch pin covers every chain read and replacement below
+		let _pin = crate::sync::pin();
 		for key in keys {
 			// Untrack the key first — see the ordering argument above
 			candidates.remove(&key);
@@ -454,6 +456,8 @@ impl Inner {
 	)]
 	pub(crate) fn run_gc_full(&self, cleanup_ts: u64) {
 		// Iterate over the entire datastore
+		// One epoch pin covers every chain read and replacement below
+		let _pin = crate::sync::pin();
 		for entry in &self.datastore {
 			// Lock the chain for writing
 			let mut versions = entry.value().lock();

@@ -978,6 +978,8 @@ impl TransactionInner {
 		let mut tracked: Vec<ByteSlice> = Vec::new();
 		// Apply each writeset entry, reclaiming superseded versions
 		// inline while the chain write lock is already held.
+		// One epoch pin covers every chain read and replacement below
+		let _pin = crate::sync::pin();
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
@@ -1557,6 +1559,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		let mut count = 0;
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
@@ -1617,6 +1621,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Initialise the entry counter
 		let mut count = 0;
 		// Compute the range
@@ -1710,6 +1716,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Initialise the entry counter
 		let mut count = 0;
 		// Compute the range
@@ -1803,6 +1811,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Compute the range
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
@@ -1888,6 +1898,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Compute the range
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
@@ -2030,6 +2042,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Prepare result count
 		let mut res = 0;
 		// Compute the range
@@ -2125,6 +2139,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Prepare result vector
 		let mut res = match limit {
 			Some(l) => Vec::with_capacity(l.min(10_000)),
@@ -2224,6 +2240,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Prepare result vector
 		let mut res = match limit {
 			Some(l) => Vec::with_capacity(l.min(10_000)),
