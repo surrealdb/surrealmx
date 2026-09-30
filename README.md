@@ -31,29 +31,29 @@ It is designed as an independent, standalone embedded storage engine and caching
 
 ## Performance
 
-Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Processor @ 5.48 GHz, 128 GB DDR5 RAM**, 5,000,000 keys across 48 concurrent worker threads with 128 clients via [`crud-bench`](https://github.com/surrealdb/crud-bench)):
+Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Processor @ 5.48 GHz, 128 GB DDR5 RAM**, 15,000,000 keys across 48 concurrent worker threads with 128 clients, and 5,000,000 iterations of each range scan, via [`crud-bench`](https://github.com/surrealdb/crud-bench)):
 
 | Engine | Point&nbsp;Read&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Create&nbsp;(OPS) | Update&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Delete&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Scan&nbsp;(OPS) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**23,029,946** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**2,071,189** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**1,752,320** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**1,999,892** | 161,353 |
-| LMDB<br><sup>(In-Memory)</sup> | 1,199,521 | 248,458 | 228,816 | 190,841 | 247,098 |
-| RocksDB<br><sup>(In-Memory)</sup> | 791,699 | 682,867 | 611,568 | 763,018 | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**327,049** |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**20,428,835** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**2,033,379** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**1,568,015** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**2,034,556** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**3,147,150** |
+| LMDB<br><sup>(In-Memory)</sup> | 1,196,173 | 224,909 | 243,045 | 176,188 | 1,186,447 |
+| RocksDB<br><sup>(In-Memory)</sup> | 750,476 | 627,071 | 599,129 | 681,996 | 839,268 |
 
-- **Point Reads**: Over **23,000,000 OPS** sustained (217ms for 5,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **19× faster** than LMDB and **29× faster** than RocksDB.
-- **Writes & Creates**: Over **2,070,000 OPS** (2.41s for 5,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **3.0× faster** than RocksDB and **8.3× faster** than LMDB.
-- **Updates**: Over **1,750,000 OPS** (2.85s for 5,000,000 updates): **2.9× faster** than RocksDB and **7.7× faster** than LMDB.
-- **Deletes**: Over **1,990,000 OPS** (2.50s for 5,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **2.6× faster** than RocksDB and **10× faster** than LMDB.
-- **Range Scans**: Over **161,000 OPS** using zero-allocation cursor traversal (`scan_with` / `keys_for_each`). The 10,000 scans finish in 62ms, so the OPS figure mostly reflects scheduling: SurrealMX has the lowest mean per-scan latency, **0.02ms** against 0.03ms for LMDB and 0.07ms for RocksDB.
+- **Point Reads**: Over **20,400,000 OPS** sustained (734ms for 15,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **17× faster** than LMDB and **27× faster** than RocksDB.
+- **Writes & Creates**: Over **2,030,000 OPS** (7.38s for 15,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **3.2× faster** than RocksDB and **9.0× faster** than LMDB.
+- **Updates**: Over **1,560,000 OPS** (9.57s for 15,000,000 updates): **2.6× faster** than RocksDB and **6.5× faster** than LMDB.
+- **Deletes**: Over **2,030,000 OPS** (7.37s for 15,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **3.0× faster** than RocksDB and **11× faster** than LMDB.
+- **Range Scans**: Over **3,140,000 OPS** (1.59s for 5,000,000 `select(*) limit(100)` scans) using zero-allocation cursor traversal (`scan_with` / `keys_for_each`): **3.7× faster** than RocksDB and **2.7× faster** than LMDB.
 
 ### Memory Profile
 
 | Engine | Resting&nbsp;Memory | Peak&nbsp;Memory |
 | :--- | ---: | ---: |
-| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**5.5 GiB** | 10.7 GiB |
-| LMDB<br><sup>(In-Memory)</sup> | 6.8 GiB | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**7.0 GiB** |
-| RocksDB<br><sup>(In-Memory)</sup> | 7.1 GiB | 30.9 GiB |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**15.8 GiB** | 31.5 GiB |
+| LMDB<br><sup>(In-Memory)</sup> | 19.9 GiB | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**20.3 GiB** |
+| RocksDB<br><sup>(In-Memory)</sup> | 19.3 GiB | 95.3 GiB |
 
-- **In-Memory Dataset**: True in-memory database holding all 5,000,000 documents resident at **5.5 GiB** resting memory (~1KB per full multi-version document).
+- **In-Memory Dataset**: True in-memory database holding all 15,000,000 documents resident at **15.8 GiB** resting memory (~1.1KB per full multi-version document).
 - **Concurrent Scaling**: Peak memory expands dynamically under high-throughput 48-worker commits before settling back to resting baseline.
 
 ---
