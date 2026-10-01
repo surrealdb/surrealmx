@@ -34,6 +34,7 @@ mod cursor;
 mod db;
 mod direction;
 mod err;
+mod gc_candidates;
 mod inner;
 mod iter;
 mod kv;

@@ -1034,7 +1034,7 @@ impl TransactionInner {
 			}
 		}
 		// Track the collected keys in one batch, outside every chain
-		// write lock and under a single map guard. Insert-after-unlock
+		// write lock, in this thread's buffer. Insert-after-unlock
 		// is race-free against the sweep's remove-then-trim ordering:
 		// the garbage these keys refer to was pushed before this insert,
 		// so a sweep that untracks a key here either trims that garbage
@@ -1044,10 +1044,7 @@ impl TransactionInner {
 		// key is tracked for an already-terminal chain, which the next
 		// sweep simply untracks.
 		if !tracked.is_empty() {
-			let candidates = self.database.gc_candidates.pin();
-			for key in tracked {
-				candidates.insert(key);
-			}
+			self.database.gc_candidates.track(tracked);
 		}
 		// Append the transaction to the persistence layer. Clone the `Arc` out
 		// first so the `persistence` read guard is not held across `append`,

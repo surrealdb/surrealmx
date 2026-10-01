@@ -14,6 +14,7 @@
 
 //! This module stores the inner in-memory database type.
 
+use crate::gc_candidates::GcCandidates;
 use crate::merge_ring::{MergeRing, DEFAULT_MERGE_RING_CAPACITY};
 use crate::oracle::Oracle;
 #[cfg(not(target_arch = "wasm32"))]
@@ -27,7 +28,6 @@ use crate::version_cell::VersionCell;
 use crate::DatabaseOptions;
 use byteslice::ByteSlice;
 use crossbeam_utils::CachePadded;
-use papaya::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
@@ -130,7 +130,7 @@ pub struct Inner {
 	/// tick until the reader departs — the deliberate trade for exact
 	/// reclamation the moment the pin clears; the per-tick cost is one
 	/// chain-lock-and-trim attempt per tracked key.
-	pub(crate) gc_candidates: HashSet<ByteSlice>,
+	pub(crate) gc_candidates: GcCandidates,
 	/// Optional persistence handler
 	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) persistence: RwLock<Option<Arc<Persistence>>>,
@@ -157,7 +157,7 @@ impl Inner {
 			transaction_merge_queue: MergeRing::new(DEFAULT_MERGE_RING_CAPACITY),
 			merge_retire_id: CachePadded::new(AtomicU64::new(0)),
 			merge_retiring: CachePadded::new(AtomicBool::new(false)),
-			gc_candidates: HashSet::new(),
+			gc_candidates: GcCandidates::new(),
 			#[cfg(not(target_arch = "wasm32"))]
 			persistence: RwLock::new(None),
 			background_threads_enabled: AtomicBool::new(true),
@@ -376,12 +376,12 @@ impl Inner {
 	/// keys which may still hold garbage — cost scales with the amount of
 	/// pinned garbage, not the dataset size.
 	///
-	/// A key is removed from the candidate set BEFORE its chain is
+	/// Every candidate is drained from the set BEFORE any chain is
 	/// examined. That ordering makes the untrack race-free against
-	/// concurrent commits: a committer inserts its key only after
+	/// concurrent commits: a committer tracks its key only after
 	/// pushing the garbage-leaving version under the chain write lock,
-	/// so any garbage added after this sweep's trim re-inserts the key
-	/// for the next pass — the removal here can never orphan it. When
+	/// so any garbage added after this sweep's trim re-tracks the key
+	/// for the next pass — the drain here can never orphan it. When
 	/// the trimmed chain still holds reclaimable versions (a reader
 	/// watermark is pinning them), the key is re-tracked for the next
 	/// sweep.
@@ -390,27 +390,19 @@ impl Inner {
 		reason = "the version write guard must cover entry.remove() so a committer blocked on it observes is_removed() and re-inserts"
 	)]
 	pub(crate) fn run_gc_tracked(&self, cleanup_ts: u64) {
-		// A single map guard serves the whole sweep: guard churn per
-		// candidate costs more than holding one across the pass, and the
-		// candidate map holds only keys, so delaying its internal
-		// reclamation for the duration of a sweep is immaterial.
-		let candidates = self.gc_candidates.pin();
-		// The steady state is an empty candidate set: every chain fully
-		// trimmed at commit time. Skip the snapshot allocation entirely.
-		if candidates.is_empty() {
+		// Untrack every candidate first — see the ordering argument above.
+		// Keys tracked by commits racing with this sweep are picked up by
+		// the next pass.
+		let keys = self.gc_candidates.drain();
+		if keys.is_empty() {
 			return;
 		}
-		// Snapshot the candidate keys: the snapshot is the sweep's
-		// working set, and keys tracked by commits racing with this
-		// sweep are picked up by the next pass.
-		let mut keys: Vec<ByteSlice> = Vec::with_capacity(candidates.len());
-		keys.extend(candidates.iter().cloned());
+		// Keys whose garbage a reader watermark still pins
+		let mut retrack = Vec::new();
 		// Process each candidate key in turn
 		// One epoch pin covers every chain read and replacement below
 		let _pin = crate::sync::pin();
 		for key in keys {
-			// Untrack the key first — see the ordering argument above
-			candidates.remove(&key);
 			// The chain may have been unlinked by an earlier collapse
 			let Some(entry) = self.datastore.get(&key) else {
 				continue;
@@ -435,9 +427,10 @@ impl Inner {
 			} else if needs_gc {
 				// Versions remain pinned by a reader watermark: re-track
 				// the key so a later sweep can finish the job.
-				candidates.insert(key);
+				retrack.push(key);
 			}
 		}
+		self.gc_candidates.retrack(retrack);
 	}
 
 	/// Scan the entire datastore, reclaiming stale versions on every key.
@@ -455,6 +448,8 @@ impl Inner {
 		reason = "the version write guard must cover entry.remove() so a committer blocked on it observes is_removed() and re-inserts"
 	)]
 	pub(crate) fn run_gc_full(&self, cleanup_ts: u64) {
+		// Keys whose garbage a reader watermark still pins
+		let mut retrack = Vec::new();
 		// Iterate over the entire datastore
 		// One epoch pin covers every chain read and replacement below
 		let _pin = crate::sync::pin();
@@ -476,9 +471,10 @@ impl Inner {
 				// clears: the caller cleared the candidate set before this
 				// scan, and no future commit or sweep would otherwise ever
 				// visit a key that is never written again.
-				self.gc_candidates.pin().insert(entry.key().clone());
+				retrack.push(entry.key().clone());
 			}
 		}
+		self.gc_candidates.retrack(retrack);
 	}
 }
 

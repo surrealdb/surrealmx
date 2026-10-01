@@ -617,7 +617,7 @@ impl Database {
 		// Skip the pass entirely when registrations are in flight
 		if let Some(cleanup_ts) = self.compute_cleanup_ts() {
 			// The full scan visits every candidate anyway
-			self.gc_candidates.pin().clear();
+			self.gc_candidates.clear();
 			// Perform a full datastore scan for stale versions
 			self.run_gc_full(cleanup_ts);
 		}
@@ -639,7 +639,7 @@ impl Database {
 		// computation (a fence and full slot scan) entirely when there
 		// is nothing to sweep. A key tracked concurrently with this
 		// check is picked up by the next pass.
-		if self.gc_candidates.pin().is_empty() {
+		if self.gc_candidates.is_empty() {
 			return;
 		}
 		// Skip the pass entirely when registrations are in flight
@@ -752,7 +752,7 @@ impl Database {
 					// The steady state is an empty candidate set: skip
 					// the watermark computation (a fence and full slot
 					// scan) entirely when there is nothing to sweep.
-					if db.gc_candidates.pin().is_empty() {
+					if db.gc_candidates.is_empty() {
 						continue;
 					}
 					// Compute the next cleanup_ts by scanning the slot
@@ -2071,7 +2071,7 @@ mod tests {
 		}
 		// The pinned overwrites must have tracked the key
 		assert!(
-			db.gc_candidates.pin().contains(b"key".as_slice()),
+			db.gc_candidates.contains(b"key".as_slice()),
 			"a commit that leaves garbage should track its key"
 		);
 		// While the reader is pinned, the sweep trims what it can and
@@ -2081,7 +2081,7 @@ mod tests {
 			let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
 			assert!(entry.value().read(|v| v.as_slice().len()) > 1);
 			assert!(
-				db.gc_candidates.pin().contains(b"key".as_slice()),
+				db.gc_candidates.contains(b"key".as_slice()),
 				"a still-pinned chain should stay tracked after a sweep"
 			);
 		}
@@ -2093,7 +2093,7 @@ mod tests {
 		assert_eq!(chain.len(), 1, "the tracked sweep should reclaim departed-reader garbage");
 		assert_eq!(chain[0].value.as_deref(), Some(b"v50" as &[u8]));
 		assert!(
-			!db.gc_candidates.pin().contains(b"key".as_slice()),
+			!db.gc_candidates.contains(b"key".as_slice()),
 			"a terminal chain should be untracked after the sweep"
 		);
 	}
@@ -2119,7 +2119,7 @@ mod tests {
 		}
 		// The pinned tombstone keeps the node linked and tracked
 		assert!(db.datastore.get(b"key".as_slice()).is_some());
-		assert!(db.gc_candidates.pin().contains(b"key".as_slice()));
+		assert!(db.gc_candidates.contains(b"key".as_slice()));
 		// After the reader departs the sweep collapses and unlinks it
 		drop(reader);
 		db.run_gc_tracked();
@@ -2127,7 +2127,7 @@ mod tests {
 			db.datastore.get(b"key".as_slice()).is_none(),
 			"the tracked sweep should unlink a departed-reader tombstone"
 		);
-		assert!(!db.gc_candidates.pin().contains(b"key".as_slice()));
+		assert!(!db.gc_candidates.contains(b"key".as_slice()));
 	}
 
 	#[test]
@@ -2148,10 +2148,10 @@ mod tests {
 			tx.set("key", "v1").unwrap();
 			tx.commit().unwrap();
 		}
-		assert!(db.gc_candidates.pin().contains(b"key".as_slice()));
+		assert!(db.gc_candidates.contains(b"key".as_slice()));
 		drop(reader);
 		db.run_gc();
-		assert_eq!(db.gc_candidates.pin().len(), 0, "the full scan should clear the candidate set");
+		assert_eq!(db.gc_candidates.len(), 0, "the full scan should clear the candidate set");
 		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
 		assert_eq!(entry.value().read(|v| v.as_slice().len()), 1);
 	}
@@ -2213,7 +2213,7 @@ mod tests {
 		// The full scan runs while the reader still pins the old version
 		db.run_gc();
 		assert!(
-			db.gc_candidates.pin().contains(b"key".as_slice()),
+			db.gc_candidates.contains(b"key".as_slice()),
 			"the full scan should re-track a chain it could not trim"
 		);
 		// After the reader departs the tracked sweep reclaims the garbage
