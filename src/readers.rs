@@ -24,7 +24,7 @@
 //! index is reused by the next registration. Each slot is cache padded, so
 //! transactions pinning neighbouring slots do not share a cache line.
 
-use crate::inner::{Slot, SLOT_PINNING, SLOT_UNPINNED};
+use crate::inner::{Slot, Watermark, SLOT_PINNING, SLOT_UNPINNED};
 use crossbeam_utils::CachePadded;
 use std::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -104,6 +104,7 @@ impl Readers {
 	pub(crate) fn unpin(&self, index: usize) {
 		let slot = self.slot(index);
 		slot.version.store(SLOT_UNPINNED, Ordering::SeqCst);
+		slot.blind.store(SLOT_UNPINNED, Ordering::SeqCst);
 		slot.commit.store(SLOT_UNPINNED, Ordering::SeqCst);
 	}
 
@@ -120,7 +121,11 @@ impl Readers {
 		let len = self.len.load(Ordering::SeqCst);
 		(0..len)
 			.filter(|&i| self.chunks[i >> CHUNK_BITS].get().is_some())
-			.filter(|&i| self.slot(i).version.load(Ordering::SeqCst) != SLOT_UNPINNED)
+			.filter(|&i| {
+				let slot = self.slot(i);
+				slot.version.load(Ordering::SeqCst) != SLOT_UNPINNED
+					|| slot.blind.load(Ordering::SeqCst) != SLOT_UNPINNED
+			})
 			.count()
 	}
 
@@ -155,6 +160,46 @@ impl Readers {
 			}
 		}
 		Some(min)
+	}
+
+	/// Compute the garbage collection watermark across all slots except
+	/// `exclude`, bounded by `fallback`: the earliest snapshot that reads
+	/// bounds [`Watermark::trim`], and the earliest snapshot of any kind
+	/// bounds [`Watermark::unlink`].
+	///
+	/// Returns `None` if any slot is in [`SLOT_PINNING`] state.
+	#[inline]
+	pub(crate) fn watermark(&self, fallback: u64, exclude: Option<usize>) -> Option<Watermark> {
+		fence(Ordering::SeqCst);
+		let len = self.len.load(Ordering::SeqCst);
+		let mut trim = fallback;
+		let mut unlink = fallback;
+		for (c, chunk) in self.chunks.iter().enumerate().take(len.div_ceil(CHUNK_SIZE)) {
+			// A chunk is allocated before any of its slots is pinned
+			let Some(chunk) = chunk.get() else {
+				continue;
+			};
+			let base = c << CHUNK_BITS;
+			for (i, slot) in chunk.iter().enumerate().take(len - base) {
+				if Some(base + i) == exclude {
+					continue;
+				}
+				match slot.version.load(Ordering::SeqCst) {
+					SLOT_PINNING => return None,
+					SLOT_UNPINNED => {}
+					v => trim = trim.min(v),
+				}
+				match slot.blind.load(Ordering::SeqCst) {
+					SLOT_PINNING => return None,
+					SLOT_UNPINNED => {}
+					v => unlink = unlink.min(v),
+				}
+			}
+		}
+		Some(Watermark {
+			trim,
+			unlink: unlink.min(trim),
+		})
 	}
 }
 
@@ -205,5 +250,51 @@ mod tests {
 		assert_eq!(readers.earliest_pinned(|s| &s.version, 10, None), None);
 		readers.release(index);
 		assert_eq!(readers.earliest_pinned(|s| &s.version, 10, None), Some(10));
+	}
+
+	#[test]
+	fn blind_writes_bound_only_unlinking() {
+		let readers = Readers::new();
+		let reader = readers.register();
+		let blind = readers.register();
+		let excluded = readers.register();
+		readers.slot(reader).version.store(7, Ordering::SeqCst);
+		readers.slot(blind).blind.store(4, Ordering::SeqCst);
+		readers.slot(excluded).version.store(2, Ordering::SeqCst);
+		let watermark = readers.watermark(10, Some(excluded));
+		assert_eq!(
+			watermark,
+			Some(Watermark {
+				trim: 7,
+				unlink: 4,
+			})
+		);
+		// Unlinking is never allowed past trimming
+		readers.unpin(blind);
+		readers.slot(blind).blind.store(9, Ordering::SeqCst);
+		assert_eq!(readers.watermark(10, Some(excluded)), Some(Watermark::at(7)));
+		// With only blind writes pinned, every superseded version trims
+		readers.unpin(reader);
+		let watermark = readers.watermark(10, Some(excluded));
+		assert_eq!(
+			watermark,
+			Some(Watermark {
+				trim: 10,
+				unlink: 9,
+			})
+		);
+		readers.unpin(blind);
+		assert_eq!(readers.watermark(10, Some(excluded)), Some(Watermark::at(10)));
+		assert_eq!(readers.watermark(10, None), Some(Watermark::at(2)));
+	}
+
+	#[test]
+	fn a_pinning_blind_write_makes_the_watermark_unknown() {
+		let readers = Readers::new();
+		let index = readers.register();
+		readers.slot(index).blind.store(SLOT_PINNING, Ordering::SeqCst);
+		assert_eq!(readers.watermark(10, None), None);
+		readers.release(index);
+		assert_eq!(readers.watermark(10, None), Some(Watermark::at(10)));
 	}
 }

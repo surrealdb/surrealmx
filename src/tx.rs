@@ -18,7 +18,7 @@ use crate::bloom::AtomicBloomFilter;
 use crate::cursor::{Cursor, KeyIterator, ScanIterator};
 use crate::direction::Direction;
 use crate::err::Error;
-use crate::inner::{Inner, COMMIT_ABORTED, SLOT_PINNING};
+use crate::inner::{Access, Inner, Watermark, COMMIT_ABORTED, SLOT_PINNING};
 use crate::iter::{MergeIterator, MergeQueueIter};
 use crate::kv::IntoBytes;
 use crate::pool::Pool;
@@ -577,11 +577,20 @@ pub(crate) struct TransactionInner {
 /// covers the excluded prefix; any commit landing between the two
 /// loads simply falls inside our conflict window, which is at worst a
 /// spurious conflict, never a missed one.
+///
+/// A blind write publishes its version snapshot in the slot's `blind`
+/// field rather than `version`, under the same protocol, so that it bounds
+/// only the unlinking of deleted keys (see [`Access::Blind`]).
 #[inline]
-pub(crate) fn pin_slot(db: &Inner, slot: usize) -> (u64, u64) {
+pub(crate) fn pin_slot(db: &Inner, slot: usize, access: Access) -> (u64, u64) {
 	let slot = db.readers.slot(slot);
+	// The field this snapshot is published in
+	let snapshot = match access {
+		Access::Read => &slot.version,
+		Access::Blind => &slot.blind,
+	};
 	// Publish the pinning sentinels before loading the snapshot
-	slot.version.store(SLOT_PINNING, Ordering::SeqCst);
+	snapshot.store(SLOT_PINNING, Ordering::SeqCst);
 	slot.commit.store(SLOT_PINNING, Ordering::SeqCst);
 	// Pair with the fence in every watermark scan
 	fence(Ordering::SeqCst);
@@ -590,17 +599,17 @@ pub(crate) fn pin_slot(db: &Inner, slot: usize) -> (u64, u64) {
 	let version = db.oracle.timestamp.load(Ordering::SeqCst);
 	// Publish the chosen snapshot into the slot
 	slot.commit.store(commit, Ordering::SeqCst);
-	slot.version.store(version, Ordering::SeqCst);
+	snapshot.store(version, Ordering::SeqCst);
 	// Return the snapshot
 	(commit, version)
 }
 
 impl TransactionInner {
 	/// Create a new read-only or writeable transaction
-	pub(crate) fn new(db: Arc<Inner>, write: bool) -> Self {
+	pub(crate) fn new(db: Arc<Inner>, write: bool, access: Access) -> Self {
 		// Register this transaction's slot and pin it
 		let slot = db.readers.register();
-		let (commit, version) = pin_slot(&db, slot);
+		let (commit, version) = pin_slot(&db, slot, access);
 		// Store the threshold separately before moving db
 		let threshold = db.reset_threshold;
 		// Create the transaction
@@ -626,13 +635,13 @@ impl TransactionInner {
 	}
 
 	/// Resets an allocated read-only or writeable transaction
-	pub(crate) fn reset(&mut self, write: bool) {
+	pub(crate) fn reset(&mut self, write: bool, access: Access) {
 		// Set the default transaction isolation level
 		self.mode = IsolationLevel::SerializableSnapshotIsolation;
 		// Update the reset threshold from the database
 		self.reset_threshold = self.database.reset_threshold;
 		// Re-pin the retained slot
-		let (commit, version) = pin_slot(&self.database, self.slot);
+		let (commit, version) = pin_slot(&self.database, self.slot, access);
 		// Store the threshold for the allocated state resets
 		let threshold = self.reset_threshold;
 		// Clear transaction state. `self.write` describes whether the
@@ -970,7 +979,7 @@ impl TransactionInner {
 		// Compute the inline-GC watermark lazily only if a key actually needs
 		// version reclamation, avoiding reader map scans when newly inserting
 		// keys.
-		let mut watermark: Option<Option<u64>> = None;
+		let mut watermark: Option<Option<Watermark>> = None;
 		// Keys whose chains could not be trimmed to a single live value,
 		// collected here and tracked in one batch after the apply loop so
 		// no hash-set work happens inside a chain write-lock critical
@@ -5173,7 +5182,7 @@ mod tests {
 	fn snapshot_isolation_reader_registration_race_does_not_lose_versions() {
 		// Historic regression test for a snapshot-isolation registration
 		// race: a transaction loaded its snapshot version BEFORE becoming
-		// visible to sweepers, so a concurrently computed `cleanup_ts`
+		// visible to sweepers, so a concurrently computed watermark
 		// could miss the registering reader and sweep the versions its
 		// snapshot needed — the reader then observed `None` for a key
 		// that was committed before its snapshot.
@@ -5269,7 +5278,7 @@ mod tests {
 			 and never deleted ({nones} of {total} reads returned `None`). \
 			 This is a snapshot-isolation registration race: a transaction \
 			 chose its snapshot before its slot was visible to sweepers, \
-			 so a concurrently computed `cleanup_ts` swept the versions \
+			 so a concurrently computed watermark swept the versions \
 			 its snapshot needed. The pin-then-read slot protocol in \
 			 `pin_slot` is supposed to make this impossible."
 		);

@@ -39,9 +39,9 @@ use std::thread::JoinHandle;
 /// can never reach this value.
 pub(crate) const SLOT_PINNING: u64 = u64::MAX;
 
-/// Sentinel held in both fields of a registered slot whose transaction has
-/// no snapshot pinned, so watermark scans skip it. Guarded like
-/// [`SLOT_PINNING`].
+/// Sentinel held in every field of a registered slot whose transaction has
+/// no snapshot pinned, and in whichever snapshot field a pinned slot does
+/// not use, so watermark scans skip it. Guarded like [`SLOT_PINNING`].
 pub(crate) const SLOT_UNPINNED: u64 = u64::MAX - 1;
 
 /// Sentinel stored in a commit-queue entry's `merge_version` when the
@@ -54,20 +54,25 @@ pub(crate) const COMMIT_ABORTED: u64 = u64::MAX;
 
 /// A transaction's registration in [`Inner::readers`].
 ///
-/// A transaction registers one slot for as long as it exists. Both fields
-/// hold [`SLOT_UNPINNED`] while it has no snapshot. Pinning sets both to
-/// [`SLOT_PINNING`] BEFORE the owning transaction loads its snapshot
-/// (pin-then-read), so every watermark scan either observes the final
-/// snapshot values or the sentinel — and a sentinel forces the sweeper
-/// to treat the watermark as unknown and skip reclamation for that pass.
-/// Each field independently carries the sentinel: a sweeper can scan
-/// between the two value stores, so neither field may be interpreted
-/// before it has left the pinning state. One slot exists per live
-/// transaction and is exclusively owned by it, so state transitions are
-/// plain stores — no CAS protocol is required.
+/// A transaction registers one slot for as long as it exists. Every field
+/// holds [`SLOT_UNPINNED`] while it has no snapshot. A pinned slot
+/// publishes its snapshot merge version in `version` when its owner may
+/// read at it, or in `blind` when its owner only writes (see
+/// [`Access`]), and its snapshot commit id in `commit` either way.
+/// Pinning sets the fields it publishes to [`SLOT_PINNING`] BEFORE the
+/// owning transaction loads its snapshot (pin-then-read), so every
+/// watermark scan either observes the final snapshot values or the
+/// sentinel — and a sentinel forces the sweeper to treat the watermark as
+/// unknown and skip reclamation for that pass. Each field independently
+/// carries the sentinel: a sweeper can scan between the value stores, so
+/// no field may be interpreted before it has left the pinning state. One
+/// slot exists per live transaction and is exclusively owned by it, so
+/// state transitions are plain stores — no CAS protocol is required.
 pub(crate) struct Slot {
-	/// The owner's snapshot merge version, or `SLOT_PINNING`
+	/// The snapshot merge version its owner reads at, or `SLOT_PINNING`
 	pub(crate) version: AtomicU64,
+	/// The snapshot merge version of a blind write, or `SLOT_PINNING`
+	pub(crate) blind: AtomicU64,
 	/// The owner's snapshot commit id, or `SLOT_PINNING`
 	pub(crate) commit: AtomicU64,
 }
@@ -77,7 +82,44 @@ impl Slot {
 	pub(crate) const fn unpinned() -> Self {
 		Self {
 			version: AtomicU64::new(SLOT_UNPINNED),
+			blind: AtomicU64::new(SLOT_UNPINNED),
 			commit: AtomicU64::new(SLOT_UNPINNED),
+		}
+	}
+}
+
+/// How a transaction uses the snapshot it pins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Access {
+	/// The transaction may read at its snapshot, so its snapshot bounds
+	/// every form of version reclamation.
+	Read,
+	/// The transaction only writes, reading nothing at its snapshot. Its
+	/// snapshot bounds the unlinking of deleted keys, since its own write
+	/// is still to be applied, but never the trimming of versions that a
+	/// newer version supersedes.
+	Blind,
+}
+
+/// The bounds below which garbage collection may reclaim versions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Watermark {
+	/// No transaction reads below this version, so any version superseded
+	/// at or below it can be dropped, keeping only the one visible here.
+	pub(crate) trim: u64,
+	/// No transaction at all is pinned below this version, so every write
+	/// with a merge version at or below it has been applied, and a delete
+	/// visible here can be unlinked along with its key. Never above `trim`.
+	pub(crate) unlink: u64,
+}
+
+impl Watermark {
+	/// A watermark that trims and unlinks at the same version.
+	#[cfg(test)]
+	pub(crate) const fn at(version: u64) -> Self {
+		Self {
+			trim: version,
+			unlink: version,
 		}
 	}
 }
@@ -171,14 +213,6 @@ impl Inner {
 }
 
 impl Inner {
-	/// Returns the minimum snapshot merge version across all pinned
-	/// transaction slots, bounded by `fallback`, or `None` when any slot
-	/// is mid-registration. See [`earliest_pinned`].
-	#[inline]
-	pub(crate) fn earliest_active_version(&self, fallback: u64) -> Option<u64> {
-		self.readers.earliest_pinned(|s| &s.version, fallback, None)
-	}
-
 	/// Returns the minimum snapshot commit id across all pinned
 	/// transaction slots, bounded by `fallback`, or `None` when any slot
 	/// is mid-registration. See [`earliest_pinned`].
@@ -221,20 +255,22 @@ impl Inner {
 	/// reads can occur at its snapshot. Excluding ANY other slot is
 	/// forbidden — in particular a concurrent committer's slot (pinned at
 	/// its start version, strictly below its merge version) is what
-	/// prevents a delete-collapse from unlinking a chain that a slower
-	/// committer is still about to push an earlier version into, which
-	/// would otherwise resurrect deleted data through the
-	/// `get_or_insert_with` re-seed path.
-	pub(crate) fn inline_gc_watermark(&self, own_slot: usize) -> Option<u64> {
+	/// bounds [`Watermark::unlink`], preventing a delete-collapse from
+	/// unlinking a chain that a slower committer is still about to push
+	/// an earlier version into, which would otherwise resurrect deleted
+	/// data through the `get_or_insert_with` re-seed path. A blind
+	/// write's slot bounds only that, so concurrent blind writes leave
+	/// [`Watermark::trim`] free to drop the version each write supersedes.
+	pub(crate) fn inline_gc_watermark(&self, own_slot: usize) -> Option<Watermark> {
 		// Load the clock bound before the fence-and-scan
 		let now = self.oracle.timestamp.load(Ordering::SeqCst);
 		// Bound by every other registered transaction
-		self.readers.earliest_pinned(|s| &s.version, now, Some(own_slot))
+		self.readers.watermark(now, Some(own_slot))
 	}
 
-	/// Compute the next `cleanup_ts` below which no live or future
-	/// transaction can observe a version, or `None` when registrations
-	/// are in flight and the watermark cannot be established.
+	/// Compute the watermark for background garbage collection, bounded by
+	/// every registered transaction, or `None` when registrations are in
+	/// flight and the watermark cannot be established.
 	///
 	/// The proposed value is bounded by the published logical clock,
 	/// loaded BEFORE the fence-and-scan over the slots: a transaction
@@ -243,7 +279,7 @@ impl Inner {
 	/// reclamation always retains the entry visible at the watermark.
 	/// A bounded number of retries absorbs the nanosecond-scale window
 	/// in which a registering transaction is still pinning.
-	pub(crate) fn compute_cleanup_ts(&self) -> Option<u64> {
+	pub(crate) fn gc_watermark(&self) -> Option<Watermark> {
 		// Retire applied merge-queue entries to free memory before computing
 		// the cleanup bound. Clock advancement is handled continuously by
 		// TransactionInner::atomic_merge.
@@ -252,9 +288,9 @@ impl Inner {
 		for _ in 0..3 {
 			// Load the clock bound before the fence-and-scan
 			let now = self.oracle.timestamp.load(Ordering::SeqCst);
-			// Bound by the earliest registered transaction, if any
-			if let Some(earliest) = self.earliest_active_version(now) {
-				return Some(earliest.min(now));
+			// Bound by the earliest registered transactions, if any
+			if let Some(watermark) = self.readers.watermark(now, None) {
+				return Some(watermark);
 			}
 			// A registration is mid-pin; give it a beat and retry
 			std::hint::spin_loop();
@@ -389,7 +425,7 @@ impl Inner {
 		clippy::significant_drop_tightening,
 		reason = "the version write guard must cover entry.remove() so a committer blocked on it observes is_removed() and re-inserts"
 	)]
-	pub(crate) fn run_gc_tracked(&self, cleanup_ts: u64) {
+	pub(crate) fn run_gc_tracked(&self, watermark: Watermark) {
 		// Untrack every candidate first — see the ordering argument above.
 		// Keys tracked by commits racing with this sweep are picked up by
 		// the next pass.
@@ -419,7 +455,7 @@ impl Inner {
 			}
 			// Clean up unnecessary older versions
 			let (remaining, needs_gc) =
-				versions.update(|v| (v.gc_older_versions(cleanup_ts), v.needs_gc()));
+				versions.update(|v| (v.gc_older_versions(watermark), v.needs_gc()));
 			if remaining == 0 {
 				// Remove the entry while still holding the version write
 				// lock — see the equivalent removal in `run_gc_full`.
@@ -447,7 +483,7 @@ impl Inner {
 		clippy::significant_drop_tightening,
 		reason = "the version write guard must cover entry.remove() so a committer blocked on it observes is_removed() and re-inserts"
 	)]
-	pub(crate) fn run_gc_full(&self, cleanup_ts: u64) {
+	pub(crate) fn run_gc_full(&self, watermark: Watermark) {
 		// Keys whose garbage a reader watermark still pins
 		let mut retrack = Vec::new();
 		// Iterate over the entire datastore
@@ -458,7 +494,7 @@ impl Inner {
 			let mut versions = entry.value().lock();
 			// Clean up unnecessary older versions
 			let (remaining, needs_gc) =
-				versions.update(|v| (v.gc_older_versions(cleanup_ts), v.needs_gc()));
+				versions.update(|v| (v.gc_older_versions(watermark), v.needs_gc()));
 			if remaining == 0 {
 				// Remove the entry while still holding the version write lock,
 				// so a committer blocked on that lock observes `is_removed()`

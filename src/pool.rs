@@ -14,7 +14,7 @@
 
 //! This module stores the transaction pool for database transactions.
 
-use crate::inner::Inner;
+use crate::inner::{Access, Inner};
 use crate::tx::Transaction;
 use crate::TransactionInner;
 use crossbeam_queue::ArrayQueue;
@@ -45,14 +45,14 @@ impl Pool {
 		let _ = self.pool.push(inner);
 	}
 
-	/// Get a new transaction from the pool
-	pub(crate) fn get(self: &Arc<Self>, write: bool) -> Transaction {
+	/// Get a new transaction from the pool, pinned for `access`
+	pub(crate) fn get(self: &Arc<Self>, write: bool, access: Access) -> Transaction {
 		// Fetch a new or pooled inner transaction
 		let inner = if let Some(mut tx) = self.pool.pop() {
-			tx.reset(write);
+			tx.reset(write, access);
 			tx
 		} else {
-			TransactionInner::new(Arc::clone(&self.inner), write)
+			TransactionInner::new(Arc::clone(&self.inner), write, access)
 		};
 		// Return a new enclosing transaction
 		Transaction {

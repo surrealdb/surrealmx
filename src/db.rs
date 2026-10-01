@@ -15,7 +15,7 @@
 //! This module stores the core in-memory database type.
 
 use crate::err::Error;
-use crate::inner::Inner;
+use crate::inner::{Access, Inner};
 use crate::kv::IntoBytes;
 use crate::options::DatabaseOptions;
 #[cfg(not(target_arch = "wasm32"))]
@@ -159,7 +159,7 @@ impl Database {
 
 	/// Start a new transaction on this database
 	pub fn transaction(&self, write: bool) -> Transaction {
-		self.pool.get(write)
+		self.pool.get(write, Access::Read)
 	}
 
 	/// Fetch a key directly from the database without allocating a transaction.
@@ -547,13 +547,18 @@ impl Database {
 	/// against concurrent commits (or first-committer-wins is lost). With no
 	/// reads to invalidate, any snapshot is as good as another, so a
 	/// conflict is always safe to retry.
+	///
+	/// The transaction is pinned as a blind write, so that concurrent
+	/// commits can still drop the versions they supersede. `write` must
+	/// therefore only write: a read in it would see a snapshot that garbage
+	/// collection does not preserve.
 	fn blind_write(
 		&self,
 		write: impl Fn(&mut Transaction) -> Result<(), Error>,
 	) -> Result<(), Error> {
 		let mut spins = 0;
 		loop {
-			let mut tx = self.transaction(true);
+			let mut tx = self.pool.get(true, Access::Blind);
 			write(&mut tx)?;
 			match tx.commit() {
 				Err(Error::KeyWriteConflict) => {
@@ -615,11 +620,11 @@ impl Database {
 	/// which have no background threads.
 	pub fn run_gc(&self) {
 		// Skip the pass entirely when registrations are in flight
-		if let Some(cleanup_ts) = self.compute_cleanup_ts() {
+		if let Some(watermark) = self.gc_watermark() {
 			// The full scan visits every candidate anyway
 			self.gc_candidates.clear();
 			// Perform a full datastore scan for stale versions
-			self.run_gc_full(cleanup_ts);
+			self.run_gc_full(watermark);
 		}
 	}
 
@@ -643,9 +648,9 @@ impl Database {
 			return;
 		}
 		// Skip the pass entirely when registrations are in flight
-		if let Some(cleanup_ts) = self.compute_cleanup_ts() {
+		if let Some(watermark) = self.gc_watermark() {
 			// Sweep only the tracked candidate keys
-			self.inner.run_gc_tracked(cleanup_ts);
+			self.inner.run_gc_tracked(watermark);
 		}
 	}
 
@@ -755,17 +760,17 @@ impl Database {
 					if db.gc_candidates.is_empty() {
 						continue;
 					}
-					// Compute the next cleanup_ts by scanning the slot
+					// Compute the next watermark by scanning the slot
 					// map: any transaction registering concurrently is
 					// either visible to the scan (and bounds the final
-					// cleanup_ts) or pins after it (and takes a snapshot
+					// watermark) or pins after it (and takes a snapshot
 					// at or above the clock bound). A pass is skipped
 					// entirely while a registration is pinning.
-					let Some(cleanup_ts) = db.compute_cleanup_ts() else {
+					let Some(watermark) = db.gc_watermark() else {
 						continue;
 					};
 					// Sweep only the tracked candidate keys.
-					db.run_gc_tracked(cleanup_ts);
+					db.run_gc_tracked(watermark);
 				}
 			});
 			// Store and track the thread handle
@@ -1880,13 +1885,13 @@ mod tests {
 		db.readers.slot(index).version.store(SLOT_PINNING, Ordering::SeqCst);
 		db.readers.slot(index).commit.store(SLOT_PINNING, Ordering::SeqCst);
 		// Every sweep must treat the watermark as unknown and skip
-		assert_eq!(db.compute_cleanup_ts(), None);
+		assert_eq!(db.gc_watermark(), None);
 		let before = db.unretired_commits();
 		db.run_cleanup();
 		assert_eq!(db.unretired_commits(), before);
 		// Release the pinning slot; sweeps proceed again
 		db.readers.release(index);
-		assert!(db.compute_cleanup_ts().is_some());
+		assert!(db.gc_watermark().is_some());
 		db.run_cleanup();
 		assert_eq!(db.unretired_commits(), 1);
 	}
@@ -2012,6 +2017,58 @@ mod tests {
 			db.datastore.get(b"key".as_slice()).is_none(),
 			"a delete with no readers should unlink the node at commit"
 		);
+	}
+
+	#[test]
+	fn inline_gc_trims_under_concurrent_blind_writes() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		let chain = |db: &Database| {
+			let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+			entry.value().read(|v| v.as_slice().to_vec())
+		};
+		db.set("key", "v0").unwrap();
+		// A blind write in flight reads nothing, so it does not keep the
+		// version that the next write supersedes
+		let blind = db.pool.get(true, Access::Blind);
+		db.set("key", "v1").unwrap();
+		let versions = chain(&db);
+		assert_eq!(versions.len(), 1, "a blind write should not retain superseded versions");
+		assert_eq!(versions[0].value.as_deref(), Some(b"v1" as &[u8]));
+		assert!(!db.gc_candidates.contains(b"key".as_slice()));
+		// A transaction that may read still does
+		let writer = db.transaction(true);
+		db.set("key", "v2").unwrap();
+		assert_eq!(chain(&db).len(), 2, "a transaction that reads should retain history");
+		assert!(db.gc_candidates.contains(b"key".as_slice()));
+		drop(writer);
+		drop(blind);
+	}
+
+	#[test]
+	fn blind_writes_hold_back_unlinking_deletes() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		db.set("key", "value").unwrap();
+		// A blind write in flight may still apply below the delete, so the
+		// delete drops the value beneath it but keeps the key linked
+		let blind = db.pool.get(true, Access::Blind);
+		db.del("key").unwrap();
+		{
+			let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+			let chain = entry.value().read(|v| v.as_slice().to_vec());
+			assert_eq!(chain.len(), 1, "the delete should trim the value beneath it");
+			assert_eq!(chain[0].value, None);
+		}
+		assert!(db.gc_candidates.contains(b"key".as_slice()));
+		assert_eq!(db.get("key").unwrap(), None);
+		// Once the blind write is done, the sweep unlinks the key
+		drop(blind);
+		db.run_gc_tracked();
+		assert!(db.datastore.get(b"key".as_slice()).is_none());
+		assert!(!db.gc_candidates.contains(b"key".as_slice()));
 	}
 
 	#[test]
