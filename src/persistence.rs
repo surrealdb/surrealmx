@@ -663,8 +663,8 @@ impl Persistence {
 		// visit the ones on keys that are never written again. This runs
 		// before any transaction exists, so the cleanup bound is simply
 		// the seeded clock and every chain trims to its latest version.
-		if let Some(cleanup_ts) = self.inner.compute_cleanup_ts() {
-			self.inner.run_gc_full(cleanup_ts);
+		if let Some(watermark) = self.inner.gc_watermark() {
+			self.inner.run_gc_full(watermark);
 		}
 		// Return success
 		Ok(())

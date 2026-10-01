@@ -206,7 +206,7 @@ impl WatermarkScanScenario {
 
 	/// Perform one inline-GC watermark computation, exactly as a commit
 	/// does after publishing its merge version.
-	pub fn scan(&self) -> Option<u64> {
-		self.db.inline_gc_watermark(self.own_slot)
+	pub fn scan(&self) -> Option<(u64, u64)> {
+		self.db.inline_gc_watermark(self.own_slot).map(|w| (w.trim, w.unlink))
 	}
 }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::inner::Watermark;
 use crate::version::Version;
 use byteslice::ByteSlice;
 use thin_vec::{thin_vec, ThinVec};
@@ -289,30 +290,28 @@ impl Versions {
 		}
 	}
 
-	/// Remove versions that no reader at a snapshot `>= version` can observe.
+	/// Remove versions that no reader at a snapshot `>= watermark.trim` can
+	/// observe, and the delete visible there too once it is at or below
+	/// `watermark.unlink`, returning the number of versions that remain.
 	#[inline]
-	pub(crate) fn gc_older_versions(&mut self, version: u64) -> usize {
+	pub(crate) fn gc_older_versions(&mut self, watermark: Watermark) -> usize {
 		match self {
 			Self::Empty => 0,
 			Self::Single(ref v) => {
-				if v.version <= version {
-					if v.value.is_none() {
-						*self = Self::Empty;
-						0
-					} else {
-						1
-					}
+				if v.value.is_none() && v.version <= watermark.unlink {
+					*self = Self::Empty;
+					0
 				} else {
 					1
 				}
 			}
 			Self::Chain(ref mut chain) => {
-				let lte = chain.partition_point(|v| v.version <= version);
+				let lte = chain.partition_point(|v| v.version <= watermark.trim);
 				if lte == 0 {
 					return chain.len();
 				}
 				let visible = lte - 1;
-				if chain[visible].value.is_none() {
+				if chain[visible].value.is_none() && chain[visible].version <= watermark.unlink {
 					chain.drain(..lte);
 				} else {
 					chain.drain(..visible);
@@ -415,7 +414,7 @@ mod tests {
 	#[test]
 	fn test_gc_keeps_version_visible_at_floor() {
 		let mut v = make_versions(vec![(10, Some("v1")), (40, None)]);
-		v.gc_older_versions(30);
+		v.gc_older_versions(Watermark::at(30));
 		assert_eq!(v.fetch_version(30), Some(ByteSlice::from("v1")));
 		assert_eq!(v.fetch_version(35), Some(ByteSlice::from("v1")));
 		assert_eq!(v.fetch_version(40), None);
@@ -424,7 +423,7 @@ mod tests {
 	#[test]
 	fn test_gc_keeps_value_before_newer_version_in_gap() {
 		let mut v = make_versions(vec![(10, Some("v1")), (50, Some("v2"))]);
-		v.gc_older_versions(30);
+		v.gc_older_versions(Watermark::at(30));
 		assert_eq!(v.fetch_version(30), Some(ByteSlice::from("v1")));
 		assert_eq!(v.fetch_version(49), Some(ByteSlice::from("v1")));
 		assert_eq!(v.fetch_version(50), Some(ByteSlice::from("v2")));
@@ -433,7 +432,7 @@ mod tests {
 	#[test]
 	fn test_gc_drops_versions_below_visible() {
 		let mut v = make_versions(vec![(10, Some("v1")), (30, Some("v2"))]);
-		assert_eq!(v.gc_older_versions(30), 1);
+		assert_eq!(v.gc_older_versions(Watermark::at(30)), 1);
 		assert_eq!(v.fetch_version(30), Some(ByteSlice::from("v2")));
 		assert_eq!(v.fetch_version(35), Some(ByteSlice::from("v2")));
 	}
@@ -441,14 +440,52 @@ mod tests {
 	#[test]
 	fn test_gc_collapses_fully_deleted_key() {
 		let mut v = make_versions(vec![(10, Some("v1")), (30, None)]);
-		assert_eq!(v.gc_older_versions(40), 0);
+		assert_eq!(v.gc_older_versions(Watermark::at(40)), 0);
 		assert_eq!(v.fetch_version(40), None);
+	}
+
+	#[test]
+	fn test_gc_keeps_delete_above_unlink_floor() {
+		let watermark = Watermark {
+			trim: 40,
+			unlink: 20,
+		};
+		// The delete is visible at the trim floor, so the value below it goes,
+		// but a write below the delete may still be applied, so it stays
+		let mut v = make_versions(vec![(10, Some("v1")), (30, None)]);
+		assert_eq!(v.gc_older_versions(watermark), 1);
+		assert_eq!(v, Versions::Single(make_version(30, None)));
+		assert!(v.needs_gc());
+		assert_eq!(v.gc_older_versions(watermark), 1);
+		// The same holds for a delete that a newer version supersedes
+		let mut v = make_versions(vec![(10, Some("v1")), (30, None), (50, Some("v2"))]);
+		assert_eq!(v.gc_older_versions(watermark), 2);
+		assert_eq!(v.fetch_version(35), None);
+		assert_eq!(v.fetch_version(50), Some(ByteSlice::from("v2")));
+		// Once the unlink floor passes the delete, it goes as well
+		let watermark = Watermark::at(40);
+		let mut v = make_versions(vec![(10, Some("v1")), (30, None)]);
+		assert_eq!(v.gc_older_versions(watermark), 0);
+		let mut v = make_versions(vec![(10, Some("v1")), (30, None), (50, Some("v2"))]);
+		assert_eq!(v.gc_older_versions(watermark), 1);
+		assert_eq!(v.fetch_version(50), Some(ByteSlice::from("v2")));
+	}
+
+	#[test]
+	fn test_gc_trims_values_regardless_of_unlink_floor() {
+		let mut v = make_versions(vec![(10, Some("v1")), (30, Some("v2"))]);
+		let watermark = Watermark {
+			trim: 30,
+			unlink: 5,
+		};
+		assert_eq!(v.gc_older_versions(watermark), 1);
+		assert_eq!(v, Versions::Single(make_version(30, Some("v2"))));
 	}
 
 	#[test]
 	fn test_gc_retains_all_when_floor_below_everything() {
 		let mut v = make_versions(vec![(10, Some("v1")), (20, Some("v2"))]);
-		assert_eq!(v.gc_older_versions(5), 2);
+		assert_eq!(v.gc_older_versions(Watermark::at(5)), 2);
 		assert_eq!(v.fetch_version(10), Some(ByteSlice::from("v1")));
 		assert_eq!(v.fetch_version(20), Some(ByteSlice::from("v2")));
 	}
@@ -840,10 +877,10 @@ mod tests {
 		// reader's clock value, leaving only newer versions
 		let mut versions =
 			make_versions(vec![(10, Some("v1")), (20, Some("v2")), (30, Some("v3"))]);
-		versions.gc_older_versions(20);
+		versions.gc_older_versions(Watermark::at(20));
 		assert!(versions.fetch_version(15).is_none());
 		assert_eq!(versions.fetch_unpinned(15).map(|v| v.version), Some(20));
-		versions.gc_older_versions(30);
+		versions.gc_older_versions(Watermark::at(30));
 		assert!(versions.fetch_version(15).is_none());
 		assert_eq!(versions.fetch_unpinned(15).map(|v| v.version), Some(30));
 		assert!(Versions::new().fetch_unpinned(15).is_none());

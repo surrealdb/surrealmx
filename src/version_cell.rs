@@ -101,6 +101,7 @@ impl ChainWriter<'_> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::inner::Watermark;
 	use crate::version::Version;
 	use byteslice::ByteSlice;
 
@@ -132,7 +133,7 @@ mod tests {
 		// Collecting every version empties the chain
 		cell.lock().update(|v| {
 			v.push(version(3, None));
-			v.gc_older_versions(3)
+			v.gc_older_versions(Watermark::at(3))
 		});
 		assert_eq!(cell.read(Versions::len), 0);
 	}

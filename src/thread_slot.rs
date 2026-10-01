@@ -23,7 +23,7 @@
 //! another scan's callback, gets no snapshot here and falls back to a read
 //! transaction.
 
-use crate::inner::Inner;
+use crate::inner::{Access, Inner};
 use crate::tx::pin_slot;
 use std::cell::RefCell;
 use std::sync::{Arc, Weak};
@@ -98,7 +98,7 @@ impl<'a> ThreadSnapshot<'a> {
 				Some(entry.slot)
 			})
 			.ok()??;
-		let (_, version) = pin_slot(inner, slot);
+		let (_, version) = pin_slot(inner, slot, Access::Read);
 		Some(Self {
 			inner,
 			slot,
