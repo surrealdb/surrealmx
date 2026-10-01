@@ -14,6 +14,7 @@
 
 //! This module stores the core in-memory database type.
 
+use crate::direction::Direction;
 use crate::err::Error;
 use crate::inner::Inner;
 use crate::kv::IntoBytes;
@@ -24,6 +25,7 @@ use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
 use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
+use crate::scan::scan_datastore;
 use crate::thread_slot::ThreadSnapshot;
 use crate::tx::Transaction;
 use byteslice::ByteSlice;
@@ -275,35 +277,38 @@ impl Database {
 			return self.transaction(false).scan_with(beg..end, skip, limit, f);
 		};
 		let version = snapshot.version();
-		// One epoch pin covers every version read in the scan
-		let _pin = crate::sync::pin();
 		let mut count = 0;
 		let mut skip = skip.unwrap_or_default();
-		let datastore_range =
-			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
-		for entry in datastore_range {
-			let matched = entry.value().read(|v| {
-				v.with_version(version, |bytes| {
-					if skip > 0 {
-						skip -= 1;
-						true
-					} else {
-						count += 1;
-						f(entry.key(), bytes)
+		scan_datastore(
+			&self.inner.datastore,
+			Bound::Included(beg),
+			Bound::Excluded(end),
+			Direction::Forward,
+			|entry| {
+				let matched = entry.value().read(|v| {
+					v.with_version(version, |bytes| {
+						if skip > 0 {
+							skip -= 1;
+							true
+						} else {
+							count += 1;
+							f(entry.key(), bytes)
+						}
+					})
+				});
+				if let Some(continue_iter) = matched {
+					if !continue_iter {
+						return false;
 					}
-				})
-			});
-			if let Some(continue_iter) = matched {
-				if !continue_iter {
-					break;
 				}
-			}
-			if let Some(l) = limit {
-				if count >= l {
-					break;
+				if let Some(l) = limit {
+					if count >= l {
+						return false;
+					}
 				}
-			}
-		}
+				true
+			},
+		);
 		Ok(count)
 	}
 
@@ -332,31 +337,34 @@ impl Database {
 			return self.transaction(false).keys_for_each(beg..end, skip, limit, f);
 		};
 		let version = snapshot.version();
-		// One epoch pin covers every version read in the scan
-		let _pin = crate::sync::pin();
 		let mut count = 0;
 		let mut skip = skip.unwrap_or_default();
-		let datastore_range =
-			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
-		for entry in datastore_range {
-			let exists = entry.value().read(|v| v.exists_version(version));
-			if !exists {
-				continue;
-			}
-			if skip > 0 {
-				skip -= 1;
-				continue;
-			}
-			count += 1;
-			if !f(entry.key()) {
-				break;
-			}
-			if let Some(l) = limit {
-				if count >= l {
-					break;
+		scan_datastore(
+			&self.inner.datastore,
+			Bound::Included(beg),
+			Bound::Excluded(end),
+			Direction::Forward,
+			|entry| {
+				let exists = entry.value().read(|v| v.exists_version(version));
+				if !exists {
+					return true;
 				}
-			}
-		}
+				if skip > 0 {
+					skip -= 1;
+					return true;
+				}
+				count += 1;
+				if !f(entry.key()) {
+					return false;
+				}
+				if let Some(l) = limit {
+					if count >= l {
+						return false;
+					}
+				}
+				true
+			},
+		);
 		Ok(count)
 	}
 
@@ -382,28 +390,31 @@ impl Database {
 			return self.transaction(false).total(beg..end, skip, limit);
 		};
 		let version = snapshot.version();
-		// One epoch pin covers every version read in the scan
-		let _pin = crate::sync::pin();
 		let mut count = 0;
 		let mut skip = skip.unwrap_or_default();
-		let datastore_range =
-			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
-		for entry in datastore_range {
-			let exists = entry.value().read(|v| v.exists_version(version));
-			if !exists {
-				continue;
-			}
-			if skip > 0 {
-				skip -= 1;
-				continue;
-			}
-			count += 1;
-			if let Some(l) = limit {
-				if count >= l {
-					break;
+		scan_datastore(
+			&self.inner.datastore,
+			Bound::Included(beg),
+			Bound::Excluded(end),
+			Direction::Forward,
+			|entry| {
+				let exists = entry.value().read(|v| v.exists_version(version));
+				if !exists {
+					return true;
 				}
-			}
-		}
+				if skip > 0 {
+					skip -= 1;
+					return true;
+				}
+				count += 1;
+				if let Some(l) = limit {
+					if count >= l {
+						return false;
+					}
+				}
+				true
+			},
+		);
 		Ok(count)
 	}
 
