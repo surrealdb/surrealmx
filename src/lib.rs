@@ -49,6 +49,7 @@ mod sync;
 mod thread_slot;
 mod tx;
 mod version;
+mod version_cell;
 mod versions;
 
 #[doc(hidden)]

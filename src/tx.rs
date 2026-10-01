@@ -25,8 +25,8 @@ use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::ring::SlotRead;
 use crate::sync::backoff;
-use crate::sync::RwLock;
 use crate::version::Version;
+use crate::version_cell::VersionCell;
 use crate::versions::Versions;
 use byteslice::ByteSlice;
 use papaya::HashSet;
@@ -978,6 +978,8 @@ impl TransactionInner {
 		let mut tracked: Vec<ByteSlice> = Vec::new();
 		// Apply each writeset entry, reclaiming superseded versions
 		// inline while the chain write lock is already held.
+		// One epoch pin covers every chain read and replacement below
+		let _pin = crate::sync::pin();
 		for (key, value) in entry.writeset.iter() {
 			// Clone the value for insertion
 			let value = value.clone();
@@ -993,44 +995,41 @@ impl TransactionInner {
 			// immediately-gc-reclaimable node mid-insert.
 			loop {
 				let entry = self.database.datastore.get_or_insert_with(key.clone(), || {
-					RwLock::new(Versions::from(Version {
+					VersionCell::new(Versions::from(Version {
 						version,
 						value: value.clone(),
 					}))
 				});
-				let mut versions = entry.value().write();
+				let mut versions = entry.value().lock();
 				// A sweep unlinked this node between lookup and lock; retry
 				// onto a fresh one rather than writing into a detached node.
 				if entry.is_removed() {
 					continue;
 				}
 				// Check if the node was just seeded with this version
-				let is_new_insert =
-					matches!(*versions, Versions::Single(ref v) if v.version == version);
+				let is_new_insert = versions
+					.read(|v| matches!(*v, Versions::Single(ref v) if v.version == version));
 				if !is_new_insert {
-					// An update or insert into an existing chain
-					versions.push(Version {
-						version,
-						value,
-					});
 					// Compute the inline-GC watermark lazily on demand
 					let w = *watermark
 						.get_or_insert_with(|| self.database.inline_gc_watermark(self.slot));
-					match w {
-						Some(w) => {
-							if versions.gc_older_versions(w) == 0 {
-								entry.remove();
-							} else if versions.needs_gc() {
-								tracked.push(key.clone());
-							}
-						}
-						None => {
-							if versions.needs_gc() {
-								tracked.push(key.clone());
-							}
-						}
+					// An update or insert into an existing chain, reclaiming
+					// superseded versions in the same replacement
+					let (remaining, needs_gc) = versions.update(|v| {
+						v.push(Version {
+							version,
+							value,
+						});
+						(w.map(|w| v.gc_older_versions(w)), v.needs_gc())
+					});
+					if remaining == Some(0) {
+						entry.remove();
+					} else if needs_gc {
+						tracked.push(key.clone());
 					}
 				}
+				// Release the chain only after any removal above
+				drop(versions);
 				break;
 			}
 		}
@@ -1560,6 +1559,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		let mut count = 0;
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
@@ -1576,8 +1577,8 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
 			for entry in datastore_range {
-				let matched = match entry.value().try_read() {
-					Some(g) => g.with_version(self.version, |bytes| {
+				let matched = entry.value().read(|v| {
+					v.with_version(self.version, |bytes| {
 						if skip > 0 {
 							skip -= 1;
 							true
@@ -1585,17 +1586,8 @@ impl TransactionInner {
 							count += 1;
 							f(entry.key(), bytes)
 						}
-					}),
-					None => entry.value().read().with_version(self.version, |bytes| {
-						if skip > 0 {
-							skip -= 1;
-							true
-						} else {
-							count += 1;
-							f(entry.key(), bytes)
-						}
-					}),
-				};
+					})
+				});
 				if let Some(continue_iter) = matched {
 					if !continue_iter {
 						break;
@@ -1629,6 +1621,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Initialise the entry counter
 		let mut count = 0;
 		// Compute the range
@@ -1651,10 +1645,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
 			for entry in datastore_range {
-				let value = match entry.value().try_read() {
-					Some(g) => g.fetch_version(self.version),
-					None => entry.value().read().fetch_version(self.version),
-				};
+				let value = entry.value().read(|v| v.fetch_version(self.version));
 				let Some(value) = value else {
 					continue;
 				};
@@ -1725,6 +1716,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Initialise the entry counter
 		let mut count = 0;
 		// Compute the range
@@ -1747,10 +1740,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
 			for entry in datastore_range {
-				let exists = match entry.value().try_read() {
-					Some(g) => g.exists_version(self.version),
-					None => entry.value().read().exists_version(self.version),
-				};
+				let exists = entry.value().read(|v| v.exists_version(self.version));
 				if !exists {
 					continue;
 				}
@@ -1821,6 +1811,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Compute the range
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
@@ -1841,10 +1833,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
 			for entry in datastore_range {
-				let value = match entry.value().try_read() {
-					Some(g) => g.fetch_version(self.version),
-					None => entry.value().read().fetch_version(self.version),
-				};
+				let value = entry.value().read(|v| v.fetch_version(self.version));
 				let Some(value) = value else {
 					continue;
 				};
@@ -1909,6 +1898,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Compute the range
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
@@ -1929,10 +1920,7 @@ impl TransactionInner {
 				.datastore
 				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
 			for entry in datastore_range {
-				let exists = match entry.value().try_read() {
-					Some(g) => g.exists_version(self.version),
-					None => entry.value().read().exists_version(self.version),
-				};
+				let exists = entry.value().read(|v| v.exists_version(self.version));
 				if !exists {
 					continue;
 				}
@@ -2054,6 +2042,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Prepare result count
 		let mut res = 0;
 		// Compute the range
@@ -2082,10 +2072,7 @@ impl TransactionInner {
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
 					for entry in $iter {
-						let exists = match entry.value().try_read() {
-							Some(g) => g.exists_version(version),
-							None => entry.value().read().exists_version(version),
-						};
+						let exists = entry.value().read(|v| v.exists_version(version));
 						if !exists {
 							continue;
 						}
@@ -2152,6 +2139,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Prepare result vector
 		let mut res = match limit {
 			Some(l) => Vec::with_capacity(l.min(10_000)),
@@ -2184,10 +2173,7 @@ impl TransactionInner {
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
 					for entry in $iter {
-						let exists = match entry.value().try_read() {
-							Some(g) => g.exists_version(version),
-							None => entry.value().read().exists_version(version),
-						};
+						let exists = entry.value().read(|v| v.exists_version(version));
 						if !exists {
 							continue;
 						}
@@ -2254,6 +2240,8 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
 		// Prepare result vector
 		let mut res = match limit {
 			Some(l) => Vec::with_capacity(l.min(10_000)),
@@ -2287,10 +2275,7 @@ impl TransactionInner {
 			macro_rules! consume_fast_path {
 				($iter:expr) => {
 					for entry in $iter {
-						let value = match entry.value().try_read() {
-							Some(g) => g.fetch_version(version),
-							None => entry.value().read().fetch_version(version),
-						};
+						let value = entry.value().read(|v| v.fetch_version(version));
 						let Some(value) = value else {
 							continue;
 						};
@@ -2432,10 +2417,10 @@ impl TransactionInner {
 		// Check the key in the datastore using ByteSlice::cmp with 4-byte
 		// prefix acceleration
 		ByteSlice::with_borrowed(key, |k| {
-			self.database.datastore.get(k).and_then(|e| match e.value().try_read() {
-				Some(guard) => guard.fetch_version(version),
-				None => e.value().read().fetch_version(version),
-			})
+			self.database
+				.datastore
+				.get(k)
+				.and_then(|e| e.value().read(|v| v.fetch_version(version)))
 		})
 	}
 
@@ -2460,10 +2445,10 @@ impl TransactionInner {
 		}
 		let f = f?;
 		ByteSlice::with_borrowed(key, |k| {
-			self.database.datastore.get(k).and_then(|e| match e.value().try_read() {
-				Some(guard) => guard.with_version(version, f),
-				None => e.value().read().with_version(version, f),
-			})
+			self.database
+				.datastore
+				.get(k)
+				.and_then(|e| e.value().read(|v| v.with_version(version, f)))
 		})
 	}
 
@@ -2495,10 +2480,7 @@ impl TransactionInner {
 			self.database
 				.datastore
 				.get(k)
-				.map(|e| match e.value().try_read() {
-					Some(guard) => guard.exists_version(version),
-					None => e.value().read().exists_version(version),
-				})
+				.map(|e| e.value().read(|v| v.exists_version(version)))
 				.is_some_and(|v| v)
 		})
 	}
@@ -2538,10 +2520,7 @@ impl TransactionInner {
 				self.database
 					.datastore
 					.get(k)
-					.and_then(|e| match e.value().try_read() {
-						Some(guard) => guard.fetch_version(version),
-						None => e.value().read().fetch_version(version),
-					})
+					.and_then(|e| e.value().read(|v| v.fetch_version(version)))
 					.as_ref(),
 			) {
 				(Some(x), Some(y)) => x.as_slice() == y.as_slice(),
@@ -5350,7 +5329,7 @@ mod tests {
 		}
 		// Inspect the raw version chain directly.
 		let entry = db.datastore.get(b"hotkey".as_slice()).expect("hotkey entry missing");
-		let chain = entry.value().read().as_slice().to_vec();
+		let chain = entry.value().read(|v| v.as_slice().to_vec());
 		// Versions are strictly increasing: every commit is minted a unique
 		// version, and every written value is unique, so no push dedups.
 		for w in chain.windows(2) {
@@ -5403,7 +5382,7 @@ mod tests {
 		for i in 0..200 {
 			let key = format!("doc:{i:010}").into_bytes();
 			let entry = db.datastore.get(key.as_slice()).expect("doc entry missing");
-			let chain = entry.value().read().as_slice().to_vec();
+			let chain = entry.value().read(|v| v.as_slice().to_vec());
 			assert_eq!(chain.len(), 5, "chain should hold all five rounds");
 			for w in chain.windows(2) {
 				assert!(w[0].version < w[1].version, "versions not strictly monotonic");

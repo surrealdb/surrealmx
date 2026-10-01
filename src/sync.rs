@@ -32,7 +32,7 @@
 //! The substitutes expose the non-poisoning `parking_lot` API.
 
 #[cfg(not(any(loom, miri)))]
-pub(crate) use parking_lot::RwLock;
+pub(crate) use parking_lot::{RwLock, RwLockWriteGuard};
 
 #[cfg(not(loom))]
 pub(crate) use std::sync::atomic::AtomicU64;
@@ -41,7 +41,7 @@ pub(crate) use std::sync::atomic::AtomicU64;
 pub(crate) use loom::sync::atomic::AtomicU64;
 
 #[cfg(any(loom, miri))]
-pub(crate) use substitute::RwLock;
+pub(crate) use substitute::{RwLock, RwLockWriteGuard};
 
 #[cfg(not(loom))]
 pub(crate) use epoch_cell::ArcCell;
@@ -70,7 +70,9 @@ mod substitute {
 	use std::sync as imp;
 	#[cfg(loom)]
 	use std::sync::Arc;
-	use std::sync::{PoisonError, TryLockError};
+	use std::sync::PoisonError;
+
+	pub(crate) use imp::RwLockWriteGuard;
 
 	/// A read-write lock with the non-poisoning `parking_lot` API.
 	pub(crate) struct RwLock<T>(imp::RwLock<T>);
@@ -86,14 +88,6 @@ mod substitute {
 
 		pub(crate) fn write(&self) -> imp::RwLockWriteGuard<'_, T> {
 			self.0.write().unwrap_or_else(PoisonError::into_inner)
-		}
-
-		pub(crate) fn try_read(&self) -> Option<imp::RwLockReadGuard<'_, T>> {
-			match self.0.try_read() {
-				Ok(guard) => Some(guard),
-				Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
-				Err(TryLockError::WouldBlock) => None,
-			}
 		}
 	}
 
