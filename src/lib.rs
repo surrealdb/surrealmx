@@ -46,6 +46,7 @@ mod pool;
 mod queue;
 mod readers;
 mod ring;
+mod scan;
 mod sync;
 mod thread_slot;
 mod tx;

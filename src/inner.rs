@@ -14,6 +14,7 @@
 
 //! This module stores the inner in-memory database type.
 
+use crate::direction::Direction;
 use crate::gc_candidates::GcCandidates;
 use crate::merge_ring::{MergeRing, DEFAULT_MERGE_RING_CAPACITY};
 use crate::oracle::Oracle;
@@ -22,12 +23,14 @@ use crate::persistence::Persistence;
 use crate::queue::Commit;
 use crate::readers::Readers;
 use crate::ring::{CommitRing, DEFAULT_COMMIT_RING_CAPACITY};
+use crate::scan::{scan_datastore, REPIN_ENTRIES};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sync::RwLock;
 use crate::version_cell::VersionCell;
 use crate::DatabaseOptions;
 use byteslice::ByteSlice;
 use crossbeam_utils::CachePadded;
+use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
@@ -400,34 +403,39 @@ impl Inner {
 		// Keys whose garbage a reader watermark still pins
 		let mut retrack = Vec::new();
 		// Process each candidate key in turn
-		// One epoch pin covers every chain read and replacement below
-		let _pin = crate::sync::pin();
-		for key in keys {
-			// The chain may have been unlinked by an earlier collapse
-			let Some(entry) = self.datastore.get(&key) else {
-				continue;
-			};
-			// Lock the chain for writing. The writer is deliberately held
-			// across `entry.remove()` below: a committer blocked on this lock
-			// must observe `is_removed()` and re-insert, rather than writing
-			// into a node we are about to unlink.
-			let mut versions = entry.value().lock();
-			// A sweep or commit-time collapse unlinked this node between
-			// lookup and lock; any recreation re-tracks the key itself
-			if entry.is_removed() {
-				continue;
-			}
-			// Clean up unnecessary older versions
-			let (remaining, needs_gc) =
-				versions.update(|v| (v.gc_older_versions(cleanup_ts), v.needs_gc()));
-			if remaining == 0 {
-				// Remove the entry while still holding the version write
-				// lock — see the equivalent removal in `run_gc_full`.
-				entry.remove();
-			} else if needs_gc {
-				// Versions remain pinned by a reader watermark: re-track
-				// the key so a later sweep can finish the job.
-				retrack.push(key);
+		// Each chunk of keys has an epoch pin of its own, covering its chain
+		// reads and replacements, so a long sweep does not hold back the
+		// reclamation of what it retires
+		for chunk in keys.chunks(REPIN_ENTRIES) {
+			let _pin = crate::sync::pin();
+			for key in chunk {
+				// The chain may have been unlinked by an earlier collapse
+				let Some(entry) = self.datastore.get(key) else {
+					continue;
+				};
+				// Lock the chain for writing. The writer is deliberately held
+				// across `entry.remove()` below: a committer blocked on this
+				// lock must observe `is_removed()` and
+				// re-insert, rather than writing into a node we
+				// are about to unlink.
+				let mut versions = entry.value().lock();
+				// A sweep or commit-time collapse unlinked this node between
+				// lookup and lock; any recreation re-tracks the key itself
+				if entry.is_removed() {
+					continue;
+				}
+				// Clean up unnecessary older versions
+				let (remaining, needs_gc) =
+					versions.update(|v| (v.gc_older_versions(cleanup_ts), v.needs_gc()));
+				if remaining == 0 {
+					// Remove the entry while still holding the version write
+					// lock — see the equivalent removal in `run_gc_full`.
+					entry.remove();
+				} else if needs_gc {
+					// Versions remain pinned by a reader watermark: re-track
+					// the key so a later sweep can finish the job.
+					retrack.push(key.clone());
+				}
 			}
 		}
 		self.gc_candidates.retrack(retrack);
@@ -450,30 +458,38 @@ impl Inner {
 	pub(crate) fn run_gc_full(&self, cleanup_ts: u64) {
 		// Keys whose garbage a reader watermark still pins
 		let mut retrack = Vec::new();
-		// Iterate over the entire datastore
-		// One epoch pin covers every chain read and replacement below
-		let _pin = crate::sync::pin();
-		for entry in &self.datastore {
-			// Lock the chain for writing
-			let mut versions = entry.value().lock();
-			// Clean up unnecessary older versions
-			let (remaining, needs_gc) =
-				versions.update(|v| (v.gc_older_versions(cleanup_ts), v.needs_gc()));
-			if remaining == 0 {
-				// Remove the entry while still holding the version write lock,
-				// so a committer blocked on that lock observes `is_removed()`
-				// and re-inserts rather than writing into a node we are about
-				// to unlink.
-				entry.remove();
-			} else if needs_gc {
-				// A reader watermark is pinning reclaimable versions. Track
-				// the key so the targeted sweep revisits it once the pin
-				// clears: the caller cleared the candidate set before this
-				// scan, and no future commit or sweep would otherwise ever
-				// visit a key that is never written again.
-				retrack.push(entry.key().clone());
-			}
-		}
+		// Walk the entire datastore in chunks, each under pins of its own,
+		// so a full sweep does not hold back the reclamation of what it
+		// retires
+		scan_datastore(
+			&self.datastore,
+			Bound::Unbounded,
+			Bound::Unbounded,
+			Direction::Forward,
+			|entry| {
+				// Lock the chain for writing
+				let mut versions = entry.value().lock();
+				// Clean up unnecessary older versions
+				let (remaining, needs_gc) =
+					versions.update(|v| (v.gc_older_versions(cleanup_ts), v.needs_gc()));
+				if remaining == 0 {
+					// Remove the entry while still holding the version write
+					// lock, so a committer blocked on that
+					// lock observes `is_removed()`
+					// and re-inserts rather than writing into a node we are
+					// about to unlink.
+					entry.remove();
+				} else if needs_gc {
+					// A reader watermark is pinning reclaimable versions. Track
+					// the key so the targeted sweep revisits it once the pin
+					// clears: the caller cleared the candidate set before this
+					// scan, and no future commit or sweep would otherwise ever
+					// visit a key that is never written again.
+					retrack.push(entry.key().clone());
+				}
+				true
+			},
+		);
 		self.gc_candidates.retrack(retrack);
 	}
 }
