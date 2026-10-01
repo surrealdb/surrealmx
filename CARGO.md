@@ -32,21 +32,21 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 
 | Engine | Point&nbsp;Read&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Create&nbsp;(OPS) | Update&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Delete&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Scan&nbsp;(OPS) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **SurrealMX** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**23,048,168** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**1,950,713** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**1,633,971** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**2,737,346** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**17,736,945** |
+| **SurrealMX** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**22,921,015** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**2,037,150** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**1,704,945** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**2,496,510** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**17,498,761** |
 | LMDB<br><sup>(In-Memory)</sup> | 1,196,173 | 224,909 | 243,045 | 176,188 | 1,186,447 |
 | RocksDB<br><sup>(In-Memory)</sup> | 750,476 | 627,071 | 599,129 | 681,996 | 839,268 |
 
-- **Point Reads**: Over **23,000,000 OPS** sustained (651ms for 15,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **19× faster** than LMDB and **30× faster** than RocksDB.
-- **Writes & Creates**: Over **1,950,000 OPS** (7.69s for 15,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **3.1× faster** than RocksDB and **8.7× faster** than LMDB.
-- **Updates**: Over **1,630,000 OPS** (9.18s for 15,000,000 updates): **2.7× faster** than RocksDB and **6.7× faster** than LMDB.
-- **Deletes**: Over **2,730,000 OPS** (5.48s for 15,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **4.0× faster** than RocksDB and **15× faster** than LMDB.
-- **Range Scans**: Over **17,700,000 OPS** (282ms for 5,000,000 `select(*) limit(100)` scans) using lock-free version reads and zero-allocation cursor traversal (`scan_with` / `keys_for_each`): **21× faster** than RocksDB and **15× faster** than LMDB.
+- **Point Reads**: Over **22,900,000 OPS** sustained (654ms for 15,000,000 lookups) using zero-copy borrowed slice inspection (`db.with_value`): over **19× faster** than LMDB and **30× faster** than RocksDB.
+- **Writes & Creates**: Over **2,030,000 OPS** (7.36s for 15,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **3.2× faster** than RocksDB and **9.1× faster** than LMDB.
+- **Updates**: Over **1,700,000 OPS** (8.80s for 15,000,000 updates): **2.8× faster** than RocksDB and **7.0× faster** than LMDB.
+- **Deletes**: Over **2,490,000 OPS** (6.01s for 15,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **3.7× faster** than RocksDB and **14× faster** than LMDB.
+- **Range Scans**: Over **17,400,000 OPS** (286ms for 5,000,000 `select(*) limit(100)` scans) using lock-free version reads and zero-allocation cursor traversal (`scan_with` / `keys_for_each`): **20× faster** than RocksDB and **14× faster** than LMDB.
 
 ### Memory Profile
 
 | Engine | Resting&nbsp;Memory | Peak&nbsp;Memory |
 | :--- | ---: | ---: |
-| **SurrealMX** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**16.0 GiB** | 32.4 GiB |
+| **SurrealMX** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**16.0 GiB** | 31.5 GiB |
 | LMDB<br><sup>(In-Memory)</sup> | 19.9 GiB | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**20.3 GiB** |
 | RocksDB<br><sup>(In-Memory)</sup> | 19.3 GiB | 95.3 GiB |
 
