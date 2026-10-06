@@ -999,3 +999,43 @@ fn test_transaction_outliving_database_still_persists() {
 	assert_eq!(tx.get("late").unwrap(), Some(ByteSlice::from("value")));
 	tx.cancel().unwrap();
 }
+
+#[test]
+fn test_aol_asynchronous_drop_without_sleep_recovers_every_commit() {
+	// The number of single-key transactions committed per round
+	const COMMITS: usize = 5000;
+	// Loss on drop is timing dependent, so repeat to make it reliable
+	for round in 0..5 {
+		let temp_dir = TempDir::new().unwrap();
+		let temp_path = temp_dir.path();
+
+		// Configure asynchronous AOL persistence (no snapshots)
+		let open = || {
+			let persistence_opts = PersistenceOptions::new(temp_path)
+				.with_aol_mode(AolMode::AsynchronousAfterCommit)
+				.with_snapshot_mode(SnapshotMode::Never)
+				.with_fsync_mode(FsyncMode::Never);
+			Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap()
+		};
+
+		// Commit in a tight loop, then drop at once while commits may
+		// still be queued for the background appender
+		{
+			let db = open();
+			for i in 0..COMMITS {
+				let mut tx = db.transaction(true);
+				tx.set(format!("key{i:05}"), "value").unwrap();
+				tx.commit().unwrap();
+			}
+		}
+
+		// Reopen from the same directory and check every key came back
+		let db = open();
+		let tx = db.transaction(false);
+		let keys = tx.keys(vec![0u8]..vec![255u8], None, None).unwrap();
+		assert_eq!(keys.len(), COMMITS, "round {round}: commits were lost on drop");
+		for (i, key) in keys.iter().enumerate() {
+			assert_eq!(key.as_ref(), format!("key{i:05}").as_bytes(), "round {round}: key {i}");
+		}
+	}
+}
