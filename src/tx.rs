@@ -4142,7 +4142,7 @@ mod tests {
 		tx1.release_savepoint().unwrap();
 
 		// Verify savepoints exist
-		assert!(!tx1.inner.as_ref().unwrap().savepoint_stack.is_empty());
+		assert_ne!(tx1.inner.as_ref().unwrap().savepoint_stack.len(), 0);
 
 		// Commit the transaction (returns to pool)
 		tx1.commit().unwrap();
