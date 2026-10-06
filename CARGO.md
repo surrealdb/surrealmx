@@ -340,6 +340,16 @@ Different persistence configurations provide different durability guarantees:
 | Sync AOL + Interval fsync | ✅ | ⚠️ (since last fsync) | Fast |
 | Sync AOL + Every fsync | ✅ | ✅ | Slow |
 
+### Crash recovery
+
+Each committed transaction is written to the AOL as a single checksummed frame, so a crash part-way through a write never leaves a transaction half-applied: after a restart a transaction is either fully present or absent.
+
+When a database is opened, an incomplete frame at the end of the AOL is discarded and cut from the file before any new commit is appended, so commits made after a recovery are not lost behind the damage. Damage which is followed by intact data is not treated as a torn tail: opening fails with a `Corrupted` persistence error instead of silently dropping the commits that came after it.
+
+When a database using `AolMode::AsynchronousAfterCommit` is dropped, commits still queued for the AOL are written before it shuts down.
+
+AOL files written by earlier releases are still read. The first time this release opens one, it marks the end of the old records, and everything it appends from then on is framed. Earlier releases refuse to open an AOL which holds framed transactions.
+
 Choose the configuration that best balances your durability requirements against performance needs.
 
 ## Isolation Levels

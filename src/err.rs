@@ -82,6 +82,11 @@ pub enum PersistenceError {
 	/// An AOL append failed.
 	#[error("AOL append failed: {0}")]
 	AppendFailed(String),
+
+	/// The AOL is damaged somewhere other than at its end, or is not in a
+	/// recognised format.
+	#[error("AOL is corrupted: {0}")]
+	Corrupted(String),
 }
 
 impl<T> From<PoisonError<std::sync::MutexGuard<'_, T>>> for PersistenceError {
