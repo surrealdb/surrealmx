@@ -1,6 +1,8 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use byteslice::ByteSlice;
+#[cfg(unix)]
+use std::path::Path;
 use std::time::Duration;
 use surrealmx::{
 	AolMode, CompressionMode, Database, DatabaseOptions, FsyncMode, PersistenceOptions,
@@ -909,5 +911,91 @@ fn test_loads_multiversion_snapshot_files() {
 	let mut tx = db.transaction(false);
 	assert_eq!(tx.get("multi").unwrap(), Some(ByteSlice::from("v3")));
 	assert_eq!(tx.get("gone").unwrap(), None);
+	tx.cancel().unwrap();
+}
+
+/// Counts this process's open file descriptors which refer to the same file
+/// as `path`.
+///
+/// Matching on device and inode, rather than counting every descriptor,
+/// keeps the result independent of whatever else this process (including
+/// the other tests running in it) has open. Each descriptor is reopened and
+/// inspected through the new handle, because `stat` on a `/dev/fd` entry
+/// describes the entry itself rather than the file behind it on macOS.
+#[cfg(unix)]
+fn open_handles_to(path: &Path) -> usize {
+	use std::os::unix::fs::MetadataExt;
+	let target = std::fs::metadata(path).unwrap();
+	// Snapshot the listing first, so descriptors opened below are not part of
+	// it
+	let entries: Vec<_> =
+		std::fs::read_dir("/dev/fd").unwrap().filter_map(Result::ok).map(|e| e.path()).collect();
+	entries
+		.into_iter()
+		.filter_map(|entry| std::fs::File::open(entry).ok()?.metadata().ok())
+		.filter(|meta| meta.dev() == target.dev() && meta.ino() == target.ino())
+		.count()
+}
+
+#[cfg(unix)]
+#[test]
+fn test_dropping_database_closes_aol_handle() {
+	// Every combination of background workers a persistent database can run
+	let configs = [
+		(AolMode::SynchronousOnCommit, FsyncMode::EveryAppend, SnapshotMode::Never),
+		(AolMode::SynchronousOnCommit, FsyncMode::Never, SnapshotMode::Never),
+		(
+			AolMode::AsynchronousAfterCommit,
+			FsyncMode::Interval(Duration::from_millis(50)),
+			SnapshotMode::Interval(Duration::from_millis(50)),
+		),
+	];
+	for (aol_mode, fsync_mode, snapshot_mode) in configs {
+		let temp_dir = TempDir::new().unwrap();
+		let aol_path = temp_dir.path().join("aol.bin");
+		let persistence_opts = PersistenceOptions::new(temp_dir.path())
+			.with_aol_mode(aol_mode)
+			.with_snapshot_mode(snapshot_mode)
+			.with_fsync_mode(fsync_mode);
+		let db =
+			Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap();
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// The handle is open while the database is, which also proves the
+		// check below can observe an open handle at all
+		assert!(open_handles_to(&aol_path) > 0, "AOL should be open ({aol_mode:?})");
+		// Dropping the database releases the handle
+		drop(db);
+		assert_eq!(
+			open_handles_to(&aol_path),
+			0,
+			"dropping the database should close the AOL handle ({aol_mode:?})"
+		);
+	}
+}
+
+#[test]
+fn test_transaction_outliving_database_still_persists() {
+	let temp_dir = TempDir::new().unwrap();
+	let persistence_opts = PersistenceOptions::new(temp_dir.path())
+		.with_aol_mode(AolMode::SynchronousOnCommit)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_fsync_mode(FsyncMode::EveryAppend);
+	let db = Database::new_with_persistence(DatabaseOptions::default(), persistence_opts.clone())
+		.unwrap();
+	// Open a write transaction, then drop the database before it commits
+	let mut tx = db.transaction(true);
+	tx.set("late", "value").unwrap();
+	drop(db);
+	// The transaction keeps the datastore alive, so its commit must still
+	// reach the AOL rather than being silently discarded
+	tx.commit().unwrap();
+	drop(tx);
+	let db = Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap();
+	let mut tx = db.transaction(false);
+	assert_eq!(tx.get("late").unwrap(), Some(ByteSlice::from("value")));
 	tx.cancel().unwrap();
 }
