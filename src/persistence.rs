@@ -30,13 +30,188 @@ use byteslice::ByteSlice;
 use crossbeam_deque::{Injector, Steal};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
-use std::io::{BufReader, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use web_time::{Duration, Instant};
+use xxhash_rust::xxh3::xxh3_64_with_seed;
+
+/// Opens the framed section of an append-only log file.
+///
+/// A log file is a run of legacy records (each a bare `(key, version, value)`
+/// tuple, with nothing to say where a transaction ends) followed by this
+/// header and then a run of frames. A file written from scratch has no legacy
+/// run and starts with the header. The first byte is `0xFF`, which the
+/// variable-length integer encoding of a legacy record's leading key length
+/// never produces, so the header cannot be mistaken for the start of a legacy
+/// record. The last byte is the format version.
+const AOL_MAGIC: [u8; 8] = [0xFF, b'S', b'M', b'X', b'A', b'O', b'L', 1];
+
+/// The size of the header in front of each frame: the payload length as a
+/// little-endian `u32`, then its checksum as a little-endian `u32`.
+const FRAME_HEADER_LEN: usize = 8;
+
+/// A frame holds every record of one committed transaction, so that a
+/// transaction is replayed whole or not at all. Its payload is a run of
+/// `(key, version, value)` records, all carrying the transaction's version.
+fn encode_frame(
+	buf: &mut Vec<u8>,
+	version: u64,
+	writeset: &BTreeMap<ByteSlice, Option<ByteSlice>>,
+) -> Result<(), PersistenceError> {
+	// Reserve the header, which is filled in once the payload length is known
+	let start = buf.len();
+	let payload_start = start + FRAME_HEADER_LEN;
+	buf.resize(payload_start, 0);
+	for (k, v) in writeset {
+		bincode::serde::encode_into_std_write((k, version, v), &mut *buf, config::standard())?;
+	}
+	let payload = &buf[payload_start..];
+	let Ok(len) = u32::try_from(payload.len()) else {
+		buf.truncate(start);
+		return Err(PersistenceError::AppendFailed(
+			"transaction is too large for a single append-only log frame".to_owned(),
+		));
+	};
+	let checksum = frame_checksum(payload);
+	buf[start..start + 4].copy_from_slice(&len.to_le_bytes());
+	buf[start + 4..payload_start].copy_from_slice(&checksum.to_le_bytes());
+	Ok(())
+}
+
+/// Checksums a frame payload. The payload length seeds the hash, so a frame
+/// whose length field was damaged cannot pass as another valid frame.
+fn frame_checksum(payload: &[u8]) -> u32 {
+	let [a, b, c, d, ..] = xxh3_64_with_seed(payload, payload.len() as u64).to_le_bytes();
+	u32::from_le_bytes([a, b, c, d])
+}
+
+/// Appends whole frames to the end of the log, opening a file that is still
+/// empty with the header. A failed write is undone by cutting the file back to
+/// its previous length, so that a partial frame is never left in front of the
+/// frames that follow it.
+fn append_to_log<'a>(
+	file: &mut File,
+	chunks: impl IntoIterator<Item = &'a [u8]>,
+) -> io::Result<()> {
+	let start = file.seek(SeekFrom::End(0))?;
+	let result = (|| {
+		if start == 0 {
+			file.write_all(&AOL_MAGIC)?;
+		}
+		for chunk in chunks {
+			file.write_all(chunk)?;
+		}
+		file.flush()
+	})();
+	if result.is_err() {
+		let _ = file.set_len(start);
+	}
+	result
+}
+
+/// Fills `buf` as far as the reader allows, returning the number of bytes read,
+/// which is short only at the end of the file.
+fn read_up_to<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+	let mut filled = 0;
+	while filled < buf.len() {
+		match reader.read(&mut buf[filled..]) {
+			Ok(0) => break,
+			Ok(n) => filled += n,
+			Err(e) if e.kind() == ErrorKind::Interrupted => {}
+			Err(e) => return Err(e),
+		}
+	}
+	Ok(filled)
+}
+
+/// A buffered reader over the log which tracks how many bytes have been
+/// consumed, so that replay knows the offset at which each record ends.
+struct AolReader {
+	inner: BufReader<File>,
+	position: u64,
+}
+
+impl AolReader {
+	fn new(file: File) -> Self {
+		Self {
+			inner: BufReader::new(file),
+			position: 0,
+		}
+	}
+
+	/// The next byte, without consuming it. `None` at the end of the file.
+	fn peek(&mut self) -> io::Result<Option<u8>> {
+		Ok(self.inner.fill_buf()?.first().copied())
+	}
+}
+
+impl Read for AolReader {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		let n = self.inner.read(buf)?;
+		self.position += n as u64;
+		Ok(n)
+	}
+}
+
+/// The outcome of reading one frame
+enum FrameRead {
+	/// The file ended cleanly before this frame
+	End,
+	/// A complete frame whose checksum matches, with its payload in the buffer
+	Valid,
+	/// The file ends inside this frame
+	Incomplete,
+	/// A complete frame which is empty or whose checksum does not match
+	Invalid,
+}
+
+/// Reads the next frame, leaving its payload in `payload`. The reader is left
+/// at the end of the frame for `Valid` and `Invalid`.
+fn read_frame(
+	reader: &mut AolReader,
+	file_len: u64,
+	payload: &mut Vec<u8>,
+) -> io::Result<FrameRead> {
+	let mut header = [0u8; FRAME_HEADER_LEN];
+	let read = read_up_to(reader, &mut header)?;
+	if read == 0 {
+		return Ok(FrameRead::End);
+	}
+	if read < FRAME_HEADER_LEN {
+		return Ok(FrameRead::Incomplete);
+	}
+	let [l0, l1, l2, l3, c0, c1, c2, c3] = header;
+	let len = u32::from_le_bytes([l0, l1, l2, l3]);
+	let checksum = u32::from_le_bytes([c0, c1, c2, c3]);
+	// A length beyond the end of the file is never allocated for
+	if u64::from(len) > file_len.saturating_sub(reader.position) {
+		return Ok(FrameRead::Incomplete);
+	}
+	payload.resize(len as usize, 0);
+	if read_up_to(reader, payload)? < payload.len() {
+		return Ok(FrameRead::Incomplete);
+	}
+	if len == 0 || frame_checksum(payload) != checksum {
+		return Ok(FrameRead::Invalid);
+	}
+	Ok(FrameRead::Valid)
+}
+
+/// A decoded append-only log record: a key, the version it was written at, and
+/// its value, which is `None` for a delete.
+type AolEntry = (ByteSlice, u64, Option<ByteSlice>);
+
+/// What replaying the append-only log found
+struct AolReplay {
+	/// The length of the prefix of the file made up only of complete, valid
+	/// records and frames
+	valid_len: u64,
+	/// Whether the framed section's header lies within that prefix
+	framed: bool,
+}
 
 /// Represents a pending asynchronous append operation
 #[derive(Debug, Clone)]
@@ -126,11 +301,7 @@ impl GroupCommitter {
 
 			let flush_result = (|| -> Result<(), PersistenceError> {
 				let mut file = aol.lock()?;
-				file.seek(SeekFrom::End(0))?;
-				for slot in &batch {
-					file.write_all(&slot.data)?;
-				}
-				file.flush()?;
+				append_to_log(&mut file, batch.iter().map(|slot| slot.data.as_slice()))?;
 				file.sync_all()?;
 				drop(file);
 				self.pending_syncs.store(0, Ordering::Release);
@@ -494,9 +665,8 @@ impl Persistence {
 	/// 1. Loads the latest snapshot if it exists
 	/// 2. Applies any changes from the append-only log
 	fn load(&self) -> Result<(), PersistenceError> {
-		// Decoded record shapes, one per file format
+		// Decoded record shape of the snapshot file
 		type SnapshotEntry = (ByteSlice, Vec<(u64, Option<ByteSlice>)>);
-		type AolEntry = (ByteSlice, u64, Option<ByteSlice>);
 		// Track the maximum version seen across EVERY decoded record —
 		// snapshot entries (including keys skipped as tombstone-topped)
 		// and every append-only log record (including deletes). The
@@ -571,69 +741,8 @@ impl Persistence {
 				}
 			}
 		}
-		// Check if append-only file exists
-		if self.aol_path.exists() {
-			// Open and read the AOL file
-			let file = File::open(&self.aol_path)?;
-			// Get the metadata of the append-only file
-			let metadata = file.metadata()?;
-			// Check if the append-only file is empty
-			if metadata.len() > 0 {
-				// Create buffered reader for efficient reading
-				let mut reader = BufReader::new(file);
-				// Initialize counters for tracking loaded entries
-				let mut count = 0;
-				// Read and apply each change from the AOL
-				loop {
-					// Increment the counter
-					count += 1;
-					// Trace the loading of the append-only entry
-					tracing::trace!("Loading AOL entry: {count}");
-					// Explicitly type the result to help type inference
-					let result: Result<AolEntry, _> =
-						bincode::serde::decode_from_std_read(&mut reader, config::standard());
-					// Detech any end of file errors
-					match result {
-						Ok((k, version, val)) => {
-							// Count the version towards the clock seed. The
-							// append-only log is not version-ordered (async
-							// appends race), so the maximum must be tracked
-							// over every record, not taken from the last.
-							max_version = max_version.max(version);
-							// Check if the key already exists
-							if let Some(entry) = self.inner.datastore.get(&k) {
-								// Update existing key with stored version
-								entry.value().lock().update(|v| {
-									v.push(Version {
-										version,
-										value: val,
-									});
-								});
-							} else {
-								// Insert new key with stored version
-								self.inner.datastore.insert(
-									k.clone(),
-									VersionCell::new(Versions::from(Version {
-										version,
-										value: val,
-									})),
-								);
-							}
-						}
-						Err(e) => match e {
-							// Handle bincode decode errors that indicate EOF
-							bincode::error::DecodeError::Io {
-								inner,
-								..
-							} if inner.kind() == std::io::ErrorKind::UnexpectedEof => {
-								break;
-							}
-							e => return Err(PersistenceError::Deserialization(e)),
-						},
-					}
-				}
-			}
-		}
+		// Replay the append-only log on top of the snapshot
+		let replay = self.replay_aol(&mut max_version)?;
 		// Guard against corrupted or pathological persisted versions: the
 		// slot protocol reserves values near u64::MAX as sentinels, and
 		// version minting adds one to the clock. Legitimate versions from
@@ -644,6 +753,9 @@ impl Persistence {
 				"persisted version {max_version} exceeds the maximum supported version"
 			)));
 		}
+		// Cut away any torn tail, so that the first record appended from here
+		// on follows the last valid one rather than the damaged bytes
+		self.repair_aol(&replay)?;
 		// Seed the logical clock so newly minted merge versions continue
 		// strictly above every persisted version. Both the allocation
 		// counter and the published clock are seeded: the next claim
@@ -670,6 +782,216 @@ impl Persistence {
 		Ok(())
 	}
 
+	/// Replays the append-only log into the datastore.
+	///
+	/// A transaction is applied only once its whole frame has been read and its
+	/// checksum verified, so a log which ends part-way through a transaction
+	/// replays as though that transaction never committed. Replay stops at the
+	/// first damaged frame; the returned [`AolReplay`] says where the valid
+	/// part of the file ends, so that the damage can be cut away.
+	///
+	/// Damage is only treated as a torn tail when nothing valid follows it. A
+	/// complete frame which fails its check but is followed by an intact one
+	/// has been corrupted in place, and is reported as an error rather than
+	/// being dropped together with the commits that came after it.
+	fn replay_aol(&self, max_version: &mut u64) -> Result<AolReplay, PersistenceError> {
+		let mut replay = AolReplay {
+			valid_len: 0,
+			framed: false,
+		};
+		// Check if append-only file exists
+		if !self.aol_path.exists() {
+			return Ok(replay);
+		}
+		// Open and read the AOL file
+		let file = File::open(&self.aol_path)?;
+		// Get the length of the append-only file
+		let file_len = file.metadata()?.len();
+		// Check if the append-only file is empty
+		if file_len == 0 {
+			return Ok(replay);
+		}
+		// Create buffered reader which tracks the offset it has reached
+		let mut reader = AolReader::new(file);
+		// Initialize counters for tracking loaded entries
+		let mut count = 0;
+		// Read the legacy records which precede the framed section, if any.
+		// These carry no framing, so each is applied as soon as it is decoded.
+		loop {
+			match reader.peek()? {
+				// The log ends cleanly, with no framed section
+				None => return Ok(replay),
+				// The framed section begins
+				Some(byte) if byte == AOL_MAGIC[0] => break,
+				Some(_) => {}
+			}
+			// Increment the counter
+			count += 1;
+			// Trace the loading of the append-only entry
+			tracing::trace!("Loading AOL entry: {count}");
+			// Explicitly type the result to help type inference
+			let result: Result<AolEntry, _> =
+				bincode::serde::decode_from_std_read(&mut reader, config::standard());
+			// Detect any end of file errors
+			match result {
+				Ok((k, version, val)) => {
+					self.apply_aol_entry(k, version, val, max_version);
+					replay.valid_len = reader.position;
+				}
+				Err(e) => match e {
+					// A record cut short by the end of the file is a torn tail
+					bincode::error::DecodeError::Io {
+						inner,
+						..
+					} if inner.kind() == ErrorKind::UnexpectedEof => {
+						return Ok(replay);
+					}
+					e => return Err(PersistenceError::Deserialization(e)),
+				},
+			}
+		}
+		// Read the header opening the framed section. A header cut short by the
+		// end of the file is a torn tail.
+		let mut magic = [0u8; AOL_MAGIC.len()];
+		if read_up_to(&mut reader, &mut magic)? < magic.len() {
+			return Ok(replay);
+		}
+		if magic[..AOL_MAGIC.len() - 1] != AOL_MAGIC[..AOL_MAGIC.len() - 1] {
+			return Err(PersistenceError::Corrupted(
+				"the append-only log does not have a recognised header".to_owned(),
+			));
+		}
+		if magic[AOL_MAGIC.len() - 1] != AOL_MAGIC[AOL_MAGIC.len() - 1] {
+			return Err(PersistenceError::Corrupted(format!(
+				"the append-only log is of format version {}, which is not supported",
+				magic[AOL_MAGIC.len() - 1]
+			)));
+		}
+		replay.framed = true;
+		replay.valid_len = reader.position;
+		// Read and apply each frame in the AOL
+		let mut payload = Vec::new();
+		let mut entries: Vec<AolEntry> = Vec::new();
+		loop {
+			match read_frame(&mut reader, file_len, &mut payload)? {
+				// The log ends cleanly after the last frame, or part-way through
+				// one, which is a torn tail
+				FrameRead::End | FrameRead::Incomplete => break,
+				// A damaged frame is a torn tail unless valid data follows it
+				FrameRead::Invalid => {
+					if reader.position < file_len
+						&& matches!(
+							read_frame(&mut reader, file_len, &mut payload)?,
+							FrameRead::Valid
+						) {
+						return Err(PersistenceError::Corrupted(format!(
+							"the append-only log has a damaged frame at offset {} which is followed by valid data",
+							replay.valid_len
+						)));
+					}
+					break;
+				}
+				FrameRead::Valid => {
+					// Increment the counter
+					count += 1;
+					// Trace the loading of the append-only frame
+					tracing::trace!("Loading AOL frame: {count}");
+					// Decode every record of the frame before applying any
+					// of them, so a frame is never partially applied
+					entries.clear();
+					let mut offset = 0;
+					while offset < payload.len() {
+						let (entry, read): (AolEntry, usize) = bincode::serde::decode_from_slice(
+							&payload[offset..],
+							config::standard(),
+						)?;
+						offset += read;
+						entries.push(entry);
+					}
+					for (k, version, val) in entries.drain(..) {
+						self.apply_aol_entry(k, version, val, max_version);
+					}
+					replay.valid_len = reader.position;
+				}
+			}
+		}
+		Ok(replay)
+	}
+
+	/// Applies one record of the append-only log to the datastore
+	fn apply_aol_entry(
+		&self,
+		k: ByteSlice,
+		version: u64,
+		val: Option<ByteSlice>,
+		max_version: &mut u64,
+	) {
+		// Count the version towards the clock seed. The append-only log is
+		// not version-ordered (async appends race), so the maximum must be
+		// tracked over every record, not taken from the last.
+		*max_version = (*max_version).max(version);
+		// Check if the key already exists
+		if let Some(entry) = self.inner.datastore.get(&k) {
+			// Update existing key with stored version
+			entry.value().lock().update(|v| {
+				v.push(Version {
+					version,
+					value: val,
+				});
+			});
+		} else {
+			// Insert new key with stored version
+			self.inner.datastore.insert(
+				k.clone(),
+				VersionCell::new(Versions::from(Version {
+					version,
+					value: val,
+				})),
+			);
+		}
+	}
+
+	/// Cuts the append-only log back to the end of the last valid record or
+	/// frame, and makes sure that what follows it is the framed section.
+	///
+	/// The log is opened for appending from the end of the file, so unless the
+	/// damaged bytes of a torn tail are removed first, the next commit lands
+	/// directly after them and is unreadable on the following restart. The cut
+	/// is synced before anything is appended.
+	fn repair_aol(&self, replay: &AolReplay) -> Result<(), PersistenceError> {
+		// There is nothing to repair if the log is not in use
+		let Some(ref aol) = self.aol else {
+			return Ok(());
+		};
+		let mut file = aol.lock()?;
+		let file_len = file.metadata()?.len();
+		let mut changed = false;
+		// Cut away the torn tail
+		if file_len > replay.valid_len {
+			tracing::warn!(
+				"Removing {} bytes of incomplete data from the end of the append-only log {}",
+				file_len - replay.valid_len,
+				self.aol_path.display()
+			);
+			file.set_len(replay.valid_len)?;
+			changed = true;
+		}
+		// Records written before frames existed are followed by the header, so
+		// that everything appended from here on is framed
+		file.seek(SeekFrom::Start(replay.valid_len))?;
+		if replay.valid_len > 0 && !replay.framed {
+			file.write_all(&AOL_MAGIC)?;
+			changed = true;
+		}
+		if changed {
+			file.flush()?;
+			file.sync_all()?;
+		}
+		file.seek(SeekFrom::End(0))?;
+		drop(file);
+		Ok(())
+	}
+
 	/// Truncate the AOL file up to the specified position, preserving any data
 	/// after.
 	#[expect(
@@ -689,7 +1011,15 @@ impl Persistence {
 			// Get the current file length
 			let file_len = file.metadata()?.len();
 			// Check if there is remaining data
-			if file_len > position {
+			if file_len <= position {
+				// Truncate the AOL file
+				file.set_len(0)?;
+				// Flush the file contents
+				file.flush()?;
+			} else if position > 0 {
+				// Everything after the cutoff is kept. With nothing before the
+				// cutoff there is nothing to cut, and the data already opens
+				// with the header.
 				static TRUNCATE_COUNTER: AtomicU64 = AtomicU64::new(0);
 				let id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
 				// Generate a unique name for the temporary file
@@ -712,6 +1042,10 @@ impl Persistence {
 					file.seek(SeekFrom::Start(0))?;
 					// Truncate the AOL file
 					file.set_len(0)?;
+					// The remaining data starts on a frame boundary, so the
+					// file is reopened with the header in
+					// front of it
+					file.write_all(&AOL_MAGIC)?;
 					// Copy data from temporary file
 					{
 						let mut temp = File::open(&path)?;
@@ -726,11 +1060,6 @@ impl Persistence {
 				let _ = fs::remove_file(&path);
 				// Return the result
 				result?;
-			} else {
-				// Truncate the AOL file
-				file.set_len(0)?;
-				// Flush the file contents
-				file.flush()?;
 			}
 			// Reset pending syncs if we truncated to beginning
 			if position == 0 {
@@ -914,20 +1243,18 @@ impl Persistence {
 					// Initialize the batch vector and reusable scratch buffer
 					let mut batch = Vec::with_capacity(BATCH_SIZE);
 					let mut scratch = Vec::with_capacity(8192);
-					// Check whether the persistence process is enabled
-					while enabled.load(Ordering::Acquire) {
-						// Check shutdown flag again after waking
-						if !enabled.load(Ordering::Acquire) {
-							break;
-						}
+					loop {
 						// Clear the batch
 						batch.clear();
 						// Collect operations into a batch
 						loop {
-							// Check shutdown flag in the inner loop
-							if !enabled.load(Ordering::Acquire) {
-								break;
-							}
+							// Read the shutdown flag before looking at the
+							// queue. Every commit
+							// acknowledged before shutdown began was
+							// queued before the flag flipped, so an empty queue
+							// seen after the flag was observed is a drained
+							// one.
+							let shutting_down = !enabled.load(Ordering::Acquire);
 							match injector.steal() {
 								Steal::Retry => {
 									std::thread::yield_now();
@@ -943,6 +1270,12 @@ impl Persistence {
 									if !batch.is_empty() {
 										break;
 									}
+									// Stop only once the queue has been
+									// drained,
+									// so that shutdown never discards a commit
+									if shutting_down {
+										return;
+									}
 									// Park the thread to wait for work event
 									// notification
 									thread::park();
@@ -957,20 +1290,13 @@ impl Persistence {
 								if let Ok(mut file) = aol.lock() {
 									scratch.clear();
 									// Write all operations in the batch into
-									// reusable scratch buffer
+									// reusable scratch buffer, one frame
+									// for each transaction
 									for op in &batch {
-										for (k, v) in &op.writeset {
-											bincode::serde::encode_into_std_write(
-												(k, op.version, v),
-												&mut scratch,
-												config::standard(),
-											)?;
-										}
+										encode_frame(&mut scratch, op.version, &op.writeset)?;
 									}
-									file.seek(SeekFrom::End(0))?;
 									// Write encoded batch in a single operation
-									file.write_all(&scratch)?;
-									file.flush()?;
+									append_to_log(&mut file, [scratch.as_slice()])?;
 									// Handle fsync based on mode
 									match fsync_mode {
 										// Let the operating system handle syncing to disk
@@ -1076,18 +1402,12 @@ impl Persistence {
 				return Ok(());
 			}
 			if self.aol_mode == AolMode::SynchronousOnCommit {
-				// Pre-encode the writeset into a reusable thread-local scratch
-				// buffer
+				// Pre-encode the writeset as a single frame in a reusable
+				// thread-local scratch buffer
 				let data = ENCODE_BUF.with(|buf| {
 					let mut b = buf.borrow_mut();
 					b.clear();
-					for (k, v) in writeset {
-						bincode::serde::encode_into_std_write(
-							(k, version, v),
-							&mut *b,
-							config::standard(),
-						)?;
-					}
+					encode_frame(&mut b, version, writeset)?;
 					Ok::<_, PersistenceError>(b.clone())
 				})?;
 
@@ -1100,9 +1420,7 @@ impl Persistence {
 
 				// Lock the AOL file for writing without group fsync
 				let mut file = aol.lock()?;
-				file.seek(SeekFrom::End(0))?;
-				file.write_all(&data)?;
-				file.flush()?;
+				append_to_log(&mut file, [data.as_slice()])?;
 
 				// Handle fsync based on mode
 				match self.fsync_mode {

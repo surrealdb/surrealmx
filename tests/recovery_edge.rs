@@ -48,32 +48,32 @@ fn recovery_after_partial_aol_write() {
 	}
 
 	// Append garbage to the AOL file to simulate partial write
-	let aol_path = temp_path.join("append-only.log");
-	if aol_path.exists() {
+	let aol_path = temp_path.join("aol.bin");
+	let valid_len = fs::metadata(&aol_path).unwrap().len();
+	{
 		let mut file = fs::OpenOptions::new().append(true).open(&aol_path).unwrap();
 		// Write some invalid data
 		file.write_all(b"INVALID_PARTIAL_DATA").unwrap();
 		file.flush().unwrap();
 	}
 
-	// Recovery should handle partial/invalid data gracefully
-	// Either by ignoring it or by returning an error
-	let result = Database::new_with_persistence(db_opts, persistence_opts);
-
-	// The database should either:
-	// 1. Successfully recover, ignoring the garbage, OR
-	// 2. Return an error indicating corruption
-	if let Ok(db) = result {
-		// If recovery succeeds, valid data should be present
+	// Recovery ignores the garbage and removes it from the file
+	{
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
 		let tx = db.transaction(false);
-		let value = tx.get("valid_key").unwrap();
-		// Value might be present (if garbage was ignored/truncated)
-		// or might not be (if recovery stopped before valid data)
-		// Just verify the database is operational
-		drop(value);
-	} else {
-		// Error is acceptable - it indicates corruption was detected
+		assert_eq!(tx.get("valid_key").unwrap(), Some(ByteSlice::from("valid_value")));
+		assert_eq!(fs::metadata(&aol_path).unwrap().len(), valid_len);
+		// Commits made after recovery are not lost behind the garbage
+		let mut tx = db.transaction(true);
+		tx.set("later_key", "later_value").unwrap();
+		tx.commit().unwrap();
 	}
+
+	// Both the data from before the damage and from after it survive a restart
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+	let tx = db.transaction(false);
+	assert_eq!(tx.get("valid_key").unwrap(), Some(ByteSlice::from("valid_value")));
+	assert_eq!(tx.get("later_key").unwrap(), Some(ByteSlice::from("later_value")));
 }
 
 // =============================================================================
