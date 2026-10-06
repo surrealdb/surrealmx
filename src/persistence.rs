@@ -33,7 +33,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use web_time::{Duration, Instant};
 use xxhash_rust::xxh3::xxh3_64_with_seed;
@@ -457,8 +457,10 @@ impl PersistenceOptions {
 /// - Background worker for automatic snapshot creation
 #[derive(Clone)]
 pub struct Persistence {
-	/// Reference to the inner database state
-	pub(crate) inner: Arc<Inner>,
+	/// Weak reference to the inner database state. The database state owns
+	/// this layer through [`Inner::persistence`], so a strong reference here
+	/// would form a cycle that keeps both alive after the database is dropped.
+	pub(crate) inner: Weak<Inner>,
 	/// File handle for the append-only log (None if AOL is disabled)
 	pub(crate) aol: Option<Arc<Mutex<File>>>,
 	/// Path to the append-only log file (None if AOL is disabled)
@@ -496,14 +498,15 @@ impl Persistence {
 	///
 	/// # Arguments
 	/// * `options` - Configuration options for persistence
-	/// * `inner` - Reference to the database state
+	/// * `inner` - Reference to the database state, which is loaded into here
+	///   and which the layer then tracks only weakly
 	///
 	/// # Returns
 	/// * `Result<Self, PersistenceError>` - The created persistence layer or an
 	///   error
 	pub(crate) fn new_with_options(
 		options: PersistenceOptions,
-		inner: Arc<Inner>,
+		inner: &Arc<Inner>,
 	) -> Result<Self, PersistenceError> {
 		// Get the base path from options
 		let base_path = &options.base_path;
@@ -556,7 +559,7 @@ impl Persistence {
 		let group_committer = Arc::new(GroupCommitter::new(Arc::clone(&pending_syncs)));
 		// Create the persistence instance
 		let this = Self {
-			inner,
+			inner: Arc::downgrade(inner),
 			aol,
 			aol_path,
 			snapshot_path,
@@ -574,7 +577,7 @@ impl Persistence {
 			group_committer,
 		};
 		// Load existing data from disk
-		this.load()?;
+		this.load(inner)?;
 		// Start the background snapshot worker if snapshots are enabled
 		this.spawn_snapshot_worker();
 		// Start the fsync worker if needed (only when AOL is enabled)
@@ -597,6 +600,11 @@ impl Persistence {
 	/// # Returns
 	/// * `Result<(), PersistenceError>` - Success or an error
 	pub fn snapshot(&self) -> Result<(), PersistenceError> {
+		// Hold the database state for the duration of the snapshot. It is
+		// gone once the database and all of its transactions are dropped.
+		let inner = self.inner.upgrade().ok_or_else(|| {
+			PersistenceError::SnapshotFailed("the database has been dropped".to_string())
+		})?;
 		// Create temporary file for atomic swap
 		let temp_path = self.snapshot_path.with_extension("tmp");
 		// Execute snapshot operation in closure for clean error handling
@@ -612,7 +620,7 @@ impl Persistence {
 				0
 			};
 			// Stream write each key-value pair to reduce memory usage
-			for entry in &self.inner.datastore {
+			for entry in &inner.datastore {
 				// Persist only the latest committed version of each key. Keys
 				// whose newest entry is a delete tombstone are omitted: on
 				// reload the key is simply absent, which is the same
@@ -664,7 +672,7 @@ impl Persistence {
 	/// This function:
 	/// 1. Loads the latest snapshot if it exists
 	/// 2. Applies any changes from the append-only log
-	fn load(&self) -> Result<(), PersistenceError> {
+	fn load(&self, inner: &Inner) -> Result<(), PersistenceError> {
 		// Decoded record shape of the snapshot file
 		type SnapshotEntry = (ByteSlice, Vec<(u64, Option<ByteSlice>)>);
 		// Track the maximum version seen across EVERY decoded record —
@@ -723,7 +731,7 @@ impl Persistence {
 										value,
 									});
 									// Insert the entry into the datastore
-									self.inner.datastore.insert(k, VersionCell::new(entries));
+									inner.datastore.insert(k, VersionCell::new(entries));
 								}
 							}
 						}
@@ -742,7 +750,7 @@ impl Persistence {
 			}
 		}
 		// Replay the append-only log on top of the snapshot
-		let replay = self.replay_aol(&mut max_version)?;
+		let replay = self.replay_aol(inner, &mut max_version)?;
 		// Guard against corrupted or pathological persisted versions: the
 		// slot protocol reserves values near u64::MAX as sentinels, and
 		// version minting adds one to the clock. Legitimate versions from
@@ -766,17 +774,17 @@ impl Persistence {
 		// This runs before any transaction or background worker exists;
 		// fetch_max is used for safety under refactoring rather than
 		// necessity.
-		self.inner.oracle.alloc.fetch_max(max_version, Ordering::SeqCst);
-		self.inner.oracle.timestamp.fetch_max(max_version, Ordering::SeqCst);
-		self.inner.merge_retire_id.fetch_max(max_version, Ordering::SeqCst);
+		inner.oracle.alloc.fetch_max(max_version, Ordering::SeqCst);
+		inner.oracle.timestamp.fetch_max(max_version, Ordering::SeqCst);
+		inner.merge_retire_id.fetch_max(max_version, Ordering::SeqCst);
 		// Collapse the multi-version chains that append-only-log replay
 		// builds up: a key updated N times across the log holds N chain
 		// entries here, and no future commit or tracked sweep would ever
 		// visit the ones on keys that are never written again. This runs
 		// before any transaction exists, so the cleanup bound is simply
 		// the seeded clock and every chain trims to its latest version.
-		if let Some(cleanup_ts) = self.inner.compute_cleanup_ts() {
-			self.inner.run_gc_full(cleanup_ts);
+		if let Some(cleanup_ts) = inner.compute_cleanup_ts() {
+			inner.run_gc_full(cleanup_ts);
 		}
 		// Return success
 		Ok(())
@@ -794,7 +802,11 @@ impl Persistence {
 	/// complete frame which fails its check but is followed by an intact one
 	/// has been corrupted in place, and is reported as an error rather than
 	/// being dropped together with the commits that came after it.
-	fn replay_aol(&self, max_version: &mut u64) -> Result<AolReplay, PersistenceError> {
+	fn replay_aol(
+		&self,
+		inner: &Inner,
+		max_version: &mut u64,
+	) -> Result<AolReplay, PersistenceError> {
 		let mut replay = AolReplay {
 			valid_len: 0,
 			framed: false,
@@ -835,7 +847,7 @@ impl Persistence {
 			// Detect any end of file errors
 			match result {
 				Ok((k, version, val)) => {
-					self.apply_aol_entry(k, version, val, max_version);
+					Self::apply_aol_entry(inner, k, version, val, max_version);
 					replay.valid_len = reader.position;
 				}
 				Err(e) => match e {
@@ -909,7 +921,7 @@ impl Persistence {
 						entries.push(entry);
 					}
 					for (k, version, val) in entries.drain(..) {
-						self.apply_aol_entry(k, version, val, max_version);
+						Self::apply_aol_entry(inner, k, version, val, max_version);
 					}
 					replay.valid_len = reader.position;
 				}
@@ -920,7 +932,7 @@ impl Persistence {
 
 	/// Applies one record of the append-only log to the datastore
 	fn apply_aol_entry(
-		&self,
+		inner: &Inner,
 		k: ByteSlice,
 		version: u64,
 		val: Option<ByteSlice>,
@@ -931,7 +943,7 @@ impl Persistence {
 		// tracked over every record, not taken from the last.
 		*max_version = (*max_version).max(version);
 		// Check if the key already exists
-		if let Some(entry) = self.inner.datastore.get(&k) {
+		if let Some(entry) = inner.datastore.get(&k) {
 			// Update existing key with stored version
 			entry.value().lock().update(|v| {
 				v.push(Version {
@@ -941,7 +953,7 @@ impl Persistence {
 			});
 		} else {
 			// Insert new key with stored version
-			self.inner.datastore.insert(
+			inner.datastore.insert(
 				k.clone(),
 				VersionCell::new(Versions::from(Version {
 					version,
@@ -1134,8 +1146,10 @@ impl Persistence {
 		};
 		// Check if a background thread is already running
 		if self.snapshot_handle.read().is_none() {
-			// Clone necessary fields for the worker thread
-			let db = Arc::clone(&self.inner);
+			// Clone necessary fields for the worker thread. The database
+			// state is held weakly and only upgraded for the duration of a
+			// snapshot, so an idle worker never keeps it alive.
+			let inner = Weak::clone(&self.inner);
 			let aol = self.aol.clone();
 			let snapshot_path = self.snapshot_path.clone();
 			let pending_syncs = Arc::clone(&self.pending_syncs);
@@ -1151,6 +1165,11 @@ impl Persistence {
 					if !enabled.load(Ordering::Acquire) {
 						break;
 					}
+					// Hold the database state for this snapshot, or stop if it
+					// has already been dropped
+					let Some(db) = inner.upgrade() else {
+						break;
+					};
 					// Create temporary file for atomic swap
 					let temp_path = snapshot_path.with_extension("tmp");
 					// Ensure clean error handling in closure
@@ -1498,8 +1517,12 @@ impl Drop for Persistence {
 			if let Some(ref aol) = self.aol {
 				// Lock the AOL file
 				if let Ok(file) = aol.lock() {
-					// Sync file contents to disk
-					let _ = file.sync_all();
+					// Sync file contents to disk, then clear the counter
+					// shared by every clone of this layer so the next one
+					// to drop does not sync the same writes again
+					if file.sync_all().is_ok() {
+						self.pending_syncs.store(0, Ordering::Release);
+					}
 				}
 			}
 		}

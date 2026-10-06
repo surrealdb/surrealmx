@@ -134,7 +134,7 @@ impl Database {
 		// Initialise a transaction pool
 		let pool = Pool::new(Arc::clone(&inner), opts.pool_size);
 		// Create a new persistence layer with options
-		let persist = Persistence::new_with_options(persistence_opts, Arc::clone(&inner))
+		let persist = Persistence::new_with_options(persistence_opts, &inner)
 			.map_err(std::io::Error::other)?;
 		// Replace the persistence layer in the database
 		inner.persistence.write().replace(Arc::new(persist.clone()));
@@ -2188,6 +2188,55 @@ mod tests {
 		let chain = entry.value().read(|v| v.as_slice().to_vec());
 		assert_eq!(chain.len(), 1, "the load-time sweep should collapse replayed chains");
 		assert_eq!(chain[0].value.as_deref(), Some(b"v4" as &[u8]));
+	}
+
+	#[cfg(not(target_arch = "wasm32"))]
+	#[test]
+	fn dropping_persistent_database_releases_datastore_and_aol() {
+		// The datastore owns its persistence layer, so the layer must not
+		// own the datastore back: a cycle would keep the datastore and the
+		// open AOL handle alive for the life of the process. Every worker
+		// is enabled, as each holds references of its own.
+		let temp_dir = tempfile::TempDir::new().unwrap();
+		let persistence = crate::PersistenceOptions::new(temp_dir.path())
+			.with_aol_mode(crate::AolMode::AsynchronousAfterCommit)
+			.with_snapshot_mode(crate::SnapshotMode::Interval(Duration::from_millis(10)))
+			.with_fsync_mode(crate::FsyncMode::Interval(Duration::from_millis(10)));
+		let db =
+			Database::new_with_persistence(crate::DatabaseOptions::default(), persistence).unwrap();
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "value").unwrap();
+			tx.commit().unwrap();
+		}
+		let inner = Arc::downgrade(&db.inner);
+		let aol = Arc::downgrade(db.persistence().unwrap().aol.as_ref().unwrap());
+		drop(db);
+		assert_eq!(inner.strong_count(), 0, "the datastore should be freed with the database");
+		assert_eq!(aol.strong_count(), 0, "the AOL handle should be freed with the database");
+	}
+
+	#[cfg(not(target_arch = "wasm32"))]
+	#[test]
+	fn dropping_persistent_database_runs_final_fsync() {
+		// Without a per-commit fsync, commits leave pending syncs which the
+		// persistence layer must flush when the database is dropped
+		let temp_dir = tempfile::TempDir::new().unwrap();
+		let persistence = crate::PersistenceOptions::new(temp_dir.path())
+			.with_aol_mode(crate::AolMode::SynchronousOnCommit)
+			.with_snapshot_mode(crate::SnapshotMode::Never)
+			.with_fsync_mode(crate::FsyncMode::Never);
+		let db =
+			Database::new_with_persistence(crate::DatabaseOptions::default(), persistence).unwrap();
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "value").unwrap();
+			tx.commit().unwrap();
+		}
+		let pending = Arc::clone(&db.persistence().unwrap().pending_syncs);
+		assert!(pending.load(Ordering::Acquire) > 0, "the commit should await an fsync");
+		drop(db);
+		assert_eq!(pending.load(Ordering::Acquire), 0, "dropping should fsync pending writes");
 	}
 
 	#[test]
