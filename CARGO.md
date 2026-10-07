@@ -32,7 +32,7 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 
 | Engine | Point&nbsp;Read&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Create&nbsp;(OPS) | Update&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Delete&nbsp;(OPS) | &nbsp;&nbsp;&nbsp;Scan&nbsp;(OPS) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **SurrealMX** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**22,921,015** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**2,037,150** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**1,704,945** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**2,496,510** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**17,498,761** |
+| **SurrealMX** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**22,921,015** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**2,037,150** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**1,704,945** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**2,496,510** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**17,741,053** |
 | LMDB<br><sup>(In-Memory)</sup> | 1,196,173 | 224,909 | 243,045 | 176,188 | 1,186,447 |
 | RocksDB<br><sup>(In-Memory)</sup> | 750,476 | 627,071 | 599,129 | 681,996 | 839,268 |
 
@@ -40,7 +40,21 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 - **Writes & Creates**: Over **2,030,000 OPS** (7.36s for 15,000,000 creates) via the concurrent ART index and lock-free circular commit ring buffer: **3.2× faster** than RocksDB and **9.1× faster** than LMDB.
 - **Updates**: Over **1,700,000 OPS** (8.80s for 15,000,000 updates): **2.8× faster** than RocksDB and **7.0× faster** than LMDB.
 - **Deletes**: Over **2,490,000 OPS** (6.01s for 15,000,000 deletions) via optimized inline tombstone collapse and pointer-identity unlinking: **3.7× faster** than RocksDB and **14× faster** than LMDB.
-- **Range Scans**: Over **17,400,000 OPS** (286ms for 5,000,000 `select(*) limit(100)` scans) using lock-free version reads and zero-allocation cursor traversal (`scan_with` / `keys_for_each`): **20× faster** than RocksDB and **14× faster** than LMDB.
+- **Range Scans**: Over **17,700,000 OPS** (282ms for 5,000,000 `select(*) limit(100)` scans) using lock-free version reads and zero-allocation cursor traversal (`scan_with` / `keys_for_each`): **21× faster** than RocksDB and **15× faster** than LMDB. See [Scan Profile](#scan-profile) for other kinds of range scan.
+
+### Scan Profile
+
+Range scans over the same 15,000,000-key dataset, as scans per second: 5,000,000 iterations of each limit and skip scan, and 1,000 counts over the full key range.
+
+| Engine | Limit&nbsp;(OPS) | Keys,&nbsp;Limit&nbsp;(OPS) | Skip&nbsp;+&nbsp;Limit&nbsp;(OPS) | Keys,&nbsp;Skip&nbsp;+&nbsp;Limit&nbsp;(OPS) | Full&nbsp;Count&nbsp;(OPS) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **SurrealMX** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**17,741,053** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**17,754,720** | 257,840 | 302,465 | 18.9 |
+| LMDB<br><sup>(In-Memory)</sup> | 1,186,447 | 1,188,970 | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**549,029** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**549,634** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**24.1** |
+| RocksDB<br><sup>(In-Memory)</sup> | 839,268 | 836,419 | 43,231 | 43,490 | 5.3 |
+
+- **Limit**: `select(*) limit(100)` returns the first 100 key-value pairs of the range: **15× faster** than LMDB and **21× faster** than RocksDB. **Keys, Limit** (`select(id) limit(100)`) returns only the keys, at the same rate.
+- **Skip + Limit**: `select(*) start(5000) limit(100)` walks and discards 5,000 entries, checking each one's visibility at the scan's snapshot, before returning 100: **6.0× faster** than RocksDB, while LMDB is **2.1× faster** than SurrealMX. Returning only the keys narrows LMDB's lead to 1.8×.
+- **Full Count**: `count()` visits every one of the 15,000,000 keys: **3.6× faster** than RocksDB, while LMDB is **1.3× faster** than SurrealMX.
 
 ### Memory Profile
 
