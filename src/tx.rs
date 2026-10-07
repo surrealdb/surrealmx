@@ -24,6 +24,7 @@ use crate::kv::IntoBytes;
 use crate::pool::Pool;
 use crate::queue::{Commit, Merge};
 use crate::ring::SlotRead;
+use crate::scan::scan_datastore;
 use crate::sync::backoff;
 use crate::version::Version;
 use crate::version_cell::VersionCell;
@@ -1556,8 +1557,6 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
-		// One epoch pin covers every version read in the scan
-		let _pin = crate::sync::pin();
 		let mut count = 0;
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
@@ -1569,33 +1568,36 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			for entry in datastore_range {
-				let matched = entry.value().read(|v| {
-					v.with_version(self.version, |bytes| {
-						if skip > 0 {
-							skip -= 1;
-							true
-						} else {
-							count += 1;
-							f(entry.key(), bytes)
+			scan_datastore(
+				&self.database.datastore,
+				Bound::Included(beg.clone()),
+				Bound::Excluded(end.clone()),
+				Direction::Forward,
+				|entry| {
+					let matched = entry.value().read(|v| {
+						v.with_version(self.version, |bytes| {
+							if skip > 0 {
+								skip -= 1;
+								true
+							} else {
+								count += 1;
+								f(entry.key(), bytes)
+							}
+						})
+					});
+					if let Some(continue_iter) = matched {
+						if !continue_iter {
+							return false;
 						}
-					})
-				});
-				if let Some(continue_iter) = matched {
-					if !continue_iter {
-						break;
 					}
-				}
-				if let Some(l) = limit {
-					if count >= l {
-						break;
+					if let Some(l) = limit {
+						if count >= l {
+							return false;
+						}
 					}
-				}
-			}
+					true
+				},
+			);
 			return Ok(count);
 		}
 
@@ -1618,8 +1620,6 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
-		// One epoch pin covers every version read in the scan
-		let _pin = crate::sync::pin();
 		// Initialise the entry counter
 		let mut count = 0;
 		// Compute the range
@@ -1637,31 +1637,36 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			for entry in datastore_range {
-				let value = entry.value().read(|v| v.fetch_version(self.version));
-				let Some(value) = value else {
-					continue;
-				};
-				if skip > 0 {
-					skip -= 1;
-					continue;
-				}
-				count += 1;
-				if !f(entry.key(), &value) {
-					break;
-				}
-				if let Some(l) = limit {
-					if count >= l {
-						break;
+			scan_datastore(
+				&self.database.datastore,
+				Bound::Included(beg.clone()),
+				Bound::Excluded(end.clone()),
+				Direction::Forward,
+				|entry| {
+					let value = entry.value().read(|v| v.fetch_version(self.version));
+					let Some(value) = value else {
+						return true;
+					};
+					if skip > 0 {
+						skip -= 1;
+						return true;
 					}
-				}
-			}
+					count += 1;
+					if !f(entry.key(), &value) {
+						return false;
+					}
+					if let Some(l) = limit {
+						if count >= l {
+							return false;
+						}
+					}
+					true
+				},
+			);
 			return Ok(count);
 		}
+		// One epoch pin covers every version read by the merge
+		let _pin = crate::sync::pin();
 		// Lazy k-way merge over the merge-queue writesets.
 		let join_iter =
 			MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), Direction::Forward);
@@ -1713,8 +1718,6 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
-		// One epoch pin covers every version read in the scan
-		let _pin = crate::sync::pin();
 		// Initialise the entry counter
 		let mut count = 0;
 		// Compute the range
@@ -1732,31 +1735,36 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			for entry in datastore_range {
-				let exists = entry.value().read(|v| v.exists_version(self.version));
-				if !exists {
-					continue;
-				}
-				if skip > 0 {
-					skip -= 1;
-					continue;
-				}
-				count += 1;
-				if !f(entry.key()) {
-					break;
-				}
-				if let Some(l) = limit {
-					if count >= l {
-						break;
+			scan_datastore(
+				&self.database.datastore,
+				Bound::Included(beg.clone()),
+				Bound::Excluded(end.clone()),
+				Direction::Forward,
+				|entry| {
+					let exists = entry.value().read(|v| v.exists_version(self.version));
+					if !exists {
+						return true;
 					}
-				}
-			}
+					if skip > 0 {
+						skip -= 1;
+						return true;
+					}
+					count += 1;
+					if !f(entry.key()) {
+						return false;
+					}
+					if let Some(l) = limit {
+						if count >= l {
+							return false;
+						}
+					}
+					true
+				},
+			);
 			return Ok(count);
 		}
+		// One epoch pin covers every version read by the merge
+		let _pin = crate::sync::pin();
 		// Lazy k-way merge over the merge-queue writesets.
 		let join_iter =
 			MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), Direction::Forward);
@@ -1808,8 +1816,6 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
-		// One epoch pin covers every version read in the scan
-		let _pin = crate::sync::pin();
 		// Compute the range
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
@@ -1825,28 +1831,33 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			for entry in datastore_range {
-				let value = entry.value().read(|v| v.fetch_version(self.version));
-				let Some(value) = value else {
-					continue;
-				};
-				if skip > 0 {
-					skip -= 1;
-					continue;
-				}
-				buf.push((entry.key().clone(), value));
-				if let Some(l) = limit {
-					if buf.len() >= l {
-						break;
+			scan_datastore(
+				&self.database.datastore,
+				Bound::Included(beg.clone()),
+				Bound::Excluded(end.clone()),
+				Direction::Forward,
+				|entry| {
+					let value = entry.value().read(|v| v.fetch_version(self.version));
+					let Some(value) = value else {
+						return true;
+					};
+					if skip > 0 {
+						skip -= 1;
+						return true;
 					}
-				}
-			}
+					buf.push((entry.key().clone(), value));
+					if let Some(l) = limit {
+						if buf.len() >= l {
+							return false;
+						}
+					}
+					true
+				},
+			);
 			return Ok(());
 		}
+		// One epoch pin covers every version read by the merge
+		let _pin = crate::sync::pin();
 		// Lazy k-way merge over the merge-queue writesets.
 		let join_iter =
 			MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), Direction::Forward);
@@ -1895,8 +1906,6 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
-		// One epoch pin covers every version read in the scan
-		let _pin = crate::sync::pin();
 		// Compute the range
 		let beg = &rng.start.into_bytes();
 		let end = &rng.end.into_bytes();
@@ -1912,28 +1921,33 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			for entry in datastore_range {
-				let exists = entry.value().read(|v| v.exists_version(self.version));
-				if !exists {
-					continue;
-				}
-				if skip > 0 {
-					skip -= 1;
-					continue;
-				}
-				buf.push(entry.key().clone());
-				if let Some(l) = limit {
-					if buf.len() >= l {
-						break;
+			scan_datastore(
+				&self.database.datastore,
+				Bound::Included(beg.clone()),
+				Bound::Excluded(end.clone()),
+				Direction::Forward,
+				|entry| {
+					let exists = entry.value().read(|v| v.exists_version(self.version));
+					if !exists {
+						return true;
 					}
-				}
-			}
+					if skip > 0 {
+						skip -= 1;
+						return true;
+					}
+					buf.push(entry.key().clone());
+					if let Some(l) = limit {
+						if buf.len() >= l {
+							return false;
+						}
+					}
+					true
+				},
+			);
 			return Ok(());
 		}
+		// One epoch pin covers every version read by the merge
+		let _pin = crate::sync::pin();
 		// Lazy k-way merge over the merge-queue writesets.
 		let join_iter =
 			MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), Direction::Forward);
@@ -2039,8 +2053,6 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
-		// One epoch pin covers every version read in the scan
-		let _pin = crate::sync::pin();
 		// Prepare result count
 		let mut res = 0;
 		// Compute the range
@@ -2062,36 +2074,33 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			macro_rules! consume_fast_path {
-				($iter:expr) => {
-					for entry in $iter {
-						let exists = entry.value().read(|v| v.exists_version(version));
-						if !exists {
-							continue;
-						}
-						if skip > 0 {
-							skip -= 1;
-							continue;
-						}
-						res += 1;
-						if let Some(l) = limit {
-							if res >= l {
-								break;
-							}
+			scan_datastore(
+				&self.database.datastore,
+				Bound::Included(beg.clone()),
+				Bound::Excluded(end.clone()),
+				direction,
+				|entry| {
+					let exists = entry.value().read(|v| v.exists_version(version));
+					if !exists {
+						return true;
+					}
+					if skip > 0 {
+						skip -= 1;
+						return true;
+					}
+					res += 1;
+					if let Some(l) = limit {
+						if res >= l {
+							return false;
 						}
 					}
-				};
-			}
-			match direction {
-				Direction::Forward => consume_fast_path!(datastore_range),
-				Direction::Reverse => consume_fast_path!(datastore_range.rev()),
-			}
+					true
+				},
+			);
 			return Ok(res);
 		}
+		// One epoch pin covers every version read by the merge
+		let _pin = crate::sync::pin();
 		// Lazy k-way merge over the merge-queue writesets.
 		let join_iter = MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), direction);
 		// Create the 3-way merge iterator
@@ -2136,8 +2145,6 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
-		// One epoch pin covers every version read in the scan
-		let _pin = crate::sync::pin();
 		// Prepare result vector
 		let mut res = match limit {
 			Some(l) => Vec::with_capacity(l.min(10_000)),
@@ -2163,36 +2170,33 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			macro_rules! consume_fast_path {
-				($iter:expr) => {
-					for entry in $iter {
-						let exists = entry.value().read(|v| v.exists_version(version));
-						if !exists {
-							continue;
-						}
-						if skip > 0 {
-							skip -= 1;
-							continue;
-						}
-						res.push(entry.key().clone());
-						if let Some(l) = limit {
-							if res.len() >= l {
-								break;
-							}
+			scan_datastore(
+				&self.database.datastore,
+				Bound::Included(beg.clone()),
+				Bound::Excluded(end.clone()),
+				direction,
+				|entry| {
+					let exists = entry.value().read(|v| v.exists_version(version));
+					if !exists {
+						return true;
+					}
+					if skip > 0 {
+						skip -= 1;
+						return true;
+					}
+					res.push(entry.key().clone());
+					if let Some(l) = limit {
+						if res.len() >= l {
+							return false;
 						}
 					}
-				};
-			}
-			match direction {
-				Direction::Forward => consume_fast_path!(datastore_range),
-				Direction::Reverse => consume_fast_path!(datastore_range.rev()),
-			}
+					true
+				},
+			);
 			return Ok(res);
 		}
+		// One epoch pin covers every version read by the merge
+		let _pin = crate::sync::pin();
 		// Lazy k-way merge over the merge-queue writesets.
 		let join_iter = MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), direction);
 		// Create the 3-way merge iterator
@@ -2237,8 +2241,6 @@ impl TransactionInner {
 		if self.done {
 			return Err(Error::TxClosed);
 		}
-		// One epoch pin covers every version read in the scan
-		let _pin = crate::sync::pin();
 		// Prepare result vector
 		let mut res = match limit {
 			Some(l) => Vec::with_capacity(l.min(10_000)),
@@ -2265,36 +2267,33 @@ impl TransactionInner {
 		if merge_sources.is_empty()
 			&& self.writeset.range::<ByteSlice, _>(beg..end).next().is_none()
 		{
-			let datastore_range = self
-				.database
-				.datastore
-				.range((Bound::Included(beg.clone()), Bound::Excluded(end.clone())));
-			macro_rules! consume_fast_path {
-				($iter:expr) => {
-					for entry in $iter {
-						let value = entry.value().read(|v| v.fetch_version(version));
-						let Some(value) = value else {
-							continue;
-						};
-						if skip > 0 {
-							skip -= 1;
-							continue;
-						}
-						res.push((entry.key().clone(), value));
-						if let Some(l) = limit {
-							if res.len() >= l {
-								break;
-							}
+			scan_datastore(
+				&self.database.datastore,
+				Bound::Included(beg.clone()),
+				Bound::Excluded(end.clone()),
+				direction,
+				|entry| {
+					let value = entry.value().read(|v| v.fetch_version(version));
+					let Some(value) = value else {
+						return true;
+					};
+					if skip > 0 {
+						skip -= 1;
+						return true;
+					}
+					res.push((entry.key().clone(), value));
+					if let Some(l) = limit {
+						if res.len() >= l {
+							return false;
 						}
 					}
-				};
-			}
-			match direction {
-				Direction::Forward => consume_fast_path!(datastore_range),
-				Direction::Reverse => consume_fast_path!(datastore_range.rev()),
-			}
+					true
+				},
+			);
 			return Ok(res);
 		}
+		// One epoch pin covers every version read by the merge
+		let _pin = crate::sync::pin();
 		// Lazy k-way merge over the merge-queue writesets.
 		let join_iter = MergeQueueIter::new(merge_sources, beg.clone(), end.clone(), direction);
 		// Create the 3-way merge iterator
