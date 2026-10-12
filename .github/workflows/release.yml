@@ -44,20 +44,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config --add --bool push.autoSetupRemote true
 
-      - name: Extract version from branch name
+      - name: Extract version from Cargo.toml
         id: version
         run: |
-          BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
-          VERSION="${BRANCH_NAME#release/}"
-          echo "Version from branch: $VERSION"
-          
-          # Validate version matches Cargo.toml
-          CARGO_VERSION=$(taplo get -f Cargo.toml "package.version")
-          if [ "$VERSION" != "$CARGO_VERSION" ]; then
-            echo "Error: Branch version ($VERSION) doesn't match Cargo.toml version ($CARGO_VERSION)"
-            exit 1
-          fi
-          
+          VERSION=$(taplo get -f Cargo.toml "package.version")
+          echo "Version from Cargo.toml: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Create and push tag
