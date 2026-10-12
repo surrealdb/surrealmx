@@ -156,8 +156,10 @@ pub struct Inner {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) static INJECT_APPEND_FAILURE: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) static INJECT_APPLY_PANIC: AtomicBool = AtomicBool::new(false);
 
 impl Inner {

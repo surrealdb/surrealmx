@@ -79,7 +79,6 @@ impl Versions {
 
 	/// Returns a reference to the latest version, if any.
 	#[inline]
-	#[cfg(not(target_arch = "wasm32"))]
 	#[allow(dead_code)]
 	pub(crate) fn last(&self) -> Option<&Version> {
 		match self {
@@ -273,7 +272,6 @@ impl Versions {
 
 	/// The newest committed version and value for this key, or `None` when
 	/// the chain is empty or its newest entry is a delete tombstone.
-	#[cfg(not(target_arch = "wasm32"))]
 	#[inline]
 	#[allow(dead_code)]
 	pub(crate) fn latest(&self) -> Option<(u64, ByteSlice)> {
@@ -284,8 +282,8 @@ impl Versions {
 	/// `version`, or `None` when the chain is empty, has no version at or
 	/// below `version`, or its newest entry at or below `version` is a
 	/// delete tombstone.
-	#[cfg(not(target_arch = "wasm32"))]
 	#[inline]
+	#[allow(dead_code)]
 	pub(crate) fn latest_at_version(&self, version: u64) -> Option<(u64, ByteSlice)> {
 		match self {
 			Self::Empty => None,
