@@ -748,8 +748,9 @@ impl Persistence {
 			}
 			// Atomically rename temporary file to actual snapshot
 			fs::rename(&temp_path, &self.snapshot_path)?;
-			// Sync parent directory on Unix
-			#[cfg(unix)]
+			// Sync parent directory on Unix (skipped under Miri where directory
+			// fsync is unsupported)
+			#[cfg(all(unix, not(miri)))]
 			if let Some(parent) = self.snapshot_path.parent() {
 				if let Ok(dir) = File::open(parent) {
 					let _ = dir.sync_all();
@@ -1168,7 +1169,9 @@ impl Persistence {
 
 				fs::rename(&new_path, &self.aol_path)?;
 
-				#[cfg(unix)]
+				// Sync parent directory on Unix (skipped under Miri where
+				// directory fsync is unsupported)
+				#[cfg(all(unix, not(miri)))]
 				if let Some(parent) = self.aol_path.parent() {
 					if let Ok(dir) = File::open(parent) {
 						let _ = dir.sync_all();
