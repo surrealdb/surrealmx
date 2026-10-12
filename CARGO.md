@@ -50,7 +50,7 @@ Range scans over the same dataset, as scans per second: limit and skip scans, an
 | :--- | ---: | ---: | ---: | ---: | ---: |
 | **SurrealMX** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**18,031,692** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**15,524,603** | 232,121 | 253,039 | 17.3 |
 | LMDB<br><sup>(In-Memory)</sup> | 1,188,365 | 1,192,034 | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**552,885** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**554,451** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**24.2** |
-| RocksDB<br><sup>(In-Memory)</sup> | 836,666 | 837,377 | 47,671 | 47,816 | 5.0 |
+| RocksDB<br><sup>(In-Memory)</sup> | 836,666 | 837,377 | 47,671 | 47,816 | 5 |
 
 - **Limit**: `select(*) limit(100)` returns the first 100 key-value pairs of the range. **Keys, Limit** (`select(id) limit(100)`) returns only the keys.
 - **Skip + Limit**: `select(*) start(5000) limit(100)` walks and discards 5,000 entries before returning 100. **Keys, Skip + Limit** returns only the keys.
