@@ -32,7 +32,7 @@ use crossbeam_deque::{Injector, Steal};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
@@ -674,12 +674,32 @@ impl Persistence {
 	/// # Returns
 	/// * `Result<(), PersistenceError>` - Success or an error
 	pub fn snapshot(&self) -> Result<(), PersistenceError> {
+		Self::perform_snapshot(
+			&self.snapshot_mutex,
+			&self.inner,
+			self.aol.as_ref(),
+			&self.aol_path,
+			&self.snapshot_path,
+			self.compression_mode,
+			&self.pending_syncs,
+		)
+	}
+
+	fn perform_snapshot(
+		snapshot_mutex: &parking_lot::Mutex<()>,
+		inner_weak: &Weak<Inner>,
+		aol: Option<&Arc<Mutex<File>>>,
+		aol_path: &Path,
+		snapshot_path: &Path,
+		compression_mode: CompressionMode,
+		pending_syncs: &Arc<AtomicU64>,
+	) -> Result<(), PersistenceError> {
 		// Acquire snapshot mutex so only one snapshot runs at a time
-		let _snapshot_lock = self.snapshot_mutex.lock();
+		let _snapshot_lock = snapshot_mutex.lock();
 
 		// Hold the database state for the duration of the snapshot. It is
 		// gone once the database and all of its transactions are dropped.
-		let inner = self.inner.upgrade().ok_or_else(|| {
+		let inner = inner_weak.upgrade().ok_or_else(|| {
 			PersistenceError::SnapshotFailed("the database has been dropped".to_string())
 		})?;
 
@@ -691,7 +711,7 @@ impl Persistence {
 		// Any transaction committed after snapshot_version
 		// was not written before aol_cutoff_position and is preserved in the
 		// AOL tail.
-		let aol_cutoff_position = if let Some(ref aol) = self.aol {
+		let aol_cutoff_position = if let Some(aol) = aol {
 			aol.lock()?.metadata()?.len()
 		} else {
 			0
@@ -714,17 +734,16 @@ impl Persistence {
 		// snapshot_path
 		let counter = SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
 		let pid = std::process::id();
-		let file_stem =
-			self.snapshot_path.file_name().and_then(|n| n.to_str()).unwrap_or("snapshot");
+		let file_stem = snapshot_path.file_name().and_then(|n| n.to_str()).unwrap_or("snapshot");
 		let temp_name = format!("{file_stem}.{pid}_{counter}.tmp");
-		let temp_path = self.snapshot_path.with_file_name(temp_name);
+		let temp_path = snapshot_path.with_file_name(temp_name);
 
 		// Execute snapshot operation in closure for clean error handling
 		let result = (|| -> Result<(), PersistenceError> {
 			// Create temporary file
 			let file = File::create(&temp_path)?;
 			// Create compressed writer (handles buffering internally)
-			let mut writer = CompressedWriter::new(file, self.compression_mode)?;
+			let mut writer = CompressedWriter::new(file, compression_mode)?;
 			// Stream write each key-value pair visible at snapshot_version
 			for entry in &inner.datastore {
 				let latest = entry.value().read(|v| v.latest_at_version(snapshot_version));
@@ -747,11 +766,11 @@ impl Persistence {
 				temp_file.sync_all()?;
 			}
 			// Atomically rename temporary file to actual snapshot
-			fs::rename(&temp_path, &self.snapshot_path)?;
+			fs::rename(&temp_path, snapshot_path)?;
 			// Sync parent directory on Unix (skipped under Miri where directory
 			// fsync is unsupported)
 			#[cfg(all(unix, not(miri)))]
-			if let Some(parent) = self.snapshot_path.parent() {
+			if let Some(parent) = snapshot_path.parent() {
 				if let Ok(dir) = File::open(parent) {
 					let _ = dir.sync_all();
 				}
@@ -759,11 +778,11 @@ impl Persistence {
 			// Sync the renamed file to disk for durability (write access
 			// required on Windows for FlushFileBuffers)
 			{
-				let final_file = OpenOptions::new().write(true).open(&self.snapshot_path)?;
+				let final_file = OpenOptions::new().write(true).open(snapshot_path)?;
 				final_file.sync_all()?;
 			}
 			// Truncate AOL only up to the cutoff position
-			self.truncate(aol_cutoff_position)?;
+			Self::truncate(aol, aol_path, aol_cutoff_position, pending_syncs)?;
 			// All ok
 			Ok(())
 		})();
@@ -1119,8 +1138,13 @@ impl Persistence {
 		clippy::significant_drop_tightening,
 		reason = "the file guard must cover the pending_syncs store, or a concurrent append's increment is silently discarded along with its required fsync"
 	)]
-	pub(crate) fn truncate(&self, position: u64) -> Result<(), PersistenceError> {
-		if let Some(ref aol) = self.aol {
+	fn truncate(
+		aol: Option<&Arc<Mutex<File>>>,
+		aol_path: &Path,
+		position: u64,
+		pending_syncs: &Arc<AtomicU64>,
+	) -> Result<(), PersistenceError> {
+		if let Some(aol) = aol {
 			let mut file = aol.lock()?;
 			let file_len = file.metadata()?.len();
 
@@ -1128,9 +1152,9 @@ impl Persistence {
 			// directory as AOL
 			let id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
 			let pid = std::process::id();
-			let file_stem = self.aol_path.file_name().and_then(|n| n.to_str()).unwrap_or("aol");
+			let file_stem = aol_path.file_name().and_then(|n| n.to_str()).unwrap_or("aol");
 			let new_name = format!("{file_stem}.{pid}_{id}.new");
-			let new_path = self.aol_path.with_file_name(new_name);
+			let new_path = aol_path.with_file_name(new_name);
 
 			let result = (|| -> Result<(), PersistenceError> {
 				{
@@ -1153,26 +1177,26 @@ impl Persistence {
 				}
 
 				#[cfg(windows)]
-				{
+				let dummy_path = {
 					// On Windows, rename over an open file fails with
-					// ERROR_ACCESS_DENIED. Replace the
-					// handle in *file with a dummy open temp file before
-					// rename.
-					let dummy_path = self.aol_path.with_extension("dummy");
+					// ERROR_ACCESS_DENIED. Replace the handle in *file with a
+					// dummy open temp file before rename.
+					let dummy_id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
+					let dummy_path = aol_path.with_file_name(format!("dummy_{pid}_{dummy_id}.tmp"));
 					if let Ok(dummy) =
 						OpenOptions::new().create(true).read(true).write(true).open(&dummy_path)
 					{
 						*file = dummy;
-						let _ = fs::remove_file(&dummy_path);
 					}
-				}
+					dummy_path
+				};
 
-				fs::rename(&new_path, &self.aol_path)?;
+				fs::rename(&new_path, aol_path)?;
 
 				// Sync parent directory on Unix (skipped under Miri where
 				// directory fsync is unsupported)
 				#[cfg(all(unix, not(miri)))]
-				if let Some(parent) = self.aol_path.parent() {
+				if let Some(parent) = aol_path.parent() {
 					if let Ok(dir) = File::open(parent) {
 						let _ = dir.sync_all();
 					}
@@ -1183,9 +1207,12 @@ impl Persistence {
 					.read(true)
 					.write(true)
 					.truncate(false)
-					.open(&self.aol_path)?;
+					.open(aol_path)?;
 				reopened.seek(SeekFrom::End(0))?;
 				*file = reopened;
+
+				#[cfg(windows)]
+				let _ = fs::remove_file(&dummy_path);
 
 				Ok(())
 			})();
@@ -1197,7 +1224,7 @@ impl Persistence {
 
 			// Reset pending syncs if we truncated to beginning or beyond
 			if position == 0 || file_len <= position {
-				self.pending_syncs.store(0, Ordering::Release);
+				pending_syncs.store(0, Ordering::Release);
 			}
 		}
 		Ok(())
@@ -1261,8 +1288,17 @@ impl Persistence {
 		};
 		// Check if a background thread is already running
 		if self.snapshot_handle.read().is_none() {
-			let this = self.clone();
+			// Clone necessary fields for the worker thread. The database
+			// state is held weakly and only upgraded for the duration of a
+			// snapshot, so an idle worker never keeps it alive.
+			let inner = Weak::clone(&self.inner);
+			let aol = self.aol.clone();
+			let aol_path = self.aol_path.clone();
+			let snapshot_path = self.snapshot_path.clone();
+			let pending_syncs = Arc::clone(&self.pending_syncs);
 			let enabled = Arc::clone(&self.background_threads_enabled);
+			let compression = self.compression_mode;
+			let snapshot_mutex = Arc::clone(&self.snapshot_mutex);
 			// Spawn the background worker thread
 			let handle = thread::spawn(move || {
 				// Check whether the persistence process is enabled
@@ -1274,10 +1310,18 @@ impl Persistence {
 						break;
 					}
 					// If the database has been dropped, exit
-					if this.inner.upgrade().is_none() {
+					if inner.upgrade().is_none() {
 						break;
 					}
-					if let Err(e) = this.snapshot() {
+					if let Err(e) = Self::perform_snapshot(
+						&snapshot_mutex,
+						&inner,
+						aol.as_ref(),
+						&aol_path,
+						&snapshot_path,
+						compression,
+						&pending_syncs,
+					) {
 						tracing::error!("Snapshot worker error: {e}");
 					}
 				}
