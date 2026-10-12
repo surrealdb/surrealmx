@@ -156,6 +156,46 @@ impl Readers {
 		}
 		Some(min)
 	}
+
+	/// Returns the oldest pinned reader snapshot version, if any.
+	pub(crate) fn oldest_pinned_version(&self) -> Option<u64> {
+		fence(Ordering::SeqCst);
+		let len = self.len.load(Ordering::SeqCst);
+		let mut min = None;
+		for (c, chunk) in self.chunks.iter().enumerate().take(len.div_ceil(CHUNK_SIZE)) {
+			let Some(chunk) = chunk.get() else {
+				continue;
+			};
+			let base = c << CHUNK_BITS;
+			for (_i, slot) in chunk.iter().enumerate().take(len - base) {
+				match slot.version.load(Ordering::SeqCst) {
+					SLOT_PINNING | SLOT_UNPINNED => {}
+					v => min = Some(min.map_or(v, |m: u64| m.min(v))),
+				}
+			}
+		}
+		min
+	}
+
+	/// Returns the count of currently pinned active readers.
+	pub(crate) fn active_readers(&self) -> usize {
+		fence(Ordering::SeqCst);
+		let len = self.len.load(Ordering::SeqCst);
+		let mut count = 0;
+		for (c, chunk) in self.chunks.iter().enumerate().take(len.div_ceil(CHUNK_SIZE)) {
+			let Some(chunk) = chunk.get() else {
+				continue;
+			};
+			let base = c << CHUNK_BITS;
+			for (_i, slot) in chunk.iter().enumerate().take(len - base) {
+				match slot.version.load(Ordering::SeqCst) {
+					SLOT_PINNING | SLOT_UNPINNED => {}
+					_ => count += 1,
+				}
+			}
+		}
+		count
+	}
 }
 
 #[cfg(test)]

@@ -552,6 +552,8 @@ pub(crate) struct TransactionInner {
 	/// Append-only undo journal of modifications made within active savepoint
 	/// scopes.
 	pub(crate) undo_journal: Vec<UndoEntry>,
+	/// Creation timestamp for age/timeout validation
+	pub(crate) created_at: web_time::Instant,
 }
 
 /// Pin a registered reader slot and choose its snapshot.
@@ -622,6 +624,7 @@ impl TransactionInner {
 			reset_threshold: threshold,
 			savepoint_stack: Vec::new(),
 			undo_journal: Vec::new(),
+			created_at: web_time::Instant::now(),
 		}
 	}
 
@@ -669,6 +672,7 @@ impl TransactionInner {
 		self.locked = false;
 		self.commit = commit;
 		self.version = version;
+		self.created_at = web_time::Instant::now();
 	}
 
 	/// Get the starting sequence number of this transaction
@@ -679,6 +683,22 @@ impl TransactionInner {
 	/// Check if the transaction is closed
 	pub const fn closed(&self) -> bool {
 		self.done
+	}
+
+	/// Checks that the transaction is active, not timed out, and the database
+	/// is not stopped.
+	pub(crate) fn check_active(&self) -> Result<(), Error> {
+		if self.done {
+			return Err(Error::TxClosed);
+		}
+		self.database.check_poisoned()?;
+		if let Some(max_age) = self.database.options.max_transaction_age {
+			if self.created_at.elapsed() > max_age {
+				self.database.readers.unpin(self.slot);
+				return Err(Error::TxTooOld);
+			}
+		}
+		Ok(())
 	}
 
 	/// Clear all tracked read state: scans, plain point reads, and locked
@@ -736,10 +756,7 @@ impl TransactionInner {
 	/// Set a savepoint in the transaction for partial rollback
 	/// This method is stackable and can be called multiple times
 	pub fn set_savepoint(&mut self) -> Result<(), Error> {
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// Check to see if transaction is writable
 		if !self.write {
 			return Err(Error::TxNotWritable);
@@ -755,10 +772,7 @@ impl TransactionInner {
 	/// Reads and scans made since the savepoint are deliberately retained, so
 	/// that conflict detection stays conservative for any write that survives
 	pub fn rollback_to_savepoint(&mut self) -> Result<(), Error> {
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// Check to see if transaction is writable
 		if !self.write {
 			return Err(Error::TxNotWritable);
@@ -790,10 +804,7 @@ impl TransactionInner {
 	/// undoable by the savepoint set before the released one, which is what
 	/// `rollback_to_savepoint` will target next
 	pub fn release_savepoint(&mut self) -> Result<(), Error> {
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// Check to see if transaction is writable
 		if !self.write {
 			return Err(Error::TxNotWritable);
@@ -809,9 +820,31 @@ impl TransactionInner {
 
 	/// Commit the transaction and store all changes
 	pub fn commit(&mut self) -> Result<(), Error> {
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
+		self.check_active()?;
+		// Check memory limit if writes are present
+		if !self.writeset.is_empty() {
+			if let Some(limit) = self.database.options.memory_limit {
+				let approx_new_bytes: usize = self
+					.writeset
+					.iter()
+					.map(|(k, v)| k.len() + v.as_ref().map_or(0, ByteSlice::len))
+					.sum();
+				if self.database.memory_tracker.total_bytes() + approx_new_bytes > limit {
+					// The transaction stays open and pinned, so the caller
+					// can retry the commit or cancel it
+					return Err(Error::MemoryLimit);
+				}
+			}
+			#[cfg(not(target_arch = "wasm32"))]
+			if let Some(ref p) = *self.database.persistence.read() {
+				if let Err(crate::err::PersistenceError::AsyncQueueFull) =
+					p.check_async_capacity(&self.writeset)
+				{
+					// The transaction stays open and pinned, so the caller
+					// can retry the commit or cancel it
+					return Err(Error::AsyncQueueFull);
+				}
+			}
 		}
 		// Mark this transaction as done
 		self.done = true;
@@ -962,6 +995,9 @@ impl TransactionInner {
 				let database = Arc::clone(&self.database);
 				let entry = Arc::clone(&entry);
 				move || {
+					if std::thread::panicking() {
+						database.poison("Panic occurred during commit apply phase");
+					}
 					entry.applied.store(true, Ordering::SeqCst);
 					database.advance_merge_retirement();
 				}
@@ -1015,12 +1051,16 @@ impl TransactionInner {
 						.get_or_insert_with(|| self.database.inline_gc_watermark(self.slot));
 					// An update or insert into an existing chain, reclaiming
 					// superseded versions in the same replacement
+					let key_len = key.len();
 					let (remaining, needs_gc) = versions.update(|v| {
 						v.push(Version {
 							version,
 							value,
 						});
-						(w.map(|w| v.gc_older_versions(w)), v.needs_gc())
+						let before = v.footprint(key_len);
+						let remaining = w.map(|w| v.gc_older_versions(w));
+						self.database.memory_tracker.release(before, v.footprint(key_len));
+						(remaining, v.needs_gc())
 					});
 					if remaining == Some(0) {
 						entry.remove();
@@ -1046,6 +1086,17 @@ impl TransactionInner {
 		if !tracked.is_empty() {
 			self.database.gc_candidates.track(tracked);
 		}
+		let mut added_versions: i64 = 0;
+		let mut added_bytes: i64 = 0;
+		#[expect(
+			clippy::cast_possible_wrap,
+			reason = "writeset sizes are bounded and do not overflow i64"
+		)]
+		for (k, v) in entry.writeset.iter() {
+			added_versions += 1;
+			added_bytes += (k.len() + v.as_ref().map_or(0, ByteSlice::len)) as i64;
+		}
+		self.database.memory_tracker.add(added_versions, added_bytes);
 		// Append the transaction to the persistence layer. Clone the `Arc` out
 		// first so the `persistence` read guard is not held across `append`,
 		// which performs file I/O and may fsync.
@@ -1054,6 +1105,8 @@ impl TransactionInner {
 		#[cfg(not(target_arch = "wasm32"))]
 		if let Some(p) = persistence {
 			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
+				self.database
+					.poison(format!("Failed to append transaction version {version} to AOL: {e}"));
 				// Do NOT remove the entry here: the merge clock's
 				// insertion-order advance is opportunistic (see
 				// `Inner::try_advance_merge_clock`), so an entry must stay
@@ -1106,10 +1159,7 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let lookup = key.as_slice();
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// Check the transaction type
 		let res = if self.write {
 			// The key exists in the writeset
@@ -1141,10 +1191,7 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let lookup = key.as_slice();
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// Check the transaction type
 		let res = if self.write {
 			// The key exists in the writeset
@@ -1181,10 +1228,7 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let lookup = key.as_slice();
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// Check the transaction type
 		let res = if self.write {
 			// The key exists in the writeset
@@ -1216,10 +1260,7 @@ impl TransactionInner {
 	where
 		K: IntoBytes,
 	{
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// Prepare result vector with the same capacity
 		let mut results = Vec::with_capacity(keys.len());
 		// Check the transaction type
@@ -1267,10 +1308,7 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let lookup = key.as_slice();
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// Check to see if transaction is writable
 		if !self.write {
 			return Err(Error::TxNotWritable);
@@ -1307,10 +1345,7 @@ impl TransactionInner {
 		K: IntoBytes,
 		V: IntoBytes,
 	{
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// Check to see if transaction is writable
 		if !self.write {
 			return Err(Error::TxNotWritable);
@@ -1332,10 +1367,7 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let lookup = key.as_slice();
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// Check to see if transaction is writable
 		if !self.write {
 			return Err(Error::TxNotWritable);
@@ -1362,10 +1394,7 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let lookup = key.as_slice();
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// Check to see if transaction is writable
 		if !self.write {
 			return Err(Error::TxNotWritable);
@@ -1409,10 +1438,7 @@ impl TransactionInner {
 	where
 		K: IntoBytes,
 	{
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// Check to see if transaction is writable
 		if !self.write {
 			return Err(Error::TxNotWritable);
@@ -1433,10 +1459,7 @@ impl TransactionInner {
 	{
 		// Get the key reference
 		let lookup = key.as_slice();
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// Check to see if transaction is writable
 		if !self.write {
 			return Err(Error::TxNotWritable);
@@ -1553,9 +1576,7 @@ impl TransactionInner {
 		K: IntoBytes,
 		F: FnMut(&ByteSlice, &[u8]) -> bool,
 	{
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// One epoch pin covers every version read in the scan
 		let _pin = crate::sync::pin();
 		let mut count = 0;
@@ -1614,10 +1635,7 @@ impl TransactionInner {
 		K: IntoBytes,
 		F: FnMut(&ByteSlice, &ByteSlice) -> bool,
 	{
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// One epoch pin covers every version read in the scan
 		let _pin = crate::sync::pin();
 		// Initialise the entry counter
@@ -1709,10 +1727,7 @@ impl TransactionInner {
 		K: IntoBytes,
 		F: FnMut(&ByteSlice) -> bool,
 	{
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// One epoch pin covers every version read in the scan
 		let _pin = crate::sync::pin();
 		// Initialise the entry counter
@@ -1804,10 +1819,7 @@ impl TransactionInner {
 	{
 		// Clear the output buffer, reusing its capacity
 		buf.clear();
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// One epoch pin covers every version read in the scan
 		let _pin = crate::sync::pin();
 		// Compute the range
@@ -1891,10 +1903,7 @@ impl TransactionInner {
 	{
 		// Clear the output buffer, reusing its capacity
 		buf.clear();
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// One epoch pin covers every version read in the scan
 		let _pin = crate::sync::pin();
 		// Compute the range
@@ -2035,10 +2044,7 @@ impl TransactionInner {
 	where
 		K: IntoBytes,
 	{
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// One epoch pin covers every version read in the scan
 		let _pin = crate::sync::pin();
 		// Prepare result count
@@ -2132,10 +2138,7 @@ impl TransactionInner {
 	where
 		K: IntoBytes,
 	{
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// One epoch pin covers every version read in the scan
 		let _pin = crate::sync::pin();
 		// Prepare result vector
@@ -2233,10 +2236,7 @@ impl TransactionInner {
 	where
 		K: IntoBytes,
 	{
-		// Check to see if transaction is closed
-		if self.done {
-			return Err(Error::TxClosed);
-		}
+		self.check_active()?;
 		// One epoch pin covers every version read in the scan
 		let _pin = crate::sync::pin();
 		// Prepare result vector

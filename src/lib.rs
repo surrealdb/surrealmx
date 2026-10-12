@@ -53,6 +53,8 @@ mod version;
 mod version_cell;
 mod versions;
 
+pub mod stats;
+
 #[doc(hidden)]
 pub mod bench_internals;
 
@@ -76,6 +78,8 @@ pub use self::err::*;
 pub use self::kv::*;
 #[doc(inline)]
 pub use self::options::*;
+#[doc(inline)]
+pub use self::stats::*;
 #[doc(inline)]
 pub use self::tx::*;
 

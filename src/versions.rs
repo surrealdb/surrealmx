@@ -79,7 +79,7 @@ impl Versions {
 
 	/// Returns a reference to the latest version, if any.
 	#[inline]
-	#[cfg(not(target_arch = "wasm32"))]
+	#[allow(dead_code)]
 	pub(crate) fn last(&self) -> Option<&Version> {
 		match self {
 			Self::Empty => None,
@@ -272,10 +272,48 @@ impl Versions {
 
 	/// The newest committed version and value for this key, or `None` when
 	/// the chain is empty or its newest entry is a delete tombstone.
-	#[cfg(not(target_arch = "wasm32"))]
 	#[inline]
+	#[allow(dead_code)]
 	pub(crate) fn latest(&self) -> Option<(u64, ByteSlice)> {
 		self.last().and_then(|v| v.value.clone().map(|val| (v.version, val)))
+	}
+
+	/// The newest committed version and value for this key at or below
+	/// `version`, or `None` when the chain is empty, has no version at or
+	/// below `version`, or its newest entry at or below `version` is a
+	/// delete tombstone.
+	#[inline]
+	#[allow(dead_code)]
+	pub(crate) fn latest_at_version(&self, version: u64) -> Option<(u64, ByteSlice)> {
+		match self {
+			Self::Empty => None,
+			Self::Single(ref v) => {
+				if v.version <= version {
+					v.value.clone().map(|val| (v.version, val))
+				} else {
+					None
+				}
+			}
+			Self::Chain(ref chain) => {
+				let idx = self.find_index_lte_version(version);
+				if idx > 0 {
+					chain.get(idx - 1).and_then(|v| v.value.clone().map(|val| (v.version, val)))
+				} else {
+					None
+				}
+			}
+		}
+	}
+
+	/// The number of versions in this chain and their estimated size in bytes
+	/// for a key of `key_len` bytes, counting the key once per version.
+	pub(crate) fn footprint(&self, key_len: usize) -> (usize, usize) {
+		let sizes = |v: &Version| key_len + v.value.as_ref().map_or(0, ByteSlice::len);
+		match self {
+			Self::Empty => (0, 0),
+			Self::Single(ref v) => (1, sizes(v)),
+			Self::Chain(ref chain) => (chain.len(), chain.iter().map(sizes).sum()),
+		}
 	}
 
 	/// Whether a future garbage-collection pass could reclaim anything from
@@ -857,5 +895,19 @@ mod tests {
 			"Versions grew to {} bytes; the per-key inline footprint must stay <= 40 bytes",
 			std::mem::size_of::<Versions>()
 		);
+	}
+
+	#[test]
+	fn latest_at_version_respects_cut_and_tombstones() {
+		let versions = make_versions(vec![(10, Some("v1")), (20, Some("v2")), (30, None)]);
+		assert_eq!(versions.latest_at_version(5), None);
+		assert_eq!(versions.latest_at_version(10), Some((10, ByteSlice::from("v1"))));
+		assert_eq!(versions.latest_at_version(15), Some((10, ByteSlice::from("v1"))));
+		assert_eq!(versions.latest_at_version(20), Some((20, ByteSlice::from("v2"))));
+		assert_eq!(versions.latest_at_version(25), Some((20, ByteSlice::from("v2"))));
+		// Version 30 is a tombstone (None), so at version 30 or beyond it must
+		// return None
+		assert_eq!(versions.latest_at_version(30), None);
+		assert_eq!(versions.latest_at_version(100), None);
 	}
 }
