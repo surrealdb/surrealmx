@@ -24,6 +24,7 @@ use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
 use crate::persistence::Persistence;
 use crate::pool::Pool;
 use crate::pool::DEFAULT_POOL_SIZE;
+use crate::stats::DatabaseStats;
 use crate::thread_slot::ThreadSnapshot;
 use crate::tx::Transaction;
 use byteslice::ByteSlice;
@@ -157,6 +158,21 @@ impl Database {
 		Ok(db)
 	}
 
+	/// Returns whether the database has been stopped due to an error.
+	pub fn is_poisoned(&self) -> bool {
+		self.inner.is_poisoned()
+	}
+
+	/// Checks whether the database has been stopped, returning an error if so.
+	pub fn check_poisoned(&self) -> Result<(), Error> {
+		self.inner.check_poisoned()
+	}
+
+	/// Returns current runtime statistics for the database.
+	pub fn stats(&self) -> DatabaseStats {
+		self.inner.stats()
+	}
+
 	/// Start a new transaction on this database
 	pub fn transaction(&self, write: bool) -> Transaction {
 		self.pool.get(write)
@@ -169,6 +185,7 @@ impl Database {
 	/// progress. It holds no snapshot, so use a transaction to read several
 	/// keys consistently.
 	pub fn get<K: IntoBytes>(&self, key: K) -> Result<Option<ByteSlice>, Error> {
+		self.inner.check_poisoned()?;
 		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
 		let lookup = key.as_slice();
 		let retired = self.inner.merge_retire_id.load(Ordering::Acquire);
@@ -197,6 +214,7 @@ impl Database {
 		K: IntoBytes,
 		F: FnOnce(&[u8]) -> R,
 	{
+		self.inner.check_poisoned()?;
 		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
 		let lookup = key.as_slice();
 		// Only taken if the merge queue holds the key's newest write
@@ -225,6 +243,7 @@ impl Database {
 	/// Check if a key exists directly without allocating a transaction.
 	/// Linearizable, as [`Database::get`].
 	pub fn exists<K: IntoBytes>(&self, key: K) -> Result<bool, Error> {
+		self.inner.check_poisoned()?;
 		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
 		let lookup = key.as_slice();
 		let retired = self.inner.merge_retire_id.load(Ordering::Acquire);
@@ -264,6 +283,7 @@ impl Database {
 		K: IntoBytes,
 		F: FnMut(&ByteSlice, &[u8]) -> bool,
 	{
+		self.inner.check_poisoned()?;
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
 		// Pin a snapshot for the whole scan: without it, inline GC in
@@ -321,6 +341,7 @@ impl Database {
 		K: IntoBytes,
 		F: FnMut(&ByteSlice) -> bool,
 	{
+		self.inner.check_poisoned()?;
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
 		// Pin a snapshot for the whole scan: without it, inline GC in
@@ -371,6 +392,7 @@ impl Database {
 	where
 		K: IntoBytes,
 	{
+		self.inner.check_poisoned()?;
 		let beg = rng.start.into_bytes();
 		let end = rng.end.into_bytes();
 		// Pin a snapshot for the whole scan: without it, inline GC in

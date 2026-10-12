@@ -140,7 +140,6 @@ impl GcCandidates {
 	}
 
 	/// The number of distinct tracked keys.
-	#[cfg(test)]
 	pub(crate) fn len(&self) -> usize {
 		let mut keys: Vec<ByteSlice> = lock(&self.shared).clone();
 		for buffer in lock(&self.registry).iter() {

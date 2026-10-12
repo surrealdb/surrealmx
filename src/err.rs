@@ -54,6 +54,22 @@ pub enum Error {
 	/// A transaction is not persistent.
 	#[error("Transaction is not persistent")]
 	TxCommitNotPersisted(PersistenceError),
+
+	/// The database is stopped due to an internal or persistence failure.
+	#[error("Database is stopped: {0}")]
+	DatabasePoisoned(String),
+
+	/// A transaction exceeded its configured maximum age.
+	#[error("Transaction has exceeded maximum transaction age")]
+	TxTooOld,
+
+	/// The database memory limit has been reached.
+	#[error("Database memory limit reached")]
+	MemoryLimit,
+
+	/// The asynchronous persistence queue is full.
+	#[error("Asynchronous persistence queue is full")]
+	AsyncQueueFull,
 }
 
 /// The errors that can occur during persistence operations.
@@ -87,6 +103,10 @@ pub enum PersistenceError {
 	/// recognised format.
 	#[error("AOL is corrupted: {0}")]
 	Corrupted(String),
+
+	/// The asynchronous persistence queue is full.
+	#[error("Asynchronous persistence queue is full")]
+	AsyncQueueFull,
 }
 
 impl<T> From<PoisonError<std::sync::MutexGuard<'_, T>>> for PersistenceError {

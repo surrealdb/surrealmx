@@ -21,6 +21,7 @@ use crate::compression::CompressedWriter;
 use crate::compression::CompressionMode;
 use crate::err::PersistenceError;
 use crate::inner::Inner;
+use crate::readers::Readers;
 use crate::sync::RwLock;
 use crate::version::Version;
 use crate::version_cell::VersionCell;
@@ -32,7 +33,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use web_time::{Duration, Instant};
@@ -218,6 +219,7 @@ struct AolReplay {
 pub(crate) struct AsyncAppendOperation {
 	pub version: u64,
 	pub writeset: BTreeMap<ByteSlice, Option<ByteSlice>>,
+	pub batch_bytes: usize,
 }
 
 /// A slot representing a synchronous commit request waiting in a group commit
@@ -381,6 +383,10 @@ pub struct PersistenceOptions {
 	pub snapshot_path: Option<PathBuf>,
 	/// Compression mode for snapshots
 	pub compression_mode: CompressionMode,
+	/// Maximum depth of the asynchronous persistence queue (number of batches)
+	pub max_async_queue_depth: Option<usize>,
+	/// Maximum size of the asynchronous persistence queue in bytes
+	pub max_async_queue_bytes: Option<usize>,
 }
 
 impl Default for PersistenceOptions {
@@ -393,6 +399,8 @@ impl Default for PersistenceOptions {
 			aol_path: None,
 			snapshot_path: None,
 			compression_mode: CompressionMode::default(),
+			max_async_queue_depth: None,
+			max_async_queue_bytes: None,
 		}
 	}
 }
@@ -447,6 +455,18 @@ impl PersistenceOptions {
 		self.compression_mode = mode;
 		self
 	}
+
+	/// Set the maximum depth of the asynchronous persistence queue
+	pub const fn with_max_async_queue_depth(mut self, depth: usize) -> Self {
+		self.max_async_queue_depth = Some(depth);
+		self
+	}
+
+	/// Set the maximum bytes of the asynchronous persistence queue
+	pub const fn with_max_async_queue_bytes(mut self, bytes: usize) -> Self {
+		self.max_async_queue_bytes = Some(bytes);
+		self
+	}
 }
 
 /// A persistence layer for storing and loading database state
@@ -491,7 +511,48 @@ pub struct Persistence {
 	pub(crate) async_append_injector: Arc<Injector<AsyncAppendOperation>>,
 	/// Group commit coordinator for synchronous AOL appends
 	pub(crate) group_committer: Arc<GroupCommitter>,
+	/// Mutex ensuring only one snapshot runs at a time
+	pub(crate) snapshot_mutex: Arc<parking_lot::Mutex<()>>,
+	/// Current depth of the asynchronous append queue
+	pub(crate) async_queue_depth: Arc<AtomicUsize>,
+	/// Current bytes in the asynchronous append queue
+	pub(crate) async_queue_bytes: Arc<AtomicUsize>,
+	/// Maximum depth of the asynchronous append queue
+	pub(crate) max_async_queue_depth: Option<usize>,
+	/// Maximum bytes in the asynchronous append queue
+	pub(crate) max_async_queue_bytes: Option<usize>,
+	/// Total number of dropped asynchronous batches
+	pub(crate) dropped_batches: Arc<AtomicU64>,
 }
+
+struct ReaderPinGuard<'a> {
+	readers: &'a Readers,
+	slot: usize,
+}
+
+impl Drop for ReaderPinGuard<'_> {
+	fn drop(&mut self) {
+		self.readers.release(self.slot);
+	}
+}
+
+struct PanicPoisonGuard {
+	inner: Weak<Inner>,
+}
+
+impl Drop for PanicPoisonGuard {
+	fn drop(&mut self) {
+		if std::thread::panicking() {
+			if let Some(inner) = self.inner.upgrade() {
+				inner.poison("Async persistence worker panicked");
+			}
+		}
+	}
+}
+
+static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+static TRUNCATE_COUNTER: AtomicU64 = AtomicU64::new(0);
+const ASYNC_APPENDER_BATCH_SIZE: usize = 100;
 
 impl Persistence {
 	/// Creates a new persistence layer with custom options
@@ -557,6 +618,10 @@ impl Persistence {
 		}
 		let pending_syncs = Arc::new(AtomicU64::new(0));
 		let group_committer = Arc::new(GroupCommitter::new(Arc::clone(&pending_syncs)));
+		let snapshot_mutex = Arc::new(parking_lot::Mutex::new(()));
+		let async_queue_depth = Arc::new(AtomicUsize::new(0));
+		let async_queue_bytes = Arc::new(AtomicUsize::new(0));
+		let dropped_batches = Arc::new(AtomicU64::new(0));
 		// Create the persistence instance
 		let this = Self {
 			inner: Arc::downgrade(inner),
@@ -575,6 +640,12 @@ impl Persistence {
 			pending_syncs,
 			async_append_injector: Arc::new(Injector::new()),
 			group_committer,
+			snapshot_mutex,
+			async_queue_depth,
+			async_queue_bytes,
+			max_async_queue_depth: options.max_async_queue_depth,
+			max_async_queue_bytes: options.max_async_queue_bytes,
+			dropped_batches,
 		};
 		// Load existing data from disk
 		this.load(inner)?;
@@ -591,47 +662,72 @@ impl Persistence {
 	/// Creates a new snapshot of the current database state
 	///
 	/// This function:
-	/// 1. Captures the current AOL file position as a cutoff point
-	/// 2. Creates a new snapshot file atomically using a temporary file
-	/// 3. Streams data to reduce memory usage
-	/// 4. Truncates AOL only up to the cutoff position, preserving newer
+	/// 1. Locks the snapshot mutex to prevent concurrent snapshot operations
+	/// 2. Pins a reader slot in the database at the current commit watermark /
+	///    timestamp
+	/// 3. Captures the current AOL file position as a cutoff point
+	/// 4. Creates a new snapshot file atomically using a unique temporary file
+	/// 5. Streams data visible at the pinned version to reduce memory usage
+	/// 6. Safely truncates AOL only up to the cutoff position, preserving newer
 	///    entries
 	///
 	/// # Returns
 	/// * `Result<(), PersistenceError>` - Success or an error
 	pub fn snapshot(&self) -> Result<(), PersistenceError> {
+		// Acquire snapshot mutex so only one snapshot runs at a time
+		let _snapshot_lock = self.snapshot_mutex.lock();
+
 		// Hold the database state for the duration of the snapshot. It is
 		// gone once the database and all of its transactions are dropped.
 		let inner = self.inner.upgrade().ok_or_else(|| {
 			PersistenceError::SnapshotFailed("the database has been dropped".to_string())
 		})?;
-		// Create temporary file for atomic swap
-		let temp_path = self.snapshot_path.with_extension("tmp");
+
+		// Get the current position in the AOL file before snapshotting (if AOL
+		// is enabled). Sampling aol_cutoff_position BEFORE
+		// snapshot_version guarantees that every transaction already
+		// written to AOL before the cutoff has commit version <=
+		// snapshot_version, and is therefore included in the snapshot.
+		// Any transaction committed after snapshot_version
+		// was not written before aol_cutoff_position and is preserved in the
+		// AOL tail.
+		let aol_cutoff_position = if let Some(ref aol) = self.aol {
+			aol.lock()?.metadata()?.len()
+		} else {
+			0
+		};
+
+		// Pin a reader slot at the current oracle timestamp to establish a
+		// consistent cut
+		let snapshot_version = inner.oracle.timestamp.load(Ordering::SeqCst);
+		let slot = inner.readers.register();
+		let slot_ref = inner.readers.slot(slot);
+		slot_ref.commit.store(snapshot_version, Ordering::SeqCst);
+		slot_ref.version.store(snapshot_version, Ordering::SeqCst);
+
+		let _pin_guard = ReaderPinGuard {
+			readers: &inner.readers,
+			slot,
+		};
+
+		// Create unique temporary file for atomic swap in the same directory as
+		// snapshot_path
+		let counter = SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+		let pid = std::process::id();
+		let file_stem =
+			self.snapshot_path.file_name().and_then(|n| n.to_str()).unwrap_or("snapshot");
+		let temp_name = format!("{file_stem}.{pid}_{counter}.tmp");
+		let temp_path = self.snapshot_path.with_file_name(temp_name);
+
 		// Execute snapshot operation in closure for clean error handling
 		let result = (|| -> Result<(), PersistenceError> {
 			// Create temporary file
 			let file = File::create(&temp_path)?;
 			// Create compressed writer (handles buffering internally)
 			let mut writer = CompressedWriter::new(file, self.compression_mode)?;
-			// Get the current position in the AOL file (if AOL is enabled)
-			let aol_cutoff_position = if let Some(ref aol) = self.aol {
-				aol.lock()?.metadata()?.len()
-			} else {
-				0
-			};
-			// Stream write each key-value pair to reduce memory usage
+			// Stream write each key-value pair visible at snapshot_version
 			for entry in &inner.datastore {
-				// Persist only the latest committed version of each key. Keys
-				// whose newest entry is a delete tombstone are omitted: on
-				// reload the key is simply absent, which is the same
-				// observable state. The encoded element type is unchanged, so
-				// snapshot files remain readable across releases in both
-				// directions.
-				// `latest` returns owned values, so the per-key version read
-				// guard is released at the end of this
-				// statement rather than being held across
-				// the encode and write below.
-				let latest = entry.value().read(Versions::latest);
+				let latest = entry.value().read(|v| v.latest_at_version(snapshot_version));
 				if let Some((version, value)) = latest {
 					// Serialize and write this single entry
 					bincode::serde::encode_into_std_write(
@@ -645,8 +741,20 @@ impl Persistence {
 			writer.flush()?;
 			// Finish compression (finalizes LZ4 stream)
 			writer.finish()?;
+			// Sync temporary file before renaming
+			{
+				let temp_file = OpenOptions::new().write(true).open(&temp_path)?;
+				temp_file.sync_all()?;
+			}
 			// Atomically rename temporary file to actual snapshot
 			fs::rename(&temp_path, &self.snapshot_path)?;
+			// Sync parent directory on Unix
+			#[cfg(unix)]
+			if let Some(parent) = self.snapshot_path.parent() {
+				if let Ok(dir) = File::open(parent) {
+					let _ = dir.sync_all();
+				}
+			}
 			// Sync the renamed file to disk for durability (write access
 			// required on Windows for FlushFileBuffers)
 			{
@@ -654,7 +762,7 @@ impl Persistence {
 				final_file.sync_all()?;
 			}
 			// Truncate AOL only up to the cutoff position
-			Self::truncate(self.aol.as_ref(), aol_cutoff_position, &self.pending_syncs)?;
+			self.truncate(aol_cutoff_position)?;
 			// All ok
 			Ok(())
 		})();
@@ -1010,75 +1118,85 @@ impl Persistence {
 		clippy::significant_drop_tightening,
 		reason = "the file guard must cover the pending_syncs store, or a concurrent append's increment is silently discarded along with its required fsync"
 	)]
-	fn truncate(
-		aol: Option<&Arc<Mutex<File>>>,
-		position: u64,
-		pending_syncs: &Arc<AtomicU64>,
-	) -> Result<(), PersistenceError> {
-		// Check that we have a AOL file handle
-		if let Some(aol) = aol {
-			// Lock the AOL file. The mutex is deliberately held past its last
-			// file use so that it still covers the `pending_syncs` store below.
+	pub(crate) fn truncate(&self, position: u64) -> Result<(), PersistenceError> {
+		if let Some(ref aol) = self.aol {
 			let mut file = aol.lock()?;
-			// Get the current file length
 			let file_len = file.metadata()?.len();
-			// Check if there is remaining data
-			if file_len <= position {
-				// Truncate the AOL file
-				file.set_len(0)?;
-				// Flush the file contents
-				file.flush()?;
-			} else if position > 0 {
-				// Everything after the cutoff is kept. With nothing before the
-				// cutoff there is nothing to cut, and the data already opens
-				// with the header.
-				static TRUNCATE_COUNTER: AtomicU64 = AtomicU64::new(0);
-				let id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
-				// Generate a unique name for the temporary file
-				let name = format!("aol_truncate_{}_{id}.tmp", std::process::id());
-				// Generate the path for the temporary file
-				let path = std::env::temp_dir().join(name);
-				// Execute truncation in a closure for clean error handling
-				let result = (|| -> Result<(), PersistenceError> {
-					// Create temporary file and copy remaining data
-					{
+
+			// Generate a unique name for the temporary file in the same
+			// directory as AOL
+			let id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
+			let pid = std::process::id();
+			let file_stem = self.aol_path.file_name().and_then(|n| n.to_str()).unwrap_or("aol");
+			let new_name = format!("{file_stem}.{pid}_{id}.new");
+			let new_path = self.aol_path.with_file_name(new_name);
+
+			let result = (|| -> Result<(), PersistenceError> {
+				{
+					let mut new_file = OpenOptions::new()
+						.create(true)
+						.read(true)
+						.write(true)
+						.truncate(true)
+						.open(&new_path)?;
+
+					new_file.write_all(&AOL_MAGIC)?;
+
+					if position < file_len {
 						file.seek(SeekFrom::Start(position))?;
-						// Create the temporary file
-						let mut temp = File::create(&path)?;
-						// Copy the remaining data to the temporary file
-						std::io::copy(&mut *file, &mut temp)?;
-						// Sync the temporary file
-						temp.sync_all()?;
+						std::io::copy(&mut *file, &mut new_file)?;
 					}
-					// Go to the beginning of the file
-					file.seek(SeekFrom::Start(0))?;
-					// Truncate the AOL file
-					file.set_len(0)?;
-					// The remaining data starts on a frame boundary, so the
-					// file is reopened with the header in
-					// front of it
-					file.write_all(&AOL_MAGIC)?;
-					// Copy data from temporary file
+
+					new_file.flush()?;
+					new_file.sync_all()?;
+				}
+
+				#[cfg(windows)]
+				{
+					// On Windows, rename over an open file fails with
+					// ERROR_ACCESS_DENIED. Replace the
+					// handle in *file with a dummy open temp file before
+					// rename.
+					let dummy_path = self.aol_path.with_extension("dummy");
+					if let Ok(dummy) =
+						OpenOptions::new().create(true).read(true).write(true).open(&dummy_path)
 					{
-						let mut temp = File::open(&path)?;
-						std::io::copy(&mut temp, &mut *file)?;
+						*file = dummy;
+						let _ = fs::remove_file(&dummy_path);
 					}
-					// Flush the file contents
-					file.flush()?;
-					// All ok
-					Ok(())
-				})();
-				// Delete the temporary file
-				let _ = fs::remove_file(&path);
-				// Return the result
+				}
+
+				fs::rename(&new_path, &self.aol_path)?;
+
+				#[cfg(unix)]
+				if let Some(parent) = self.aol_path.parent() {
+					if let Ok(dir) = File::open(parent) {
+						let _ = dir.sync_all();
+					}
+				}
+
+				let mut reopened = OpenOptions::new()
+					.create(true)
+					.read(true)
+					.write(true)
+					.truncate(false)
+					.open(&self.aol_path)?;
+				reopened.seek(SeekFrom::End(0))?;
+				*file = reopened;
+
+				Ok(())
+			})();
+
+			if result.is_err() {
+				let _ = fs::remove_file(&new_path);
 				result?;
 			}
-			// Reset pending syncs if we truncated to beginning
-			if position == 0 {
-				pending_syncs.store(0, Ordering::Release);
+
+			// Reset pending syncs if we truncated to beginning or beyond
+			if position == 0 || file_len <= position {
+				self.pending_syncs.store(0, Ordering::Release);
 			}
 		}
-		// All ok
 		Ok(())
 	}
 
@@ -1129,12 +1247,6 @@ impl Persistence {
 	}
 
 	/// Spawns a background worker thread for periodic snapshots
-	///
-	/// The worker thread:
-	/// 1. Sleeps for the configured interval
-	/// 2. Captures the current AOL file position
-	/// 3. Creates a new snapshot
-	/// 4. Truncates AOL up to the cutoff, preserving newer entries
 	fn spawn_snapshot_worker(&self) {
 		// Check if snapshots are enabled
 		if self.snapshot_mode == SnapshotMode::Never {
@@ -1146,15 +1258,8 @@ impl Persistence {
 		};
 		// Check if a background thread is already running
 		if self.snapshot_handle.read().is_none() {
-			// Clone necessary fields for the worker thread. The database
-			// state is held weakly and only upgraded for the duration of a
-			// snapshot, so an idle worker never keeps it alive.
-			let inner = Weak::clone(&self.inner);
-			let aol = self.aol.clone();
-			let snapshot_path = self.snapshot_path.clone();
-			let pending_syncs = Arc::clone(&self.pending_syncs);
+			let this = self.clone();
 			let enabled = Arc::clone(&self.background_threads_enabled);
-			let compression = self.compression_mode;
 			// Spawn the background worker thread
 			let handle = thread::spawn(move || {
 				// Check whether the persistence process is enabled
@@ -1165,70 +1270,12 @@ impl Persistence {
 					if !enabled.load(Ordering::Acquire) {
 						break;
 					}
-					// Hold the database state for this snapshot, or stop if it
-					// has already been dropped
-					let Some(db) = inner.upgrade() else {
+					// If the database has been dropped, exit
+					if this.inner.upgrade().is_none() {
 						break;
-					};
-					// Create temporary file for atomic swap
-					let temp_path = snapshot_path.with_extension("tmp");
-					// Ensure clean error handling in closure
-					let result = (|| -> Result<(), PersistenceError> {
-						// Create temporary file
-						let file = File::create(&temp_path)?;
-						// Create compressed writer (handles buffering
-						// internally)
-						let mut writer = CompressedWriter::new(file, compression)?;
-						// Get the current position in the AOL file before
-						// snapshotting (if AOL enabled)
-						let aol_cutoff_position = if let Some(ref aol) = aol {
-							aol.lock()?.metadata()?.len()
-						} else {
-							0
-						};
-						// Stream write each entry to reduce memory usage
-						for entry in &db.datastore {
-							// Persist only the latest committed version of
-							// each key, omitting keys whose newest entry is
-							// a delete tombstone. See `snapshot()` above.
-							// `latest` returns owned values, so the per-key
-							// version read guard is
-							// released at the end of this statement rather than
-							// being held across the
-							// encode and write below.
-							let latest = entry.value().read(Versions::latest);
-							if let Some((version, value)) = latest {
-								// Serialize and write this single entry
-								bincode::serde::encode_into_std_write(
-									&(entry.key().clone(), vec![(version, Some(value))]),
-									&mut writer,
-									config::standard(),
-								)?;
-							}
-						}
-						// Flush the compressed writer
-						writer.flush()?;
-						// Finish compression (finalizes LZ4 stream)
-						writer.finish()?;
-						// Atomically rename temporary file to actual snapshot
-						fs::rename(&temp_path, &snapshot_path)?;
-						// Sync the renamed file to disk for durability (write
-						// access required on Windows for FlushFileBuffers)
-						{
-							let final_file = OpenOptions::new().write(true).open(&snapshot_path)?;
-							final_file.sync_all()?;
-						}
-						// Truncate AOL to the cutoff position
-						Self::truncate(aol.as_ref(), aol_cutoff_position, &pending_syncs)?;
-						// All ok
-						Ok(())
-					})();
-					// Check if the snapshot operation failed
-					if let Err(e) = result {
-						// Trace the snapshot worker error
+					}
+					if let Err(e) = this.snapshot() {
 						tracing::error!("Snapshot worker error: {e}");
-						// Clean up temporary file if it exists
-						let _ = fs::remove_file(&temp_path);
 					}
 				}
 			});
@@ -1255,12 +1302,17 @@ impl Persistence {
 				let enabled = Arc::clone(&self.background_threads_enabled);
 				let pending_syncs = Arc::clone(&self.pending_syncs);
 				let last_fsync = Arc::clone(&self.last_fsync);
+				let queue_depth = Arc::clone(&self.async_queue_depth);
+				let queue_bytes = Arc::clone(&self.async_queue_bytes);
+				let dropped_batches = Arc::clone(&self.dropped_batches);
+				let inner_weak = Weak::clone(&self.inner);
 				// Spawn the background worker thread
 				let handle = thread::spawn(move || {
-					// Set the batch size
-					const BATCH_SIZE: usize = 100;
+					let _unwind_guard = PanicPoisonGuard {
+						inner: Weak::clone(&inner_weak),
+					};
 					// Initialize the batch vector and reusable scratch buffer
-					let mut batch = Vec::with_capacity(BATCH_SIZE);
+					let mut batch = Vec::with_capacity(ASYNC_APPENDER_BATCH_SIZE);
 					let mut scratch = Vec::with_capacity(8192);
 					loop {
 						// Clear the batch
@@ -1279,8 +1331,10 @@ impl Persistence {
 									std::thread::yield_now();
 								}
 								Steal::Success(op) => {
+									queue_depth.fetch_sub(1, Ordering::Relaxed);
+									queue_bytes.fetch_sub(op.batch_bytes, Ordering::Relaxed);
 									batch.push(op);
-									if batch.len() == BATCH_SIZE {
+									if batch.len() == ASYNC_APPENDER_BATCH_SIZE {
 										break;
 									}
 								}
@@ -1372,8 +1426,13 @@ impl Persistence {
 							})();
 							// Check if the async append operation failed
 							if let Err(e) = result {
-								// Trace the snapshot worker error
-								tracing::error!("Async append worker error: {e}");
+								let err_msg = format!("Async append worker error: {e}");
+								tracing::error!("{err_msg}");
+								dropped_batches.fetch_add(batch.len() as u64, Ordering::Relaxed);
+								if let Some(inner) = inner_weak.upgrade() {
+									inner.poison(err_msg);
+								}
+								return;
 							}
 						}
 					}
@@ -1384,7 +1443,42 @@ impl Persistence {
 		}
 	}
 
-	/// Appends a set of changes to the append-only log
+	/// Pre-check if the asynchronous persistence queue has capacity for the
+	/// given writeset.
+	///
+	/// # Arguments
+	/// * `writeset` - Map of key-value changes to check
+	///
+	/// # Returns
+	/// * `Result<(), PersistenceError>` - Success or an error
+	pub(crate) fn check_async_capacity(
+		&self,
+		writeset: &BTreeMap<ByteSlice, Option<ByteSlice>>,
+	) -> Result<(), PersistenceError> {
+		if self.aol_mode != AolMode::AsynchronousAfterCommit || writeset.is_empty() {
+			return Ok(());
+		}
+		let batch_bytes: usize =
+			writeset.iter().map(|(k, v)| k.len() + v.as_ref().map_or(0, ByteSlice::len) + 16).sum();
+
+		if let Some(max_depth) = self.max_async_queue_depth {
+			if self.async_queue_depth.load(Ordering::Relaxed) >= max_depth {
+				self.dropped_batches.fetch_add(1, Ordering::Relaxed);
+				return Err(PersistenceError::AsyncQueueFull);
+			}
+		}
+		if let Some(max_bytes) = self.max_async_queue_bytes {
+			if self.async_queue_bytes.load(Ordering::Relaxed).saturating_add(batch_bytes)
+				> max_bytes
+			{
+				self.dropped_batches.fetch_add(1, Ordering::Relaxed);
+				return Err(PersistenceError::AsyncQueueFull);
+			}
+		}
+		Ok(())
+	}
+
+	/// Appends a set of changes to the append-only log.
 	///
 	/// # Arguments
 	/// * `version` - The version (timestamp) for these changes
@@ -1409,10 +1503,33 @@ impl Persistence {
 		if let Some(ref aol) = self.aol {
 			// Handle asynchronous AOL mode by queuing the operation
 			if self.aol_mode == AolMode::AsynchronousAfterCommit {
+				let batch_bytes: usize = writeset
+					.iter()
+					.map(|(k, v)| k.len() + v.as_ref().map_or(0, ByteSlice::len) + 16)
+					.sum();
+
+				if let Some(max_depth) = self.max_async_queue_depth {
+					if self.async_queue_depth.load(Ordering::Relaxed) >= max_depth {
+						self.dropped_batches.fetch_add(1, Ordering::Relaxed);
+						return Err(PersistenceError::AsyncQueueFull);
+					}
+				}
+				if let Some(max_bytes) = self.max_async_queue_bytes {
+					if self.async_queue_bytes.load(Ordering::Relaxed).saturating_add(batch_bytes)
+						> max_bytes
+					{
+						self.dropped_batches.fetch_add(1, Ordering::Relaxed);
+						return Err(PersistenceError::AsyncQueueFull);
+					}
+				}
+
+				self.async_queue_depth.fetch_add(1, Ordering::Relaxed);
+				self.async_queue_bytes.fetch_add(batch_bytes, Ordering::Relaxed);
 				// Queue the append operation
 				self.async_append_injector.push(AsyncAppendOperation {
 					version,
 					writeset: writeset.clone(),
+					batch_bytes,
 				});
 				// Wake up the async append worker if available
 				if let Some(handle) = self.appender_handle.read().as_ref() {

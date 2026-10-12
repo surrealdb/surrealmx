@@ -22,10 +22,11 @@ use crate::persistence::Persistence;
 use crate::queue::Commit;
 use crate::readers::Readers;
 use crate::ring::{CommitRing, DEFAULT_COMMIT_RING_CAPACITY};
-#[cfg(not(target_arch = "wasm32"))]
+use crate::stats::{DatabaseStats, MemoryTracker};
 use crate::sync::RwLock;
 use crate::version_cell::VersionCell;
 use crate::DatabaseOptions;
+use crate::Error;
 use byteslice::ByteSlice;
 use crossbeam_utils::CachePadded;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -144,7 +145,20 @@ pub struct Inner {
 	pub(crate) garbage_collection_handle: RwLock<Option<JoinHandle<()>>>,
 	/// Threshold after which transaction state is reset
 	pub(crate) reset_threshold: usize,
+	/// Specifies whether the database has been stopped due to an error
+	pub(crate) is_poisoned: AtomicBool,
+	/// Stores the reason for the database being stopped
+	pub(crate) poison_reason: RwLock<Option<String>>,
+	/// Configured options
+	pub(crate) options: DatabaseOptions,
+	/// Memory accounting tracker
+	pub(crate) memory_tracker: Arc<MemoryTracker>,
 }
+
+#[cfg(test)]
+pub(crate) static INJECT_APPEND_FAILURE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static INJECT_APPLY_PANIC: AtomicBool = AtomicBool::new(false);
 
 impl Inner {
 	/// Create a new [`Inner`] structure with the given options.
@@ -166,11 +180,101 @@ impl Inner {
 			#[cfg(not(target_arch = "wasm32"))]
 			garbage_collection_handle: RwLock::new(None),
 			reset_threshold: opts.reset_threshold,
+			is_poisoned: AtomicBool::new(false),
+			poison_reason: RwLock::new(None),
+			options: opts.clone(),
+			memory_tracker: Arc::new(MemoryTracker::new()),
 		}
 	}
 }
 
 impl Inner {
+	/// Checks if the database has been stopped due to an error.
+	#[inline]
+	pub fn is_poisoned(&self) -> bool {
+		self.is_poisoned.load(Ordering::Acquire)
+	}
+
+	/// Checks if the database has been poisoned, returning an error if so.
+	#[inline]
+	pub fn check_poisoned(&self) -> Result<(), Error> {
+		if self.is_poisoned() {
+			let reason = self
+				.poison_reason
+				.read()
+				.as_ref()
+				.cloned()
+				.unwrap_or_else(|| "unspecified error".to_string());
+			Err(Error::DatabasePoisoned(reason))
+		} else {
+			Ok(())
+		}
+	}
+
+	/// Stops the database with a failure reason (fail-stop).
+	pub fn poison(&self, reason: impl Into<String>) {
+		let reason = reason.into();
+		tracing::error!("Database fail-stop triggered: {reason}");
+		let mut guard = self.poison_reason.write();
+		if guard.is_none() {
+			*guard = Some(reason);
+		}
+		drop(guard);
+		self.is_poisoned.store(true, Ordering::Release);
+	}
+
+	/// Collect runtime statistics for this database.
+	pub fn stats(&self) -> DatabaseStats {
+		let live_keys = self.datastore.len();
+		let live_versions = self.memory_tracker.total_versions();
+		let approx_data_bytes = self.memory_tracker.total_bytes();
+		let gc_candidate_keys = self.gc_candidates.len();
+		let oldest_pinned_version = self.readers.oldest_pinned_version();
+		let active_readers = self.readers.active_readers();
+
+		let commit_taken = self.commit_ring.taken();
+		let commit_wm = self.commit_watermark();
+		let commit_ring_occupancy = commit_wm.saturating_sub(commit_taken) as usize;
+
+		let oracle_ts = self.oracle.timestamp.load(Ordering::Acquire);
+		let merge_retired = self.merge_retire_id.load(Ordering::Acquire);
+		let merge_ring_occupancy = oracle_ts.saturating_sub(merge_retired) as usize;
+
+		#[cfg(not(target_arch = "wasm32"))]
+		let (async_queue_depth, async_queue_bytes, async_dropped_batches) = {
+			if let Some(ref p) = *self.persistence.read() {
+				(
+					p.async_queue_depth.load(Ordering::Relaxed),
+					p.async_queue_bytes.load(Ordering::Relaxed),
+					p.dropped_batches.load(Ordering::Relaxed),
+				)
+			} else {
+				(0, 0, 0)
+			}
+		};
+		#[cfg(target_arch = "wasm32")]
+		let (async_queue_depth, async_queue_bytes, async_dropped_batches) = (0, 0, 0);
+
+		let is_poisoned = self.is_poisoned();
+		let poison_reason = self.poison_reason.read().clone();
+
+		DatabaseStats {
+			live_keys,
+			live_versions,
+			approx_data_bytes,
+			gc_candidate_keys,
+			oldest_pinned_version,
+			active_readers,
+			commit_ring_occupancy,
+			merge_ring_occupancy,
+			async_queue_depth,
+			async_queue_bytes,
+			async_dropped_batches,
+			is_poisoned,
+			poison_reason,
+		}
+	}
+
 	/// Returns the minimum snapshot merge version across all pinned
 	/// transaction slots, bounded by `fallback`, or `None` when any slot
 	/// is mid-registration. See [`earliest_pinned`].

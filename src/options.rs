@@ -37,6 +37,13 @@ pub struct DatabaseOptions {
 	pub cleanup_interval: Duration,
 	/// Threshold after which transaction state maps are reset (default: 100).
 	pub reset_threshold: usize,
+	/// Maximum duration a transaction is allowed to remain active before
+	/// timing out (default: None). If exceeded, any subsequent operation on the
+	/// transaction fails with `Error::TxTooOld` and releases its reader slot.
+	pub max_transaction_age: Option<Duration>,
+	/// Optional memory limit in bytes for the database (default: None).
+	/// If exceeded, subsequent write operations fail with `Error::MemoryLimit`.
+	pub memory_limit: Option<usize>,
 }
 
 impl Default for DatabaseOptions {
@@ -48,6 +55,8 @@ impl Default for DatabaseOptions {
 			enable_cleanup: true,
 			cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
 			reset_threshold: DEFAULT_RESET_THRESHOLD,
+			max_transaction_age: None,
+			memory_limit: None,
 		}
 	}
 }
@@ -91,6 +100,18 @@ impl DatabaseOptions {
 	/// Set the threshold after which transaction state maps are reset.
 	pub const fn with_reset_threshold(mut self, threshold: usize) -> Self {
 		self.reset_threshold = threshold;
+		self
+	}
+
+	/// Set the maximum duration a transaction can remain active.
+	pub const fn with_max_transaction_age(mut self, age: Duration) -> Self {
+		self.max_transaction_age = Some(age);
+		self
+	}
+
+	/// Set a memory limit in bytes for the database.
+	pub const fn with_memory_limit(mut self, limit: usize) -> Self {
+		self.memory_limit = Some(limit);
 		self
 	}
 

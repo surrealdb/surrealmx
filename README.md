@@ -60,20 +60,20 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 
 ## Features
 
-- In-memory database
+- In-memory database with optional durability
 - Multi-version concurrency control (MVCC)
-- Lock-free circular commit ring buffer with $O(1)$ atomic slot claiming
-- Sharded active reader registry eliminating atomic cache-line contention across multi-core CPUs
+- Lock-free reads, point lookups, and active reader registry eliminating atomic cache-line contention across multi-core CPUs
+- Fine-grained per-key version locks for concurrent commit merges with a circular commit ring buffer
 - Rich transaction support with rollbacks and stackable savepoints
 - Direct auto-committing point operations (`db.get`, `db.set`, `db.del`, `db.put`, `db.exists`)
 - True zero-allocation range scanning (`scan_with`, `scan_into`, `keys_for_each`, `keys_into`)
-- Multiple concurrent readers and writers without global locks
-- Support for serializable and snapshot-isolated transactions
-- Atomicity, Consistency, Isolation, and optional Durability from ACID
+- Multiple concurrent readers and writers without global table locks
+- Strict serializability for update transactions and Snapshot Isolation for read-only transactions
+- Atomicity, Consistency, Isolation, and optional Durability (ACID)
 - Deterministic Simulation Tested (DST) against an in-memory linearizable model oracle across 25,000,000 operations with zero divergences
-- Optional persistence with configurable modes:
+- Optional persistence with configurable modes (defaults to in-memory only):
   - High-throughput Group Commit flusher for synchronous append-only logging
-  - Asynchronous background logging and periodic full-datastore snapshots
+  - Asynchronous background logging with queue depth/memory backpressure and periodic point-in-time snapshots
   - Configurable fsync modes and fast LZ4 snapshot file compression
 
 ## Quick Start
@@ -168,11 +168,11 @@ fn main() {
 
 ## Persistence Modes
 
-SurrealMX supports optional persistence with two modes:
+SurrealMX defaults to a purely in-memory engine (`AolMode::Never`, `SnapshotMode::Never`). Optional durability is enabled by providing [`PersistenceOptions`] to [`Database::new_with_persistence`].
 
-### Full persistence (AOL + Snapshots) - Default
+### Full persistence (AOL + Snapshots)
 
-Provides maximum durability by logging every change to an append-only log and taking periodic snapshots.
+Provides durability by logging every change to an append-only log (AOL) and taking periodic point-in-time snapshots.
 
 ```rust
 use surrealmx::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode};
@@ -357,16 +357,18 @@ Choose the configuration that best balances your durability requirements against
 
 ## Isolation Levels
 
-SurrealMX supports two isolation levels to balance between performance and consistency guarantees:
+SurrealMX provides two complementary isolation guarantees based on transaction intent:
+- **Update Transactions (`db.transaction(true)`)**: Execute with **Strict Serializable** guarantees. All reads (via `get`, `getm`, `scan`, etc.) and writes are tracked. At commit time, the transaction is conflict-checked against all concurrent commits occurring during its lifetime, preventing write-write conflicts (`KeyWriteConflict`), read-write anti-dependencies (`KeyReadConflict`), and write skew.
+- **Read-Only Transactions (`db.transaction(false)`)**: Execute with **Snapshot Isolation**. They observe a completely consistent, linearizable point-in-time cut of the database pinned at transaction creation without taking read locks.
 
-### Snapshot Isolation (Default)
+### Read-Only Transactions (Snapshot Isolation)
 
-Provides excellent performance with strong consistency guarantees. Transactions see a consistent snapshot of the database as it existed when the transaction began.
+Read-only transactions see a consistent snapshot of the database as it existed when the transaction began, with zero locking overhead.
 
 - **Read consistency**: All reads within a transaction see the same consistent view
-- **Write isolation**: Changes from other transactions are not visible until they commit
-- **No dirty reads**: Never see uncommitted changes from other transactions
-- **No non-repeatable reads**: Reading the same key multiple times returns the same value
+- **No dirty reads**: Never observe uncommitted changes from other transactions
+- **No non-repeatable reads**: Reading the same key multiple times returns the exact same value
+- **Wait-free lookups**: Lock-free reads via sharded reader registration slots
 
 ```rust
 use surrealmx::Database;
@@ -374,7 +376,7 @@ use surrealmx::Database;
 fn main() {
     let db = Database::new();
     
-    // Snapshot isolation (default behavior)
+    // Start an update transaction and a read-only transaction
     let mut tx1 = db.transaction(true);
     let mut tx2 = db.transaction(false); // Start tx2 before tx1 commits
     
@@ -387,14 +389,14 @@ fn main() {
 }
 ```
 
-### Serializable Snapshot Isolation
+### Update Transactions (Strict Serializability)
 
-Provides the strongest consistency guarantee by detecting read-write conflicts and aborting transactions that would violate serializability.
+Update transactions provide strict serializability by detecting read-write conflicts and aborting transactions that would violate serializability.
 
-- **All Snapshot Isolation guarantees**: Plus additional conflict detection
-- **Read-write conflict detection**: Prevents phantom reads and write skew
-- **Serializable execution**: Equivalent to running transactions one at a time
-- **Higher abort rate**: More transactions may need to retry due to conflicts
+- **All Snapshot Isolation guarantees**: Plus full read-write conflict detection
+- **Anti-dependency conflict detection**: Prevents phantom reads, dirty writes, and write skew
+- **Serializable execution**: Equivalent to a strictly serial ordering of committing transactions
+- **Safe retries**: Aborted transactions return [`Error::KeyReadConflict`] or [`Error::KeyWriteConflict`] and can be safely retried
 
 ```rust
 use surrealmx::{Database, Error};
