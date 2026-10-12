@@ -47,17 +47,17 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 
 ### Scan Profile
 
-Range scans over the same 15,000,000-key dataset, as scans per second: 5,000,000 iterations of each limit and skip scan, and 1,000 counts over the full key range.
+Range scans over the same dataset, as scans per second: limit and skip scans, and counts over the full key range. These figures are pending and will be filled in once the benchmarks are complete.
 
 | Engine | Limit&nbsp;(OPS) | Keys,&nbsp;Limit&nbsp;(OPS) | Skip&nbsp;+&nbsp;Limit&nbsp;(OPS) | Keys,&nbsp;Skip&nbsp;+&nbsp;Limit&nbsp;(OPS) | Full&nbsp;Count&nbsp;(OPS) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**17,741,053** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**17,754,720** | 257,840 | 302,465 | 18.9 |
-| LMDB<br><sup>(In-Memory)</sup> | 1,186,447 | 1,188,970 | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**549,029** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**549,634** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**24.1** |
-| RocksDB<br><sup>(In-Memory)</sup> | 839,268 | 836,419 | 43,231 | 43,490 | 5.3 |
+| **SurrealMX** | - | - | - | - | - |
+| LMDB<br><sup>(In-Memory)</sup> | - | - | - | - | - |
+| RocksDB<br><sup>(In-Memory)</sup> | - | - | - | - | - |
 
-- **Limit**: `select(*) limit(100)` returns the first 100 key-value pairs of the range: **15× faster** than LMDB and **21× faster** than RocksDB. **Keys, Limit** (`select(id) limit(100)`) returns only the keys, at the same rate.
-- **Skip + Limit**: `select(*) start(5000) limit(100)` walks and discards 5,000 entries, checking each one's visibility at the scan's snapshot, before returning 100: **6.0× faster** than RocksDB, while LMDB is **2.1× faster** than SurrealMX. Returning only the keys narrows LMDB's lead to 1.8×.
-- **Full Count**: `count()` visits every one of the 15,000,000 keys: **3.6× faster** than RocksDB, while LMDB is **1.3× faster** than SurrealMX.
+- **Limit**: `select(*) limit(100)` returns the first 100 key-value pairs of the range. **Keys, Limit** (`select(id) limit(100)`) returns only the keys.
+- **Skip + Limit**: `select(*) start(5000) limit(100)` walks and discards 5,000 entries before returning 100. **Keys, Skip + Limit** returns only the keys.
+- **Full Count**: `count()` visits every key in the range.
 
 ### Memory Profile
 
