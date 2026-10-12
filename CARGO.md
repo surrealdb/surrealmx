@@ -46,7 +46,7 @@ Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Pr
 
 Range scans over the same dataset, as scans per second: limit and skip scans, and counts over the full key range.
 
-| Engine | Limit&nbsp;(OPS) | Keys,&nbsp;Limit&nbsp;(OPS) | Skip&nbsp;+&nbsp;Limit&nbsp;(OPS) | Keys,&nbsp;Skip&nbsp;+&nbsp;Limit&nbsp;(OPS) | Full&nbsp;Count&nbsp;(OPS) |
+| Engine | &nbsp;&nbsp;&nbsp;&nbsp;Limit&nbsp;(OPS) | Keys,&nbsp;Limit&nbsp;(OPS) | Skip&nbsp;+&nbsp;Limit&nbsp;(OPS) | Keys,&nbsp;Skip&nbsp;+&nbsp;Limit&nbsp;(OPS) | Full&nbsp;Count&nbsp;(OPS) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
 | **SurrealMX** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**18,031,692** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**15,524,603** | 232,121 | 253,039 | 15.9 |
 | LMDB<br><sup>(In-Memory)</sup> | 1,188,365 | 1,187,876 | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**552,881** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**554,189** | <img width="16" align="absmiddle" src="https://raw.githubusercontent.com/surrealdb/surrealmx/main/img/rocket.png" alt="🚀">&nbsp;**24.2** |
