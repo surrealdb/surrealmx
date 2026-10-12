@@ -1169,7 +1169,14 @@ impl Persistence {
 
 					if position < file_len {
 						file.seek(SeekFrom::Start(position))?;
-						std::io::copy(&mut *file, &mut new_file)?;
+						let mut buffer = [0u8; 8192];
+						loop {
+							let n = file.read(&mut buffer)?;
+							if n == 0 {
+								break;
+							}
+							new_file.write_all(&buffer[..n])?;
+						}
 					}
 
 					new_file.flush()?;
