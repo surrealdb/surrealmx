@@ -73,7 +73,7 @@ impl MemoryTracker {
 				use std::hash::{Hash, Hasher};
 				let mut hasher = std::collections::hash_map::DefaultHasher::new();
 				std::thread::current().id().hash(&mut hasher);
-				(hasher.finish() as usize) % 32
+				usize::try_from(hasher.finish() % 32).unwrap_or(0)
 			};
 		}
 		SHARD_IDX.with(|idx| *idx)
@@ -100,7 +100,7 @@ impl MemoryTracker {
 		for s in &self.shards_bytes {
 			sum += s.load(Ordering::Relaxed);
 		}
-		sum.max(0) as usize
+		usize::try_from(sum).unwrap_or(0)
 	}
 
 	#[inline]
@@ -109,6 +109,6 @@ impl MemoryTracker {
 		for s in &self.shards_versions {
 			sum += s.load(Ordering::Relaxed);
 		}
-		sum.max(0) as usize
+		usize::try_from(sum).unwrap_or(0)
 	}
 }

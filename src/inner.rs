@@ -234,11 +234,13 @@ impl Inner {
 
 		let commit_taken = self.commit_ring.taken();
 		let commit_wm = self.commit_watermark();
-		let commit_ring_occupancy = commit_wm.saturating_sub(commit_taken) as usize;
+		let commit_ring_occupancy =
+			usize::try_from(commit_wm.saturating_sub(commit_taken)).unwrap_or(usize::MAX);
 
 		let oracle_ts = self.oracle.timestamp.load(Ordering::Acquire);
 		let merge_retired = self.merge_retire_id.load(Ordering::Acquire);
-		let merge_ring_occupancy = oracle_ts.saturating_sub(merge_retired) as usize;
+		let merge_ring_occupancy =
+			usize::try_from(oracle_ts.saturating_sub(merge_retired)).unwrap_or(usize::MAX);
 
 		#[cfg(not(target_arch = "wasm32"))]
 		let (async_queue_depth, async_queue_bytes, async_dropped_batches) = {
