@@ -830,7 +830,8 @@ impl TransactionInner {
 					.map(|(k, v)| k.len() + v.as_ref().map_or(0, ByteSlice::len))
 					.sum();
 				if self.database.memory_tracker.total_bytes() + approx_new_bytes > limit {
-					self.database.readers.unpin(self.slot);
+					// The transaction stays open and pinned, so the caller
+					// can retry the commit or cancel it
 					return Err(Error::MemoryLimit);
 				}
 			}
@@ -839,7 +840,8 @@ impl TransactionInner {
 				if let Err(crate::err::PersistenceError::AsyncQueueFull) =
 					p.check_async_capacity(&self.writeset)
 				{
-					self.database.readers.unpin(self.slot);
+					// The transaction stays open and pinned, so the caller
+					// can retry the commit or cancel it
 					return Err(Error::AsyncQueueFull);
 				}
 			}
@@ -1001,11 +1003,6 @@ impl TransactionInner {
 				}
 			},
 		};
-		#[cfg(test)]
-		assert!(
-			!crate::inner::INJECT_APPLY_PANIC.load(Ordering::SeqCst),
-			"Injected panic during commit apply phase"
-		);
 		// Compute the inline-GC watermark lazily only if a key actually needs
 		// version reclamation, avoiding reader map scans when newly inserting
 		// keys.
@@ -1054,12 +1051,16 @@ impl TransactionInner {
 						.get_or_insert_with(|| self.database.inline_gc_watermark(self.slot));
 					// An update or insert into an existing chain, reclaiming
 					// superseded versions in the same replacement
+					let key_len = key.len();
 					let (remaining, needs_gc) = versions.update(|v| {
 						v.push(Version {
 							version,
 							value,
 						});
-						(w.map(|w| v.gc_older_versions(w)), v.needs_gc())
+						let before = v.footprint(key_len);
+						let remaining = w.map(|w| v.gc_older_versions(w));
+						self.database.memory_tracker.release(before, v.footprint(key_len));
+						(remaining, v.needs_gc())
 					});
 					if remaining == Some(0) {
 						entry.remove();
@@ -1103,20 +1104,7 @@ impl TransactionInner {
 		let persistence = self.database.persistence.read().clone();
 		#[cfg(not(target_arch = "wasm32"))]
 		if let Some(p) = persistence {
-			#[cfg(test)]
-			if crate::inner::INJECT_APPEND_FAILURE.load(Ordering::SeqCst) {
-				self.database.poison("Injected append failure");
-				self.database.readers.unpin(self.slot);
-				self.clear_read_state();
-				self.writeset.clear();
-				self.savepoint_stack.clear();
-				self.undo_journal.clear();
-				return Err(Error::TxCommitNotPersisted(crate::err::PersistenceError::Io(
-					std::io::Error::other("Injected append failure"),
-				)));
-			}
 			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
-				let is_queue_full = matches!(e, crate::err::PersistenceError::AsyncQueueFull);
 				self.database
 					.poison(format!("Failed to append transaction version {version} to AOL: {e}"));
 				// Do NOT remove the entry here: the merge clock's
@@ -1139,9 +1127,6 @@ impl TransactionInner {
 				// Clear savepoint stack and undo journal
 				self.savepoint_stack.clear();
 				self.undo_journal.clear();
-				if is_queue_full {
-					return Err(Error::AsyncQueueFull);
-				}
 				// Return a persistence error
 				return Err(Error::TxCommitNotPersisted(e));
 			}

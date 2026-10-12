@@ -305,6 +305,17 @@ impl Versions {
 		}
 	}
 
+	/// The number of versions in this chain and their estimated size in bytes
+	/// for a key of `key_len` bytes, counting the key once per version.
+	pub(crate) fn footprint(&self, key_len: usize) -> (usize, usize) {
+		let sizes = |v: &Version| key_len + v.value.as_ref().map_or(0, ByteSlice::len);
+		match self {
+			Self::Empty => (0, 0),
+			Self::Single(ref v) => (1, sizes(v)),
+			Self::Chain(ref chain) => (chain.len(), chain.iter().map(sizes).sum()),
+		}
+	}
+
 	/// Whether a future garbage-collection pass could reclaim anything from
 	/// this chain.
 	#[inline]

@@ -165,3 +165,79 @@ fn test_database_poison_state() {
 	db.set("test_key", "test_val").unwrap();
 	assert_eq!(db.get("test_key").unwrap(), Some("test_val".into()));
 }
+
+#[test]
+fn test_memory_accounting_releases_garbage_collected_versions() {
+	let opts = DatabaseOptions::default().with_all_workers_disabled();
+	let db = Database::new_with_options(opts);
+
+	// A pinned reader keeps every overwritten version alive
+	let reader = db.transaction(false);
+	for i in 0..50 {
+		let mut tx = db.transaction(true);
+		tx.set("key", format!("value-{i:04}")).unwrap();
+		tx.commit().unwrap();
+	}
+	let before = db.stats();
+	assert_eq!(before.live_versions, 50);
+
+	// Once the reader is gone, collecting leaves one version and the
+	// accounting follows
+	drop(reader);
+	db.run_gc();
+	let after = db.stats();
+	assert_eq!(after.live_versions, 1);
+	assert_eq!(after.approx_data_bytes, "key".len() + "value-0049".len());
+
+	// Deleting the key and collecting leaves nothing accounted
+	db.del("key").unwrap();
+	db.run_gc();
+	let end = db.stats();
+	assert_eq!(end.live_keys, 0);
+	assert_eq!(end.live_versions, 0);
+	assert_eq!(end.approx_data_bytes, 0);
+}
+
+#[test]
+fn test_memory_limit_recovers_after_overwrites() {
+	let opts = DatabaseOptions::default().with_all_workers_disabled().with_memory_limit(256);
+	let db = Database::new_with_options(opts);
+
+	// Rewriting one small key far past the limit's worth of bytes must keep
+	// succeeding once superseded versions are reclaimed
+	for i in 0..200 {
+		let mut tx = db.transaction(true);
+		tx.set("key", format!("value-{i:04}")).unwrap();
+		tx.commit().unwrap();
+		db.run_gc();
+	}
+}
+
+#[test]
+fn test_rejected_commit_can_be_retried() {
+	let opts = DatabaseOptions::default().with_memory_limit(64);
+	let db = Database::new_with_options(opts);
+
+	let mut tx = db.transaction(true);
+	tx.set("big", vec![b'x'; 128]).unwrap();
+	assert!(matches!(tx.commit(), Err(Error::MemoryLimit)));
+	// The transaction is still open: shrink the write and commit again
+	tx.set("big", "small").unwrap();
+	tx.commit().unwrap();
+	assert_eq!(db.get("big").unwrap(), Some("small".into()));
+}
+
+#[test]
+fn test_async_queue_full_does_not_poison() {
+	let dir = TempDir::new().unwrap();
+	let popts = PersistenceOptions::new(dir.path())
+		.with_aol_mode(AolMode::AsynchronousAfterCommit)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_max_async_queue_bytes(10);
+	let db = Database::new_with_persistence(DatabaseOptions::default(), popts).unwrap();
+	let mut tx = db.transaction(true);
+	tx.set("k", "v").unwrap();
+	assert!(matches!(tx.commit(), Err(Error::AsyncQueueFull)));
+	assert!(!db.is_poisoned());
+	assert_eq!(db.get("k").unwrap(), None);
+}

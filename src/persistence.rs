@@ -717,13 +717,11 @@ impl Persistence {
 			0
 		};
 
-		// Pin a reader slot at the current oracle timestamp to establish a
-		// consistent cut
-		let snapshot_version = inner.oracle.timestamp.load(Ordering::SeqCst);
+		// Pin a reader slot exactly as a transaction does, so the snapshot
+		// is a consistent cut and its versions stay protected from garbage
+		// collection until the pin is released
 		let slot = inner.readers.register();
-		let slot_ref = inner.readers.slot(slot);
-		slot_ref.commit.store(snapshot_version, Ordering::SeqCst);
-		slot_ref.version.store(snapshot_version, Ordering::SeqCst);
+		let (_, snapshot_version) = crate::tx::pin_slot(&inner, slot);
 
 		let _pin_guard = ReaderPinGuard {
 			readers: &inner.readers,
@@ -858,6 +856,12 @@ impl Persistence {
 										version,
 										value,
 									});
+									// Account for the loaded version
+									let (versions, bytes) = entries.footprint(k.len());
+									inner.memory_tracker.add(
+										i64::try_from(versions).unwrap_or(i64::MAX),
+										i64::try_from(bytes).unwrap_or(i64::MAX),
+									);
 									// Insert the entry into the datastore
 									inner.datastore.insert(k, VersionCell::new(entries));
 								}
@@ -1070,6 +1074,10 @@ impl Persistence {
 		// not version-ordered (async appends race), so the maximum must be
 		// tracked over every record, not taken from the last.
 		*max_version = (*max_version).max(version);
+		inner.memory_tracker.add(
+			1,
+			i64::try_from(k.len() + val.as_ref().map_or(0, ByteSlice::len)).unwrap_or(i64::MAX),
+		);
 		// Check if the key already exists
 		if let Some(entry) = inner.datastore.get(&k) {
 			// Update existing key with stored version
@@ -1157,48 +1165,55 @@ impl Persistence {
 			let new_path = aol_path.with_file_name(new_name);
 
 			let result = (|| -> Result<(), PersistenceError> {
-				{
-					let mut new_file = OpenOptions::new()
-						.create(true)
-						.read(true)
-						.write(true)
-						.truncate(true)
-						.open(&new_path)?;
+				// The replacement is opened once and kept as the new append
+				// handle, so nothing that can fail runs after the rename: a
+				// failed reopen there would leave the log writing to an
+				// unlinked file.
+				let mut new_file = OpenOptions::new()
+					.create(true)
+					.read(true)
+					.write(true)
+					.truncate(true)
+					.open(&new_path)?;
 
-					new_file.write_all(&AOL_MAGIC)?;
+				new_file.write_all(&AOL_MAGIC)?;
 
-					if position < file_len {
-						file.seek(SeekFrom::Start(position))?;
-						let mut buffer = [0u8; 8192];
-						loop {
-							let n = file.read(&mut buffer)?;
-							if n == 0 {
-								break;
-							}
-							new_file.write_all(&buffer[..n])?;
+				if position < file_len {
+					file.seek(SeekFrom::Start(position))?;
+					let mut buffer = [0u8; 8192];
+					loop {
+						let n = file.read(&mut buffer)?;
+						if n == 0 {
+							break;
 						}
+						new_file.write_all(&buffer[..n])?;
 					}
-
-					new_file.flush()?;
-					new_file.sync_all()?;
 				}
 
+				new_file.flush()?;
+				new_file.sync_all()?;
+
+				// On Windows, rename over an open file fails with
+				// ERROR_ACCESS_DENIED, so the live handle is parked behind a
+				// stand-in for the duration of the rename and put back if the
+				// rename fails.
 				#[cfg(windows)]
-				let dummy_path = {
-					// On Windows, rename over an open file fails with
-					// ERROR_ACCESS_DENIED. Replace the handle in *file with a
-					// dummy open temp file before rename.
+				let (original, dummy_path) = {
 					let dummy_id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
 					let dummy_path = aol_path.with_file_name(format!("dummy_{pid}_{dummy_id}.tmp"));
-					if let Ok(dummy) =
-						OpenOptions::new().create(true).read(true).write(true).open(&dummy_path)
-					{
-						*file = dummy;
-					}
-					dummy_path
+					let dummy =
+						OpenOptions::new().create(true).read(true).write(true).open(&dummy_path)?;
+					(std::mem::replace(&mut *file, dummy), dummy_path)
 				};
 
-				fs::rename(&new_path, aol_path)?;
+				if let Err(e) = fs::rename(&new_path, aol_path) {
+					#[cfg(windows)]
+					{
+						*file = original;
+						let _ = fs::remove_file(&dummy_path);
+					}
+					return Err(e.into());
+				}
 
 				// Sync parent directory on Unix (skipped under Miri where
 				// directory fsync is unsupported)
@@ -1209,17 +1224,13 @@ impl Persistence {
 					}
 				}
 
-				let mut reopened = OpenOptions::new()
-					.create(true)
-					.read(true)
-					.write(true)
-					.truncate(false)
-					.open(aol_path)?;
-				reopened.seek(SeekFrom::End(0))?;
-				*file = reopened;
+				*file = new_file;
 
 				#[cfg(windows)]
-				let _ = fs::remove_file(&dummy_path);
+				{
+					drop(original);
+					let _ = fs::remove_file(&dummy_path);
+				}
 
 				Ok(())
 			})();
@@ -1497,6 +1508,11 @@ impl Persistence {
 		}
 	}
 
+	/// Estimated size in bytes of a writeset once queued for appending
+	fn batch_bytes(writeset: &BTreeMap<ByteSlice, Option<ByteSlice>>) -> usize {
+		writeset.iter().map(|(k, v)| k.len() + v.as_ref().map_or(0, ByteSlice::len) + 16).sum()
+	}
+
 	/// Pre-check if the asynchronous persistence queue has capacity for the
 	/// given writeset.
 	///
@@ -1512,8 +1528,7 @@ impl Persistence {
 		if self.aol_mode != AolMode::AsynchronousAfterCommit || writeset.is_empty() {
 			return Ok(());
 		}
-		let batch_bytes: usize =
-			writeset.iter().map(|(k, v)| k.len() + v.as_ref().map_or(0, ByteSlice::len) + 16).sum();
+		let batch_bytes = Self::batch_bytes(writeset);
 
 		if let Some(max_depth) = self.max_async_queue_depth {
 			if self.async_queue_depth.load(Ordering::Relaxed) >= max_depth {
@@ -1557,25 +1572,10 @@ impl Persistence {
 		if let Some(ref aol) = self.aol {
 			// Handle asynchronous AOL mode by queuing the operation
 			if self.aol_mode == AolMode::AsynchronousAfterCommit {
-				let batch_bytes: usize = writeset
-					.iter()
-					.map(|(k, v)| k.len() + v.as_ref().map_or(0, ByteSlice::len) + 16)
-					.sum();
-
-				if let Some(max_depth) = self.max_async_queue_depth {
-					if self.async_queue_depth.load(Ordering::Relaxed) >= max_depth {
-						self.dropped_batches.fetch_add(1, Ordering::Relaxed);
-						return Err(PersistenceError::AsyncQueueFull);
-					}
-				}
-				if let Some(max_bytes) = self.max_async_queue_bytes {
-					if self.async_queue_bytes.load(Ordering::Relaxed).saturating_add(batch_bytes)
-						> max_bytes
-					{
-						self.dropped_batches.fetch_add(1, Ordering::Relaxed);
-						return Err(PersistenceError::AsyncQueueFull);
-					}
-				}
+				// The queue limits are enforced before the commit is applied
+				// (see `check_async_capacity`). By now the transaction is
+				// visible in memory, so it is always queued.
+				let batch_bytes = Self::batch_bytes(writeset);
 
 				self.async_queue_depth.fetch_add(1, Ordering::Relaxed);
 				self.async_queue_bytes.fetch_add(batch_bytes, Ordering::Relaxed);

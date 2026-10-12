@@ -86,8 +86,20 @@ impl MemoryTracker {
 		self.shards_bytes[s].fetch_add(bytes, Ordering::Relaxed);
 	}
 
+	/// Account for the versions removed between two footprints of one chain.
 	#[inline]
-	#[allow(dead_code)]
+	pub(crate) fn release(&self, before: (usize, usize), after: (usize, usize)) {
+		let versions = before.0.saturating_sub(after.0);
+		let bytes = before.1.saturating_sub(after.1);
+		if versions > 0 || bytes > 0 {
+			self.sub(
+				i64::try_from(versions).unwrap_or(i64::MAX),
+				i64::try_from(bytes).unwrap_or(i64::MAX),
+			);
+		}
+	}
+
+	#[inline]
 	pub(crate) fn sub(&self, versions: i64, bytes: i64) {
 		let s = Self::shard();
 		self.shards_versions[s].fetch_sub(versions, Ordering::Relaxed);

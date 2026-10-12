@@ -155,13 +155,6 @@ pub struct Inner {
 	pub(crate) memory_tracker: Arc<MemoryTracker>,
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) static INJECT_APPEND_FAILURE: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) static INJECT_APPLY_PANIC: AtomicBool = AtomicBool::new(false);
-
 impl Inner {
 	/// Create a new [`Inner`] structure with the given options.
 	pub fn new(opts: &DatabaseOptions) -> Self {
@@ -526,8 +519,13 @@ impl Inner {
 				continue;
 			}
 			// Clean up unnecessary older versions
-			let (remaining, needs_gc) =
-				versions.update(|v| (v.gc_older_versions(cleanup_ts), v.needs_gc()));
+			let key_len = key.len();
+			let (remaining, needs_gc) = versions.update(|v| {
+				let before = v.footprint(key_len);
+				let remaining = v.gc_older_versions(cleanup_ts);
+				self.memory_tracker.release(before, v.footprint(key_len));
+				(remaining, v.needs_gc())
+			});
 			if remaining == 0 {
 				// Remove the entry while still holding the version write
 				// lock — see the equivalent removal in `run_gc_full`.
@@ -565,8 +563,13 @@ impl Inner {
 			// Lock the chain for writing
 			let mut versions = entry.value().lock();
 			// Clean up unnecessary older versions
-			let (remaining, needs_gc) =
-				versions.update(|v| (v.gc_older_versions(cleanup_ts), v.needs_gc()));
+			let key_len = entry.key().len();
+			let (remaining, needs_gc) = versions.update(|v| {
+				let before = v.footprint(key_len);
+				let remaining = v.gc_older_versions(cleanup_ts);
+				self.memory_tracker.release(before, v.footprint(key_len));
+				(remaining, v.needs_gc())
+			});
 			if remaining == 0 {
 				// Remove the entry while still holding the version write lock,
 				// so a committer blocked on that lock observes `is_removed()`
