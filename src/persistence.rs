@@ -1161,6 +1161,88 @@ impl Persistence {
 		Ok(())
 	}
 
+	/// Replaces the log at `aol_path`, whose append handle is `file`, with a
+	/// new file holding what `fill` writes to it from the old one. The new
+	/// file is synced before it is renamed over the log and becomes the append
+	/// handle, so a crash leaves either the old log or the whole new one.
+	fn replace_log(
+		file: &mut File,
+		aol_path: &Path,
+		fill: impl FnOnce(&mut File, &mut File) -> Result<(), PersistenceError>,
+	) -> Result<(), PersistenceError> {
+		// Generate a unique name for the temporary file in the same
+		// directory as AOL
+		let id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
+		let pid = std::process::id();
+		let file_stem = aol_path.file_name().and_then(|n| n.to_str()).unwrap_or("aol");
+		let new_name = format!("{file_stem}.{pid}_{id}.new");
+		let new_path = aol_path.with_file_name(new_name);
+
+		let result = (|| -> Result<(), PersistenceError> {
+			// The replacement is opened once and kept as the new append
+			// handle, so nothing that can fail runs after the rename: a
+			// failed reopen there would leave the log writing to an
+			// unlinked file.
+			let mut new_file = OpenOptions::new()
+				.create(true)
+				.read(true)
+				.write(true)
+				.truncate(true)
+				.open(&new_path)?;
+
+			fill(file, &mut new_file)?;
+
+			new_file.flush()?;
+			new_file.sync_all()?;
+
+			// On Windows, rename over an open file fails with
+			// ERROR_ACCESS_DENIED, so the live handle is parked behind a
+			// stand-in for the duration of the rename and put back if the
+			// rename fails.
+			#[cfg(windows)]
+			let (original, dummy_path) = {
+				let dummy_id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
+				let dummy_path = aol_path.with_file_name(format!("dummy_{pid}_{dummy_id}.tmp"));
+				let dummy =
+					OpenOptions::new().create(true).read(true).write(true).open(&dummy_path)?;
+				(std::mem::replace(&mut *file, dummy), dummy_path)
+			};
+
+			if let Err(e) = fs::rename(&new_path, aol_path) {
+				#[cfg(windows)]
+				{
+					*file = original;
+					let _ = fs::remove_file(&dummy_path);
+				}
+				return Err(e.into());
+			}
+
+			// Sync parent directory on Unix (skipped under Miri where
+			// directory fsync is unsupported)
+			#[cfg(all(unix, not(miri)))]
+			if let Some(parent) = aol_path.parent() {
+				if let Ok(dir) = File::open(parent) {
+					let _ = dir.sync_all();
+				}
+			}
+
+			*file = new_file;
+
+			#[cfg(windows)]
+			{
+				drop(original);
+				let _ = fs::remove_file(&dummy_path);
+			}
+
+			Ok(())
+		})();
+
+		if result.is_err() {
+			let _ = fs::remove_file(&new_path);
+		}
+		result
+	}
+
 	/// Truncate the AOL file up to the specified position, preserving any data
 	/// after.
 	#[expect(
@@ -1177,89 +1259,14 @@ impl Persistence {
 			let mut file = aol.lock()?;
 			let file_len = file.metadata()?.len();
 
-			// Generate a unique name for the temporary file in the same
-			// directory as AOL
-			let id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
-			let pid = std::process::id();
-			let file_stem = aol_path.file_name().and_then(|n| n.to_str()).unwrap_or("aol");
-			let new_name = format!("{file_stem}.{pid}_{id}.new");
-			let new_path = aol_path.with_file_name(new_name);
-
-			let result = (|| -> Result<(), PersistenceError> {
-				// The replacement is opened once and kept as the new append
-				// handle, so nothing that can fail runs after the rename: a
-				// failed reopen there would leave the log writing to an
-				// unlinked file.
-				let mut new_file = OpenOptions::new()
-					.create(true)
-					.read(true)
-					.write(true)
-					.truncate(true)
-					.open(&new_path)?;
-
-				new_file.write_all(&AOL_MAGIC)?;
-
+			Self::replace_log(&mut file, aol_path, |log, new| {
+				new.write_all(&AOL_MAGIC)?;
 				if position < file_len {
-					file.seek(SeekFrom::Start(position))?;
-					let mut buffer = [0u8; 8192];
-					loop {
-						let n = file.read(&mut buffer)?;
-						if n == 0 {
-							break;
-						}
-						new_file.write_all(&buffer[..n])?;
-					}
+					log.seek(SeekFrom::Start(position))?;
+					io::copy(log, new)?;
 				}
-
-				new_file.flush()?;
-				new_file.sync_all()?;
-
-				// On Windows, rename over an open file fails with
-				// ERROR_ACCESS_DENIED, so the live handle is parked behind a
-				// stand-in for the duration of the rename and put back if the
-				// rename fails.
-				#[cfg(windows)]
-				let (original, dummy_path) = {
-					let dummy_id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
-					let dummy_path = aol_path.with_file_name(format!("dummy_{pid}_{dummy_id}.tmp"));
-					let dummy =
-						OpenOptions::new().create(true).read(true).write(true).open(&dummy_path)?;
-					(std::mem::replace(&mut *file, dummy), dummy_path)
-				};
-
-				if let Err(e) = fs::rename(&new_path, aol_path) {
-					#[cfg(windows)]
-					{
-						*file = original;
-						let _ = fs::remove_file(&dummy_path);
-					}
-					return Err(e.into());
-				}
-
-				// Sync parent directory on Unix (skipped under Miri where
-				// directory fsync is unsupported)
-				#[cfg(all(unix, not(miri)))]
-				if let Some(parent) = aol_path.parent() {
-					if let Ok(dir) = File::open(parent) {
-						let _ = dir.sync_all();
-					}
-				}
-
-				*file = new_file;
-
-				#[cfg(windows)]
-				{
-					drop(original);
-					let _ = fs::remove_file(&dummy_path);
-				}
-
 				Ok(())
-			})();
-
-			if result.is_err() {
-				let _ = fs::remove_file(&new_path);
-				result?;
-			}
+			})?;
 
 			// Reset pending syncs if we truncated to beginning or beyond
 			if position == 0 || file_len <= position {
