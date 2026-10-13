@@ -1121,12 +1121,21 @@ impl Persistence {
 	}
 
 	/// Cuts the append-only log back to the end of the last valid record or
-	/// frame, and makes sure that what follows it is the framed section.
+	/// frame, makes sure that what follows it is the framed section, and,
+	/// unless the log is never synced, makes what was replayed durable.
 	///
 	/// The log is opened for appending from the end of the file, so unless the
 	/// damaged bytes of a torn tail are removed first, the next commit lands
-	/// directly after them and is unreadable on the following restart. The cut
-	/// is synced before anything is appended.
+	/// directly after them and is unreadable on the following restart.
+	///
+	/// What replay read may not be on disk even where an earlier process synced
+	/// it: after writing back the log failed, the failed fsync marks its pages
+	/// clean and the next fsync succeeds without them. Such pages stay readable
+	/// until the power is lost, and then take every commit appended after them
+	/// with them, which replay takes for a torn tail. So the replayed prefix is
+	/// copied to a new file, which is synced and renamed over the log before
+	/// anything is appended: a crash leaves either the old log or the whole
+	/// new one.
 	fn repair_aol(&self, replay: &AolReplay) -> Result<(), PersistenceError> {
 		// There is nothing to repair if the log is not in use
 		let Some(ref aol) = self.aol else {
@@ -1134,7 +1143,6 @@ impl Persistence {
 		};
 		let mut file = aol.lock()?;
 		let file_len = file.metadata()?.len();
-		let mut changed = false;
 		// Cut away the torn tail
 		if file_len > replay.valid_len {
 			tracing::warn!(
@@ -1142,19 +1150,35 @@ impl Persistence {
 				file_len - replay.valid_len,
 				self.aol_path.display()
 			);
-			file.set_len(replay.valid_len)?;
-			changed = true;
 		}
 		// Records written before frames existed are followed by the header, so
 		// that everything appended from here on is framed
-		file.seek(SeekFrom::Start(replay.valid_len))?;
-		if replay.valid_len > 0 && !replay.framed {
-			file.write_all(&AOL_MAGIC)?;
-			changed = true;
-		}
-		if changed {
-			file.flush()?;
-			file.sync_all()?;
+		let header = replay.valid_len > 0 && !replay.framed;
+		if self.fsync_mode == FsyncMode::Never {
+			// A log which is never synced promises nothing about what reaches
+			// the disk, so it is repaired in place
+			if file_len > replay.valid_len || header {
+				file.set_len(replay.valid_len)?;
+				file.seek(SeekFrom::Start(replay.valid_len))?;
+				if header {
+					file.write_all(&AOL_MAGIC)?;
+				}
+				file.flush()?;
+				file.sync_all()?;
+			}
+		} else if file_len > 0 {
+			let valid_len = replay.valid_len;
+			Self::replace_log(&mut file, &self.aol_path, |log, new| {
+				log.seek(SeekFrom::Start(0))?;
+				let copied = io::copy(&mut Read::take(&mut *log, valid_len), new)?;
+				if copied < valid_len {
+					return Err(PersistenceError::Io(io::Error::from(ErrorKind::UnexpectedEof)));
+				}
+				if header {
+					new.write_all(&AOL_MAGIC)?;
+				}
+				Ok(())
+			})?;
 		}
 		file.seek(SeekFrom::End(0))?;
 		drop(file);

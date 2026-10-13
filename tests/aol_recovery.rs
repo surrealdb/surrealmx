@@ -265,6 +265,69 @@ fn damage_to_the_last_frame_is_a_torn_tail() {
 	assert_eq!(fs::metadata(&aol).unwrap().len(), ends[1] as u64);
 }
 
+/// The inode of `path`, which a file renamed over it changes
+#[cfg(unix)]
+fn inode(path: &Path) -> u64 {
+	use std::os::unix::fs::MetadataExt;
+	fs::metadata(path).unwrap().ino()
+}
+
+#[test]
+fn recovery_replaces_a_synced_log_with_a_copy_of_what_it_replayed() {
+	// What recovery replayed may be in the page cache only, after an earlier
+	// process failed to sync it, so it is copied to a new file which is synced
+	// and renamed over the log. The copy must hold the log byte for byte.
+	let dir = TempDir::new().unwrap();
+	let aol = dir.path().join("aol.bin");
+	let value = vec![b'v'; 64 * 1024];
+	let keys: Vec<String> = (0..40).map(|i| format!("key{i:02}")).collect();
+	{
+		let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::EveryAppend).unwrap();
+		for key in &keys {
+			let mut tx = db.transaction(true);
+			tx.set(key.as_str(), value.clone()).unwrap();
+			tx.commit().unwrap();
+		}
+	}
+	let log = fs::read(&aol).unwrap();
+	// Garbage after the last frame is left out of the copy
+	let mut damaged = log.clone();
+	damaged.extend_from_slice(b"INVALID_PARTIAL_DATA");
+	fs::write(&aol, &damaged).unwrap();
+	#[cfg(unix)]
+	let before = inode(&aol);
+	{
+		let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::EveryAppend).unwrap();
+		assert_eq!(dump(&db), keys);
+		#[cfg(unix)]
+		assert_ne!(inode(&aol), before, "the log was replaced");
+		assert_eq!(fs::read(&aol).unwrap(), log);
+		// Commits go to the new log
+		commit(&db, &["zz"]);
+	}
+	let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::EveryAppend).unwrap();
+	assert_eq!(dump(&db).len(), keys.len() + 1);
+	// No temporary file is left behind
+	let names: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+	assert_eq!(names, ["aol.bin"]);
+}
+
+#[test]
+fn a_log_which_is_never_synced_is_repaired_in_place() {
+	let txns: [&[&str]; 2] = [&["a"], &["b"]];
+	let (log, _) = build_log(AolMode::SynchronousOnCommit, FsyncMode::Never, &txns);
+	let dir = TempDir::new().unwrap();
+	let aol = dir.path().join("aol.bin");
+	fs::write(&aol, &log).unwrap();
+	#[cfg(unix)]
+	let before = inode(&aol);
+	let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
+	assert_eq!(dump(&db), ["a", "b"]);
+	#[cfg(unix)]
+	assert_eq!(inode(&aol), before, "the log was not replaced");
+	assert_eq!(fs::read(&aol).unwrap(), log);
+}
+
 #[test]
 fn unrecognised_log_formats_are_rejected() {
 	let txns: [&[&str]; 1] = [&["a"]];
