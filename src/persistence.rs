@@ -233,10 +233,18 @@ struct SyncCommitSlot {
 
 /// Coordinates group commits across concurrent threads for AOL synchronous
 /// persistence.
+///
+/// Once writing or syncing a batch fails, every later batch fails with the
+/// same error and nothing more is written. A failed sync may have lost
+/// earlier writes which stay readable, and the next sync can succeed without
+/// them, so a batch appended after the failure could be acknowledged as
+/// durable while what precedes it in the log is not.
 pub(crate) struct GroupCommitter {
 	queue: Mutex<Vec<Arc<SyncCommitSlot>>>,
 	flushing: AtomicBool,
 	pending_syncs: Arc<AtomicU64>,
+	/// The error which stopped the log, if any
+	failed: Mutex<Option<String>>,
 }
 
 thread_local! {
@@ -249,6 +257,7 @@ impl GroupCommitter {
 			queue: Mutex::new(Vec::new()),
 			flushing: AtomicBool::new(false),
 			pending_syncs,
+			failed: Mutex::new(None),
 		}
 	}
 
@@ -301,14 +310,27 @@ impl GroupCommitter {
 				std::mem::take(&mut *q)
 			};
 
-			let flush_result = (|| -> Result<(), PersistenceError> {
+			let flush = || -> Result<(), PersistenceError> {
 				let mut file = aol.lock()?;
 				append_to_log(&mut file, batch.iter().map(|slot| slot.data.as_slice()))?;
 				file.sync_all()?;
 				drop(file);
 				self.pending_syncs.store(0, Ordering::Release);
 				Ok(())
-			})();
+			};
+			// Write nothing after a failed write or sync, and remember the
+			// first failure for every batch that follows it
+			let flush_result = match self.failed.lock() {
+				Ok(mut failed) => match failed.as_ref() {
+					Some(err_msg) => Err(err_msg.clone()),
+					None => flush().map_err(|err| {
+						let err_msg = err.to_string();
+						*failed = Some(err_msg.clone());
+						err_msg
+					}),
+				},
+				Err(err) => Err(PersistenceError::from(err).to_string()),
+			};
 
 			match flush_result {
 				Ok(()) => {
@@ -317,8 +339,7 @@ impl GroupCommitter {
 						slot.thread.unpark();
 					}
 				}
-				Err(err) => {
-					let err_msg = err.to_string();
+				Err(err_msg) => {
 					for slot in batch {
 						if let Ok(mut slot_err) = slot.error.lock() {
 							*slot_err = Some(PersistenceError::AppendFailed(err_msg.clone()));
@@ -1697,5 +1718,27 @@ impl Drop for Persistence {
 				}
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn a_failed_batch_stops_the_group_committer() {
+		let dir = tempfile::TempDir::new().unwrap();
+		let path = dir.path().join("aol.bin");
+		fs::write(&path, b"").unwrap();
+		let committer = GroupCommitter::new(Arc::new(AtomicU64::new(0)));
+		// A log opened only for reading fails the write
+		let read_only = Mutex::new(File::open(&path).unwrap());
+		assert!(committer.commit(&read_only, b"first".to_vec()).is_err());
+		// Every later batch fails without writing, even to a log which would
+		// take it
+		let writable = Mutex::new(OpenOptions::new().read(true).write(true).open(&path).unwrap());
+		let err = committer.commit(&writable, b"second".to_vec()).unwrap_err();
+		assert!(matches!(err, PersistenceError::AppendFailed(_)), "{err}");
+		assert_eq!(fs::metadata(&path).unwrap().len(), 0);
 	}
 }
