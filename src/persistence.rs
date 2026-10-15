@@ -1161,8 +1161,13 @@ impl Persistence {
 			);
 		}
 		// Records written before frames existed are followed by the header, so
-		// that everything appended from here on is framed
-		let header = replay.valid_len > 0 && !replay.framed;
+		// that everything appended from here on is framed. A log with nothing
+		// valid in it, such as a new one, gets its header here too, so that it
+		// is on disk before anything is appended: otherwise a power loss could
+		// lose the header while keeping a later page of frames, and replay
+		// would then take the zeroed start of the file for legacy records
+		// and fail.
+		let header = !replay.framed;
 		if self.fsync_mode == FsyncMode::Never {
 			// A log which is never synced promises nothing about what reaches
 			// the disk, so it is repaired in place
@@ -1175,7 +1180,7 @@ impl Persistence {
 				file.flush()?;
 				file.sync_all()?;
 			}
-		} else if file_len > 0 {
+		} else if file_len > 0 || header {
 			let valid_len = replay.valid_len;
 			Self::replace_log(&mut file, &self.aol_path, |log, new| {
 				log.seek(SeekFrom::Start(0))?;
