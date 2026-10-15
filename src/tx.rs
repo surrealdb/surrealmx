@@ -973,8 +973,56 @@ impl TransactionInner {
 			// Continue
 			return Ok(());
 		}
+		// Claim this transaction's merge version
+		let version = self.claim_merge_version();
+		// Unwind guard for the claimed but unpublished version: the merge
+		// clock only advances through inserted entries, so a version that
+		// is never inserted would wedge every later commit. Publish an
+		// empty merge in its place, which makes nothing visible.
+		let mut claim_guard = OnUnwind {
+			armed: true,
+			action: {
+				let database = Arc::clone(&self.database);
+				move || Self::publish_empty_merge(&database, version)
+			},
+		};
+		// Append the transaction to the persistence layer before publishing
+		// it, so no reader can observe a commit which a crash could still
+		// lose. Every lower version is published only once it has been
+		// appended too, so readers only ever see a durable prefix. Clone the
+		// `Arc` out first so the `persistence` read guard is not held across
+		// `append`, which performs file I/O and may fsync.
+		#[cfg(not(target_arch = "wasm32"))]
+		let persistence = self.database.persistence.read().clone();
+		#[cfg(not(target_arch = "wasm32"))]
+		if let Some(p) = persistence {
+			if let Err(e) = p.append(version, writeset.as_ref()) {
+				self.database
+					.poison(format!("Failed to append transaction version {version} to AOL: {e}"));
+				// The writes are never published: let the clock pass the
+				// claimed version, and other committers skip this entry
+				claim_guard.armed = false;
+				Self::publish_empty_merge(&self.database, version);
+				commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
+				commit_guard.armed = false;
+				self.database.advance_commit_watermark();
+				// Unpin from readers immediately
+				self.database.readers.unpin(self.slot);
+				// Clear the transaction state
+				self.clear_read_state();
+				self.writeset.clear();
+				// Clear savepoint stack and undo journal
+				self.savepoint_stack.clear();
+				self.undo_journal.clear();
+				// The append may still have reached the log, so whether the
+				// transaction survives a restart is unknown
+				return Err(Error::TxCommitNotPersisted(e));
+			}
+		}
 		// Insert this transaction into the merge queue
-		let (version, entry) = self.atomic_merge(Merge::new(writeset));
+		claim_guard.armed = false;
+		drop(claim_guard);
+		let entry = Self::publish_merge(&self.database, version, Merge::new(writeset));
 		// Our merge version is now published, so record it on the
 		// commit-queue entry, disarm the abort guard, and advance the
 		// contiguous completed watermark: readers snapshotting the
@@ -1097,40 +1145,6 @@ impl TransactionInner {
 			added_bytes += (k.len() + v.as_ref().map_or(0, ByteSlice::len)) as i64;
 		}
 		self.database.memory_tracker.add(added_versions, added_bytes);
-		// Append the transaction to the persistence layer. Clone the `Arc` out
-		// first so the `persistence` read guard is not held across `append`,
-		// which performs file I/O and may fsync.
-		#[cfg(not(target_arch = "wasm32"))]
-		let persistence = self.database.persistence.read().clone();
-		#[cfg(not(target_arch = "wasm32"))]
-		if let Some(p) = persistence {
-			if let Err(e) = p.append(version, entry.writeset.as_ref()) {
-				self.database
-					.poison(format!("Failed to append transaction version {version} to AOL: {e}"));
-				// Do NOT remove the entry here: the merge clock's
-				// insertion-order advance is opportunistic (see
-				// `Inner::try_advance_merge_clock`), so an entry must stay
-				// visible until the clock has confirmably passed it —
-				// removing it early would be indistinguishable from "never
-				// inserted" to a concurrent advance and could stall it
-				// forever. The unwind guard (dropped below, on return)
-				// marks this entry applied and lets retirement remove it
-				// once the clock naturally reaches this version — the
-				// datastore chains already hold this data regardless (the
-				// pre-existing applied-but-unpersisted limitation of this
-				// error path).
-				// Unpin from readers immediately
-				self.database.readers.unpin(self.slot);
-				// Clear the transaction state
-				self.clear_read_state();
-				self.writeset.clear();
-				// Clear savepoint stack and undo journal
-				self.savepoint_stack.clear();
-				self.undo_journal.clear();
-				// Return a persistence error
-				return Err(Error::TxCommitNotPersisted(e));
-			}
-		}
 		// Mark this merge as applied and retire the contiguous applied
 		// prefix of the merge queue. Entries are NEVER removed directly
 		// here: removal out of version order would let a reader find an
@@ -2602,22 +2616,39 @@ impl TransactionInner {
 		(slot, updates)
 	}
 
-	/// Atomimcally inserts the transaction into the merge queue
+	/// Claims a unique merge version from the allocation counter. See the
+	/// equivalent comment in `atomic_commit`: a dense claim is always
+	/// unique, so no collision retry is needed.
+	///
+	/// The merge clock cannot advance past the claimed version until it is
+	/// published with `publish_merge` or `publish_empty_merge`, so every
+	/// claim must be followed by exactly one of them.
 	#[inline(always)]
-	fn atomic_merge(&self, mut updates: Merge) -> (u64, Arc<Merge>) {
+	fn claim_merge_version(&self) -> u64 {
+		self.database.oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1
+	}
+
+	/// Publishes an empty merge at a claimed version whose writes will
+	/// never be published, so the merge clock can advance past it.
+	fn publish_empty_merge(database: &Inner, version: u64) {
+		let entry = Self::publish_merge(database, version, Merge::new(Arc::new(BTreeMap::new())));
+		entry.applied.store(true, Ordering::SeqCst);
+		database.advance_merge_retirement();
+	}
+
+	/// Atomically inserts the transaction into the merge queue at its
+	/// claimed version, returning once the merge clock covers it
+	#[inline(always)]
+	fn publish_merge(database: &Inner, version: u64, mut updates: Merge) -> Arc<Merge> {
 		// Store the number of spins
 		let mut spins = 0;
 		// Get the database logical clock
-		let oracle = Arc::clone(&self.database.oracle);
-		// Claim a unique merge version from the allocation counter. See
-		// the equivalent comment in `atomic_commit`: a dense claim is
-		// always unique, so no collision retry is needed.
-		let version = oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
+		let oracle = Arc::clone(&database.oracle);
 		updates.version = version;
 		let updates = Arc::new(updates);
 		// Insert the merge entry at the claimed version, where the clock
 		// can see it and advance past it
-		self.database.transaction_merge_queue.insert(Arc::clone(&updates));
+		database.transaction_merge_queue.insert(Arc::clone(&updates));
 		// Publish strictly in claim order — see the equivalent comment
 		// in `atomic_commit` for why this must cover our own version
 		// before we return, and why we reload rather than retry a fixed
@@ -2626,7 +2657,7 @@ impl TransactionInner {
 		loop {
 			let cur = oracle.timestamp.load(Ordering::SeqCst);
 			if cur >= version {
-				return (version, updates);
+				return updates;
 			}
 			if cur == version - 1
 				&& oracle
@@ -2634,10 +2665,10 @@ impl TransactionInner {
 					.compare_exchange_weak(cur, version, Ordering::SeqCst, Ordering::Acquire)
 					.is_ok()
 			{
-				return (version, updates);
+				return updates;
 			}
 			// Help advance the published merge clock
-			self.database.try_advance_merge_clock();
+			database.try_advance_merge_clock();
 			// Ensure the thread backs off when under contention
 			backoff(spins);
 			// Increase the number loop spins we have attempted

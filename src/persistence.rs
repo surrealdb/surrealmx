@@ -233,10 +233,18 @@ struct SyncCommitSlot {
 
 /// Coordinates group commits across concurrent threads for AOL synchronous
 /// persistence.
+///
+/// Once writing or syncing a batch fails, every later batch fails with the
+/// same error and nothing more is written. A failed sync may have lost
+/// earlier writes which stay readable, and the next sync can succeed without
+/// them, so a batch appended after the failure could be acknowledged as
+/// durable while what precedes it in the log is not.
 pub(crate) struct GroupCommitter {
 	queue: Mutex<Vec<Arc<SyncCommitSlot>>>,
 	flushing: AtomicBool,
 	pending_syncs: Arc<AtomicU64>,
+	/// The error which stopped the log, if any
+	failed: Mutex<Option<String>>,
 }
 
 thread_local! {
@@ -249,6 +257,7 @@ impl GroupCommitter {
 			queue: Mutex::new(Vec::new()),
 			flushing: AtomicBool::new(false),
 			pending_syncs,
+			failed: Mutex::new(None),
 		}
 	}
 
@@ -301,14 +310,27 @@ impl GroupCommitter {
 				std::mem::take(&mut *q)
 			};
 
-			let flush_result = (|| -> Result<(), PersistenceError> {
+			let flush = || -> Result<(), PersistenceError> {
 				let mut file = aol.lock()?;
 				append_to_log(&mut file, batch.iter().map(|slot| slot.data.as_slice()))?;
 				file.sync_all()?;
 				drop(file);
 				self.pending_syncs.store(0, Ordering::Release);
 				Ok(())
-			})();
+			};
+			// Write nothing after a failed write or sync, and remember the
+			// first failure for every batch that follows it
+			let flush_result = match self.failed.lock() {
+				Ok(mut failed) => match failed.as_ref() {
+					Some(err_msg) => Err(err_msg.clone()),
+					None => flush().map_err(|err| {
+						let err_msg = err.to_string();
+						*failed = Some(err_msg.clone());
+						err_msg
+					}),
+				},
+				Err(err) => Err(PersistenceError::from(err).to_string()),
+			};
 
 			match flush_result {
 				Ok(()) => {
@@ -317,8 +339,7 @@ impl GroupCommitter {
 						slot.thread.unpark();
 					}
 				}
-				Err(err) => {
-					let err_msg = err.to_string();
+				Err(err_msg) => {
 					for slot in batch {
 						if let Ok(mut slot_err) = slot.error.lock() {
 							*slot_err = Some(PersistenceError::AppendFailed(err_msg.clone()));
@@ -704,18 +725,27 @@ impl Persistence {
 		})?;
 
 		// Get the current position in the AOL file before snapshotting (if AOL
-		// is enabled). Sampling aol_cutoff_position BEFORE
-		// snapshot_version guarantees that every transaction already
-		// written to AOL before the cutoff has commit version <=
-		// snapshot_version, and is therefore included in the snapshot.
-		// Any transaction committed after snapshot_version
-		// was not written before aol_cutoff_position and is preserved in the
-		// AOL tail.
+		// is enabled). Every transaction is written to the AOL after claiming
+		// its merge version but before publishing it, so every transaction
+		// written before the cutoff has claimed a version no higher than the
+		// allocation counter loaded after it. The snapshot reads the
+		// datastore chains only, not the merge queue, so it waits until every
+		// version up to that counter has been applied to the chains (retired)
+		// before pinning: every such transaction is then in the snapshot. Any
+		// transaction written after the cutoff is preserved in the AOL tail.
 		let aol_cutoff_position = if let Some(aol) = aol {
 			aol.lock()?.metadata()?.len()
 		} else {
 			0
 		};
+		let claimed = inner.oracle.alloc.load(Ordering::SeqCst);
+		// A claimed version is always published and marked applied, by an
+		// empty merge if its transaction fails to reach the AOL, so this wait
+		// ends
+		while inner.merge_retire_id.load(Ordering::SeqCst) < claimed {
+			inner.refresh_merge_watermark();
+			std::thread::yield_now();
+		}
 
 		// Pin a reader slot exactly as a transaction does, so the snapshot
 		// is a consistent cut and its versions stay protected from garbage
@@ -1100,12 +1130,21 @@ impl Persistence {
 	}
 
 	/// Cuts the append-only log back to the end of the last valid record or
-	/// frame, and makes sure that what follows it is the framed section.
+	/// frame, makes sure that what follows it is the framed section, and,
+	/// unless the log is never synced, makes what was replayed durable.
 	///
 	/// The log is opened for appending from the end of the file, so unless the
 	/// damaged bytes of a torn tail are removed first, the next commit lands
-	/// directly after them and is unreadable on the following restart. The cut
-	/// is synced before anything is appended.
+	/// directly after them and is unreadable on the following restart.
+	///
+	/// What replay read may not be on disk even where an earlier process synced
+	/// it: after writing back the log failed, the failed fsync marks its pages
+	/// clean and the next fsync succeeds without them. Such pages stay readable
+	/// until the power is lost, and then take every commit appended after them
+	/// with them, which replay takes for a torn tail. So the replayed prefix is
+	/// copied to a new file, which is synced and renamed over the log before
+	/// anything is appended: a crash leaves either the old log or the whole
+	/// new one.
 	fn repair_aol(&self, replay: &AolReplay) -> Result<(), PersistenceError> {
 		// There is nothing to repair if the log is not in use
 		let Some(ref aol) = self.aol else {
@@ -1113,7 +1152,6 @@ impl Persistence {
 		};
 		let mut file = aol.lock()?;
 		let file_len = file.metadata()?.len();
-		let mut changed = false;
 		// Cut away the torn tail
 		if file_len > replay.valid_len {
 			tracing::warn!(
@@ -1121,23 +1159,126 @@ impl Persistence {
 				file_len - replay.valid_len,
 				self.aol_path.display()
 			);
-			file.set_len(replay.valid_len)?;
-			changed = true;
 		}
 		// Records written before frames existed are followed by the header, so
-		// that everything appended from here on is framed
-		file.seek(SeekFrom::Start(replay.valid_len))?;
-		if replay.valid_len > 0 && !replay.framed {
-			file.write_all(&AOL_MAGIC)?;
-			changed = true;
-		}
-		if changed {
-			file.flush()?;
-			file.sync_all()?;
+		// that everything appended from here on is framed. A log with nothing
+		// valid in it, such as a new one, gets its header here too, so that it
+		// is on disk before anything is appended: otherwise a power loss could
+		// lose the header while keeping a later page of frames, and replay
+		// would then take the zeroed start of the file for legacy records
+		// and fail.
+		let header = !replay.framed;
+		if self.fsync_mode == FsyncMode::Never {
+			// A log which is never synced promises nothing about what reaches
+			// the disk, so it is repaired in place
+			if file_len > replay.valid_len || header {
+				file.set_len(replay.valid_len)?;
+				file.seek(SeekFrom::Start(replay.valid_len))?;
+				if header {
+					file.write_all(&AOL_MAGIC)?;
+				}
+				file.flush()?;
+				file.sync_all()?;
+			}
+		} else if file_len > 0 || header {
+			let valid_len = replay.valid_len;
+			Self::replace_log(&mut file, &self.aol_path, |log, new| {
+				log.seek(SeekFrom::Start(0))?;
+				let copied = io::copy(&mut Read::take(&mut *log, valid_len), new)?;
+				if copied < valid_len {
+					return Err(PersistenceError::Io(io::Error::from(ErrorKind::UnexpectedEof)));
+				}
+				if header {
+					new.write_all(&AOL_MAGIC)?;
+				}
+				Ok(())
+			})?;
 		}
 		file.seek(SeekFrom::End(0))?;
 		drop(file);
 		Ok(())
+	}
+
+	/// Replaces the log at `aol_path`, whose append handle is `file`, with a
+	/// new file holding what `fill` writes to it from the old one. The new
+	/// file is synced before it is renamed over the log and becomes the append
+	/// handle, so a crash leaves either the old log or the whole new one.
+	fn replace_log(
+		file: &mut File,
+		aol_path: &Path,
+		fill: impl FnOnce(&mut File, &mut File) -> Result<(), PersistenceError>,
+	) -> Result<(), PersistenceError> {
+		// Generate a unique name for the temporary file in the same
+		// directory as AOL
+		let id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
+		let pid = std::process::id();
+		let file_stem = aol_path.file_name().and_then(|n| n.to_str()).unwrap_or("aol");
+		let new_name = format!("{file_stem}.{pid}_{id}.new");
+		let new_path = aol_path.with_file_name(new_name);
+
+		let result = (|| -> Result<(), PersistenceError> {
+			// The replacement is opened once and kept as the new append
+			// handle, so nothing that can fail runs after the rename: a
+			// failed reopen there would leave the log writing to an
+			// unlinked file.
+			let mut new_file = OpenOptions::new()
+				.create(true)
+				.read(true)
+				.write(true)
+				.truncate(true)
+				.open(&new_path)?;
+
+			fill(file, &mut new_file)?;
+
+			new_file.flush()?;
+			new_file.sync_all()?;
+
+			// On Windows, rename over an open file fails with
+			// ERROR_ACCESS_DENIED, so the live handle is parked behind a
+			// stand-in for the duration of the rename and put back if the
+			// rename fails.
+			#[cfg(windows)]
+			let (original, dummy_path) = {
+				let dummy_id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
+				let dummy_path = aol_path.with_file_name(format!("dummy_{pid}_{dummy_id}.tmp"));
+				let dummy =
+					OpenOptions::new().create(true).read(true).write(true).open(&dummy_path)?;
+				(std::mem::replace(&mut *file, dummy), dummy_path)
+			};
+
+			if let Err(e) = fs::rename(&new_path, aol_path) {
+				#[cfg(windows)]
+				{
+					*file = original;
+					let _ = fs::remove_file(&dummy_path);
+				}
+				return Err(e.into());
+			}
+
+			// Sync parent directory on Unix (skipped under Miri where
+			// directory fsync is unsupported)
+			#[cfg(all(unix, not(miri)))]
+			if let Some(parent) = aol_path.parent() {
+				if let Ok(dir) = File::open(parent) {
+					let _ = dir.sync_all();
+				}
+			}
+
+			*file = new_file;
+
+			#[cfg(windows)]
+			{
+				drop(original);
+				let _ = fs::remove_file(&dummy_path);
+			}
+
+			Ok(())
+		})();
+
+		if result.is_err() {
+			let _ = fs::remove_file(&new_path);
+		}
+		result
 	}
 
 	/// Truncate the AOL file up to the specified position, preserving any data
@@ -1156,89 +1297,14 @@ impl Persistence {
 			let mut file = aol.lock()?;
 			let file_len = file.metadata()?.len();
 
-			// Generate a unique name for the temporary file in the same
-			// directory as AOL
-			let id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
-			let pid = std::process::id();
-			let file_stem = aol_path.file_name().and_then(|n| n.to_str()).unwrap_or("aol");
-			let new_name = format!("{file_stem}.{pid}_{id}.new");
-			let new_path = aol_path.with_file_name(new_name);
-
-			let result = (|| -> Result<(), PersistenceError> {
-				// The replacement is opened once and kept as the new append
-				// handle, so nothing that can fail runs after the rename: a
-				// failed reopen there would leave the log writing to an
-				// unlinked file.
-				let mut new_file = OpenOptions::new()
-					.create(true)
-					.read(true)
-					.write(true)
-					.truncate(true)
-					.open(&new_path)?;
-
-				new_file.write_all(&AOL_MAGIC)?;
-
+			Self::replace_log(&mut file, aol_path, |log, new| {
+				new.write_all(&AOL_MAGIC)?;
 				if position < file_len {
-					file.seek(SeekFrom::Start(position))?;
-					let mut buffer = [0u8; 8192];
-					loop {
-						let n = file.read(&mut buffer)?;
-						if n == 0 {
-							break;
-						}
-						new_file.write_all(&buffer[..n])?;
-					}
+					log.seek(SeekFrom::Start(position))?;
+					io::copy(log, new)?;
 				}
-
-				new_file.flush()?;
-				new_file.sync_all()?;
-
-				// On Windows, rename over an open file fails with
-				// ERROR_ACCESS_DENIED, so the live handle is parked behind a
-				// stand-in for the duration of the rename and put back if the
-				// rename fails.
-				#[cfg(windows)]
-				let (original, dummy_path) = {
-					let dummy_id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
-					let dummy_path = aol_path.with_file_name(format!("dummy_{pid}_{dummy_id}.tmp"));
-					let dummy =
-						OpenOptions::new().create(true).read(true).write(true).open(&dummy_path)?;
-					(std::mem::replace(&mut *file, dummy), dummy_path)
-				};
-
-				if let Err(e) = fs::rename(&new_path, aol_path) {
-					#[cfg(windows)]
-					{
-						*file = original;
-						let _ = fs::remove_file(&dummy_path);
-					}
-					return Err(e.into());
-				}
-
-				// Sync parent directory on Unix (skipped under Miri where
-				// directory fsync is unsupported)
-				#[cfg(all(unix, not(miri)))]
-				if let Some(parent) = aol_path.parent() {
-					if let Ok(dir) = File::open(parent) {
-						let _ = dir.sync_all();
-					}
-				}
-
-				*file = new_file;
-
-				#[cfg(windows)]
-				{
-					drop(original);
-					let _ = fs::remove_file(&dummy_path);
-				}
-
 				Ok(())
-			})();
-
-			if result.is_err() {
-				let _ = fs::remove_file(&new_path);
-				result?;
-			}
+			})?;
 
 			// Reset pending syncs if we truncated to beginning or beyond
 			if position == 0 || file_len <= position {
@@ -1547,6 +1613,12 @@ impl Persistence {
 		Ok(())
 	}
 
+	/// Replaces the handle the append-only log is written through
+	#[cfg(test)]
+	pub(crate) fn replace_aol_handle(&self, file: File) {
+		*self.aol.as_ref().expect("the append-only log is enabled").lock().unwrap() = file;
+	}
+
 	/// Appends a set of changes to the append-only log.
 	///
 	/// # Arguments
@@ -1573,8 +1645,9 @@ impl Persistence {
 			// Handle asynchronous AOL mode by queuing the operation
 			if self.aol_mode == AolMode::AsynchronousAfterCommit {
 				// The queue limits are enforced before the commit is applied
-				// (see `check_async_capacity`). By now the transaction is
-				// visible in memory, so it is always queued.
+				// (see `check_async_capacity`). By now the transaction has
+				// passed validation and will be published, so it is always
+				// queued.
 				let batch_bytes = Self::batch_bytes(writeset);
 
 				self.async_queue_depth.fetch_add(1, Ordering::Relaxed);
@@ -1697,5 +1770,27 @@ impl Drop for Persistence {
 				}
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn a_failed_batch_stops_the_group_committer() {
+		let dir = tempfile::TempDir::new().unwrap();
+		let path = dir.path().join("aol.bin");
+		fs::write(&path, b"").unwrap();
+		let committer = GroupCommitter::new(Arc::new(AtomicU64::new(0)));
+		// A log opened only for reading fails the write
+		let read_only = Mutex::new(File::open(&path).unwrap());
+		assert!(committer.commit(&read_only, b"first".to_vec()).is_err());
+		// Every later batch fails without writing, even to a log which would
+		// take it
+		let writable = Mutex::new(OpenOptions::new().read(true).write(true).open(&path).unwrap());
+		let err = committer.commit(&writable, b"second".to_vec()).unwrap_err();
+		assert!(matches!(err, PersistenceError::AppendFailed(_)), "{err}");
+		assert_eq!(fs::metadata(&path).unwrap().len(), 0);
 	}
 }

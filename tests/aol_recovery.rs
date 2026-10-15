@@ -140,10 +140,9 @@ fn sweep(aol_mode: AolMode, fsync_mode: FsyncMode) {
 			assert_eq!(dump(&db), expected, "{context}");
 		}
 		// The file is cut back to the last complete frame, or to the header
-		// when no frame is complete, or to nothing when the header is torn
+		// when no frame is complete, which is rewritten when it is torn
 		let kept = match complete {
-			0 if cut >= MAGIC.len() => MAGIC.len(),
-			0 => 0,
+			0 => MAGIC.len(),
 			n => ends[n - 1],
 		};
 		assert_eq!(fs::metadata(&aol).unwrap().len(), kept as u64, "{context}: torn tail kept");
@@ -263,6 +262,69 @@ fn damage_to_the_last_frame_is_a_torn_tail() {
 	let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
 	assert_eq!(dump(&db), ["a", "b"]);
 	assert_eq!(fs::metadata(&aol).unwrap().len(), ends[1] as u64);
+}
+
+/// The inode of `path`, which a file renamed over it changes
+#[cfg(unix)]
+fn inode(path: &Path) -> u64 {
+	use std::os::unix::fs::MetadataExt;
+	fs::metadata(path).unwrap().ino()
+}
+
+#[test]
+fn recovery_replaces_a_synced_log_with_a_copy_of_what_it_replayed() {
+	// What recovery replayed may be in the page cache only, after an earlier
+	// process failed to sync it, so it is copied to a new file which is synced
+	// and renamed over the log. The copy must hold the log byte for byte.
+	let dir = TempDir::new().unwrap();
+	let aol = dir.path().join("aol.bin");
+	let value = vec![b'v'; 64 * 1024];
+	let keys: Vec<String> = (0..40).map(|i| format!("key{i:02}")).collect();
+	{
+		let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::EveryAppend).unwrap();
+		for key in &keys {
+			let mut tx = db.transaction(true);
+			tx.set(key.as_str(), value.clone()).unwrap();
+			tx.commit().unwrap();
+		}
+	}
+	let log = fs::read(&aol).unwrap();
+	// Garbage after the last frame is left out of the copy
+	let mut damaged = log.clone();
+	damaged.extend_from_slice(b"INVALID_PARTIAL_DATA");
+	fs::write(&aol, &damaged).unwrap();
+	#[cfg(unix)]
+	let before = inode(&aol);
+	{
+		let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::EveryAppend).unwrap();
+		assert_eq!(dump(&db), keys);
+		#[cfg(unix)]
+		assert_ne!(inode(&aol), before, "the log was replaced");
+		assert_eq!(fs::read(&aol).unwrap(), log);
+		// Commits go to the new log
+		commit(&db, &["zz"]);
+	}
+	let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::EveryAppend).unwrap();
+	assert_eq!(dump(&db).len(), keys.len() + 1);
+	// No temporary file is left behind
+	let names: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+	assert_eq!(names, ["aol.bin"]);
+}
+
+#[test]
+fn a_log_which_is_never_synced_is_repaired_in_place() {
+	let txns: [&[&str]; 2] = [&["a"], &["b"]];
+	let (log, _) = build_log(AolMode::SynchronousOnCommit, FsyncMode::Never, &txns);
+	let dir = TempDir::new().unwrap();
+	let aol = dir.path().join("aol.bin");
+	fs::write(&aol, &log).unwrap();
+	#[cfg(unix)]
+	let before = inode(&aol);
+	let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
+	assert_eq!(dump(&db), ["a", "b"]);
+	#[cfg(unix)]
+	assert_eq!(inode(&aol), before, "the log was not replaced");
+	assert_eq!(fs::read(&aol).unwrap(), log);
 }
 
 #[test]
@@ -610,4 +672,57 @@ fn kill_during_commits_recovers_whole_transactions() {
 			assert_eq!(dump(&db), expected, "{context}: state changed across the second restart");
 		}
 	}
+}
+
+/// A new log has its header written and synced on open, before anything is
+/// appended. Otherwise a power loss before the first sync could lose the page
+/// holding the header while keeping a later one, leaving a log which replay
+/// takes for legacy records and cannot open.
+#[test]
+fn a_new_log_starts_with_a_durable_header() {
+	for fsync_mode in
+		[FsyncMode::Never, FsyncMode::EveryAppend, FsyncMode::Interval(Duration::from_secs(1))]
+	{
+		let dir = TempDir::new().unwrap();
+		let db = open(dir.path(), AolMode::SynchronousOnCommit, fsync_mode).unwrap();
+		assert_eq!(fs::read(dir.path().join("aol.bin")).unwrap(), MAGIC, "{fsync_mode:?}");
+		drop(db);
+	}
+}
+
+/// A power loss which loses the unsynced first page of the log, but keeps a
+/// later one, reverts the first page to the header, which was synced, and
+/// zeros. Replay keeps what precedes the zeros and cuts away the rest.
+#[test]
+fn a_lost_first_page_after_the_header_is_cut_away() {
+	let dir = TempDir::new().unwrap();
+	let path = dir.path().join("aol.bin");
+	{
+		let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
+		for i in 0..200u32 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i:04}"), vec![b'x'; 64]).unwrap();
+			tx.commit().unwrap();
+		}
+	}
+	let mut log = fs::read(&path).unwrap();
+	assert!(log.len() > 8192, "the log spans several pages");
+	log[MAGIC.len()..4096].fill(0);
+	fs::write(&path, &log).unwrap();
+	// The log opens, with none of the cut-away commits
+	let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
+	let mut tx = db.transaction(false);
+	assert_eq!(tx.scan("key0000".."key9999", None, None).unwrap().len(), 0);
+	tx.cancel().unwrap();
+	assert_eq!(fs::read(&path).unwrap(), MAGIC);
+	// And commits made after recovery survive the next restart
+	let mut tx = db.transaction(true);
+	tx.set("after", "recovery").unwrap();
+	tx.commit().unwrap();
+	drop(db);
+	let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
+	assert_eq!(
+		db.transaction(false).get("after").unwrap().as_deref(),
+		Some(b"recovery".as_slice())
+	);
 }
