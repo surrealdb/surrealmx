@@ -2378,4 +2378,37 @@ mod tests {
 			 failed to protect a registering reader from a sweep"
 		);
 	}
+
+	/// A commit which fails to reach the append-only log must never become
+	/// visible, since a restart would lose it, and must not leave its merge
+	/// version unpublished, which would stall every later commit and
+	/// snapshot.
+	#[test]
+	fn a_commit_which_fails_to_persist_is_never_published() {
+		use crate::{AolMode, FsyncMode, PersistenceOptions};
+		let dir = tempfile::TempDir::new().unwrap();
+		let persistence = PersistenceOptions::new(dir.path())
+			.with_aol_mode(AolMode::SynchronousOnCommit)
+			.with_fsync_mode(FsyncMode::EveryAppend);
+		let db = Database::new_with_persistence(DatabaseOptions::default(), persistence).unwrap();
+		// A log opened only for reading fails every write
+		let aol = std::fs::File::open(dir.path().join("aol.bin")).unwrap();
+		db.inner.persistence.read().as_ref().unwrap().replace_aol_handle(aol);
+		let mut tx = db.transaction(true);
+		tx.set("key", "value").unwrap();
+		let err = tx.commit().unwrap_err();
+		assert!(matches!(err, Error::TxCommitNotPersisted(_)), "{err}");
+		// The write reached neither the datastore nor the merge queue
+		assert!(db.inner.datastore.get(b"key".as_slice()).is_none());
+		let version = db.inner.oracle.alloc.load(Ordering::SeqCst);
+		let published = db
+			.inner
+			.transaction_merge_queue
+			.get(version, |m| m.writeset.is_empty())
+			.unwrap_or(true);
+		assert!(published, "the failed writeset was published in the merge queue");
+		// The clock and retirement moved past the claimed version
+		assert_eq!(db.inner.oracle.timestamp.load(Ordering::SeqCst), version);
+		assert_eq!(db.inner.merge_retire_id.load(Ordering::SeqCst), version);
+	}
 }

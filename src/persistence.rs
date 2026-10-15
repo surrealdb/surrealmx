@@ -725,18 +725,27 @@ impl Persistence {
 		})?;
 
 		// Get the current position in the AOL file before snapshotting (if AOL
-		// is enabled). Sampling aol_cutoff_position BEFORE
-		// snapshot_version guarantees that every transaction already
-		// written to AOL before the cutoff has commit version <=
-		// snapshot_version, and is therefore included in the snapshot.
-		// Any transaction committed after snapshot_version
-		// was not written before aol_cutoff_position and is preserved in the
-		// AOL tail.
+		// is enabled). Every transaction is written to the AOL after claiming
+		// its merge version but before publishing it, so every transaction
+		// written before the cutoff has claimed a version no higher than the
+		// allocation counter loaded after it. The snapshot reads the
+		// datastore chains only, not the merge queue, so it waits until every
+		// version up to that counter has been applied to the chains (retired)
+		// before pinning: every such transaction is then in the snapshot. Any
+		// transaction written after the cutoff is preserved in the AOL tail.
 		let aol_cutoff_position = if let Some(aol) = aol {
 			aol.lock()?.metadata()?.len()
 		} else {
 			0
 		};
+		let claimed = inner.oracle.alloc.load(Ordering::SeqCst);
+		// A claimed version is always published and marked applied, by an
+		// empty merge if its transaction fails to reach the AOL, so this wait
+		// ends
+		while inner.merge_retire_id.load(Ordering::SeqCst) < claimed {
+			inner.refresh_merge_watermark();
+			std::thread::yield_now();
+		}
 
 		// Pin a reader slot exactly as a transaction does, so the snapshot
 		// is a consistent cut and its versions stay protected from garbage
@@ -1599,6 +1608,12 @@ impl Persistence {
 		Ok(())
 	}
 
+	/// Replaces the handle the append-only log is written through
+	#[cfg(test)]
+	pub(crate) fn replace_aol_handle(&self, file: File) {
+		*self.aol.as_ref().expect("the append-only log is enabled").lock().unwrap() = file;
+	}
+
 	/// Appends a set of changes to the append-only log.
 	///
 	/// # Arguments
@@ -1625,8 +1640,9 @@ impl Persistence {
 			// Handle asynchronous AOL mode by queuing the operation
 			if self.aol_mode == AolMode::AsynchronousAfterCommit {
 				// The queue limits are enforced before the commit is applied
-				// (see `check_async_capacity`). By now the transaction is
-				// visible in memory, so it is always queued.
+				// (see `check_async_capacity`). By now the transaction has
+				// passed validation and will be published, so it is always
+				// queued.
 				let batch_bytes = Self::batch_bytes(writeset);
 
 				self.async_queue_depth.fetch_add(1, Ordering::Relaxed);

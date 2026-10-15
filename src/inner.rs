@@ -347,7 +347,7 @@ impl Inner {
 	pub(crate) fn compute_cleanup_ts(&self) -> Option<u64> {
 		// Retire applied merge-queue entries to free memory before computing
 		// the cleanup bound. Clock advancement is handled continuously by
-		// TransactionInner::atomic_merge.
+		// TransactionInner::publish_merge.
 		self.refresh_merge_watermark();
 		// Retry a bounded number of times while registrations are pinning
 		for _ in 0..3 {
@@ -421,9 +421,8 @@ impl Inner {
 	/// the datastore. Entries are removed strictly in version order (see
 	/// the `merge_retire_id` field documentation): the bound is the
 	/// published clock, below which every version's entry was inserted,
-	/// and a missing entry means it was already retired by a racer or
-	/// removed early on the persistence-failure path — in either case its
-	/// data is in the datastore chains, so the watermark may pass it.
+	/// and a missing entry means it was already retired by a racer, so
+	/// its data is in the datastore chains and the watermark may pass it.
 	///
 	/// One thread retires at a time: concurrent walks would repeat the
 	/// same queue lookups and removals over the same prefix, so a caller

@@ -33,21 +33,21 @@ use std::sync::Arc;
 /// merge has happened yet). Readers snapshot it directly. A committer
 /// publishes by waiting for `timestamp` to reach its own claimed
 /// version's predecessor, then advancing it to its own version in one
-/// step (`Inner::atomic_merge`): every publish is in strict claim order,
-/// so a thread always sees its own immediately-prior commit reflected in
-/// `timestamp` before it can start another. `Inner::try_advance_merge_clock`
-/// additionally walks `timestamp` forward opportunistically through
-/// consecutive claimed-and-inserted versions on the cleanup/GC paths,
-/// where no thread is waiting on the result. Either way, a snapshot at
-/// `v` sees every merge `<= v` (in the merge queue or already applied):
-/// `timestamp` only ever crosses a version once its entry is in the merge
-/// queue, and merge entries are never removed before the clock has
-/// already passed them (see
-/// `Inner::merge_retire_id` and the persistence-failure path in
-/// `TransactionInner::commit`). On persistent databases both counters are
-/// seeded at load time with the maximum version found across the snapshot file
-/// and the append-only log, so newly minted versions always continue strictly
-/// above every persisted version.
+/// step (`TransactionInner::publish_merge`): every publish is in strict
+/// claim order, so a thread always sees its own immediately-prior commit
+/// reflected in `timestamp` before it can start another. A committer
+/// appends to the append-only log between claiming and publishing, so a
+/// published version and every version below it are already persisted.
+/// `Inner::try_advance_merge_clock` additionally walks `timestamp` forward
+/// opportunistically through consecutive claimed-and-inserted versions on the
+/// cleanup/GC paths, where no thread is waiting on the result. Either way, a
+/// snapshot at `v` sees every merge `<= v` (in the merge queue or already
+/// applied): `timestamp` only ever crosses a version once its entry is in the
+/// merge queue, and merge entries are never removed before the clock has
+/// already passed them (see `Inner::merge_retire_id`). On persistent databases
+/// both counters are seeded at load time with the maximum version found across
+/// the snapshot file and the append-only log, so newly minted versions always
+/// continue strictly above every persisted version.
 pub(crate) struct Oracle {
 	/// The merge version allocation counter
 	pub(crate) alloc: CachePadded<AtomicU64>,
