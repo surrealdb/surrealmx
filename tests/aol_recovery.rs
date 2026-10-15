@@ -140,10 +140,9 @@ fn sweep(aol_mode: AolMode, fsync_mode: FsyncMode) {
 			assert_eq!(dump(&db), expected, "{context}");
 		}
 		// The file is cut back to the last complete frame, or to the header
-		// when no frame is complete, or to nothing when the header is torn
+		// when no frame is complete, which is rewritten when it is torn
 		let kept = match complete {
-			0 if cut >= MAGIC.len() => MAGIC.len(),
-			0 => 0,
+			0 => MAGIC.len(),
 			n => ends[n - 1],
 		};
 		assert_eq!(fs::metadata(&aol).unwrap().len(), kept as u64, "{context}: torn tail kept");
@@ -673,4 +672,57 @@ fn kill_during_commits_recovers_whole_transactions() {
 			assert_eq!(dump(&db), expected, "{context}: state changed across the second restart");
 		}
 	}
+}
+
+/// A new log has its header written and synced on open, before anything is
+/// appended. Otherwise a power loss before the first sync could lose the page
+/// holding the header while keeping a later one, leaving a log which replay
+/// takes for legacy records and cannot open.
+#[test]
+fn a_new_log_starts_with_a_durable_header() {
+	for fsync_mode in
+		[FsyncMode::Never, FsyncMode::EveryAppend, FsyncMode::Interval(Duration::from_secs(1))]
+	{
+		let dir = TempDir::new().unwrap();
+		let db = open(dir.path(), AolMode::SynchronousOnCommit, fsync_mode).unwrap();
+		assert_eq!(fs::read(dir.path().join("aol.bin")).unwrap(), MAGIC, "{fsync_mode:?}");
+		drop(db);
+	}
+}
+
+/// A power loss which loses the unsynced first page of the log, but keeps a
+/// later one, reverts the first page to the header, which was synced, and
+/// zeros. Replay keeps what precedes the zeros and cuts away the rest.
+#[test]
+fn a_lost_first_page_after_the_header_is_cut_away() {
+	let dir = TempDir::new().unwrap();
+	let path = dir.path().join("aol.bin");
+	{
+		let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
+		for i in 0..200u32 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i:04}"), vec![b'x'; 64]).unwrap();
+			tx.commit().unwrap();
+		}
+	}
+	let mut log = fs::read(&path).unwrap();
+	assert!(log.len() > 8192, "the log spans several pages");
+	log[MAGIC.len()..4096].fill(0);
+	fs::write(&path, &log).unwrap();
+	// The log opens, with none of the cut-away commits
+	let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
+	let mut tx = db.transaction(false);
+	assert_eq!(tx.scan("key0000".."key9999", None, None).unwrap().len(), 0);
+	tx.cancel().unwrap();
+	assert_eq!(fs::read(&path).unwrap(), MAGIC);
+	// And commits made after recovery survive the next restart
+	let mut tx = db.transaction(true);
+	tx.set("after", "recovery").unwrap();
+	tx.commit().unwrap();
+	drop(db);
+	let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
+	assert_eq!(
+		db.transaction(false).get("after").unwrap().as_deref(),
+		Some(b"recovery".as_slice())
+	);
 }
