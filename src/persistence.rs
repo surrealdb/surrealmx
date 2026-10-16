@@ -34,7 +34,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 use web_time::{Duration, Instant};
 use xxhash_rust::xxh3::xxh3_64_with_seed;
@@ -231,20 +231,40 @@ struct SyncCommitSlot {
 	error: Mutex<Option<PersistenceError>>,
 }
 
+/// Stops the append-only log once a write to it or a sync of it fails.
+///
+/// After that, every write and sync fails with the same error and nothing more
+/// reaches the file. A failed sync may have lost earlier writes which stay
+/// readable, and the next sync can succeed without them, so a commit appended
+/// after the failure could be acknowledged as durable while what precedes it
+/// in the log is not.
+#[derive(Default)]
+pub(crate) struct LogFailure(OnceLock<String>);
+
+impl LogFailure {
+	/// Runs `write` against the log unless it has stopped, and stops it if
+	/// `write` fails. The caller holds the log's lock, so that no write can
+	/// start between a failure and it being recorded.
+	fn guard(
+		&self,
+		write: impl FnOnce() -> Result<(), PersistenceError>,
+	) -> Result<(), PersistenceError> {
+		if let Some(err_msg) = self.0.get() {
+			return Err(PersistenceError::AppendFailed(err_msg.clone()));
+		}
+		write().inspect_err(|err| {
+			let _ = self.0.set(err.to_string());
+		})
+	}
+}
+
 /// Coordinates group commits across concurrent threads for AOL synchronous
 /// persistence.
-///
-/// Once writing or syncing a batch fails, every later batch fails with the
-/// same error and nothing more is written. A failed sync may have lost
-/// earlier writes which stay readable, and the next sync can succeed without
-/// them, so a batch appended after the failure could be acknowledged as
-/// durable while what precedes it in the log is not.
 pub(crate) struct GroupCommitter {
 	queue: Mutex<Vec<Arc<SyncCommitSlot>>>,
 	flushing: AtomicBool,
 	pending_syncs: Arc<AtomicU64>,
-	/// The error which stopped the log, if any
-	failed: Mutex<Option<String>>,
+	failure: Arc<LogFailure>,
 }
 
 thread_local! {
@@ -252,12 +272,12 @@ thread_local! {
 }
 
 impl GroupCommitter {
-	pub const fn new(pending_syncs: Arc<AtomicU64>) -> Self {
+	pub const fn new(pending_syncs: Arc<AtomicU64>, failure: Arc<LogFailure>) -> Self {
 		Self {
 			queue: Mutex::new(Vec::new()),
 			flushing: AtomicBool::new(false),
 			pending_syncs,
-			failed: Mutex::new(None),
+			failure,
 		}
 	}
 
@@ -310,27 +330,18 @@ impl GroupCommitter {
 				std::mem::take(&mut *q)
 			};
 
-			let flush = || -> Result<(), PersistenceError> {
+			let flush_result = (|| -> Result<(), PersistenceError> {
 				let mut file = aol.lock()?;
-				append_to_log(&mut file, batch.iter().map(|slot| slot.data.as_slice()))?;
-				file.sync_all()?;
+				self.failure.guard(|| {
+					append_to_log(&mut file, batch.iter().map(|slot| slot.data.as_slice()))?;
+					file.sync_all()?;
+					Ok(())
+				})?;
 				drop(file);
 				self.pending_syncs.store(0, Ordering::Release);
 				Ok(())
-			};
-			// Write nothing after a failed write or sync, and remember the
-			// first failure for every batch that follows it
-			let flush_result = match self.failed.lock() {
-				Ok(mut failed) => match failed.as_ref() {
-					Some(err_msg) => Err(err_msg.clone()),
-					None => flush().map_err(|err| {
-						let err_msg = err.to_string();
-						*failed = Some(err_msg.clone());
-						err_msg
-					}),
-				},
-				Err(err) => Err(PersistenceError::from(err).to_string()),
-			};
+			})()
+			.map_err(|err| err.to_string());
 
 			match flush_result {
 				Ok(()) => {
@@ -532,6 +543,8 @@ pub struct Persistence {
 	pub(crate) async_append_injector: Arc<Injector<AsyncAppendOperation>>,
 	/// Group commit coordinator for synchronous AOL appends
 	pub(crate) group_committer: Arc<GroupCommitter>,
+	/// Stops every write to and sync of the AOL once one has failed
+	pub(crate) aol_failure: Arc<LogFailure>,
 	/// Mutex ensuring only one snapshot runs at a time
 	pub(crate) snapshot_mutex: Arc<parking_lot::Mutex<()>>,
 	/// Current depth of the asynchronous append queue
@@ -638,7 +651,9 @@ impl Persistence {
 			fs::create_dir_all(parent)?;
 		}
 		let pending_syncs = Arc::new(AtomicU64::new(0));
-		let group_committer = Arc::new(GroupCommitter::new(Arc::clone(&pending_syncs)));
+		let aol_failure = Arc::new(LogFailure::default());
+		let group_committer =
+			Arc::new(GroupCommitter::new(Arc::clone(&pending_syncs), Arc::clone(&aol_failure)));
 		let snapshot_mutex = Arc::new(parking_lot::Mutex::new(()));
 		let async_queue_depth = Arc::new(AtomicUsize::new(0));
 		let async_queue_bytes = Arc::new(AtomicUsize::new(0));
@@ -661,6 +676,7 @@ impl Persistence {
 			pending_syncs,
 			async_append_injector: Arc::new(Injector::new()),
 			group_committer,
+			aol_failure,
 			snapshot_mutex,
 			async_queue_depth,
 			async_queue_bytes,
@@ -1331,6 +1347,7 @@ impl Persistence {
 				// Clone necessary fields for the worker thread
 				let aol = Arc::clone(aol);
 				let pending_syncs = Arc::clone(&self.pending_syncs);
+				let failure = Arc::clone(&self.aol_failure);
 				let enabled = Arc::clone(&self.background_threads_enabled);
 				// Spawn the background worker thread
 				let handle = thread::spawn(move || {
@@ -1345,7 +1362,7 @@ impl Persistence {
 						// Check if there are pending syncs
 						if pending_syncs.load(Ordering::Acquire) > 0 {
 							if let Ok(file) = aol.lock() {
-								if let Err(e) = file.sync_all() {
+								if let Err(e) = failure.guard(|| Ok(file.sync_all()?)) {
 									tracing::error!("Fsync worker error: {e}");
 								} else {
 									pending_syncs.store(0, Ordering::Release);
@@ -1432,6 +1449,7 @@ impl Persistence {
 				let fsync_mode = self.fsync_mode;
 				let enabled = Arc::clone(&self.background_threads_enabled);
 				let pending_syncs = Arc::clone(&self.pending_syncs);
+				let failure = Arc::clone(&self.aol_failure);
 				let last_fsync = Arc::clone(&self.last_fsync);
 				let queue_depth = Arc::clone(&self.async_queue_depth);
 				let queue_bytes = Arc::clone(&self.async_queue_bytes);
@@ -1499,58 +1517,68 @@ impl Persistence {
 									for op in &batch {
 										encode_frame(&mut scratch, op.version, &op.writeset)?;
 									}
-									// Write encoded batch in a single operation
-									append_to_log(&mut file, [scratch.as_slice()])?;
-									// Handle fsync based on mode
-									match fsync_mode {
-										// Let the operating system handle syncing to disk
-										FsyncMode::Never => {
-											// No fsync, just increment pending
-											// counter
-											pending_syncs.fetch_add(1, Ordering::Release);
-										}
-										// Sync immediately to disk after every append
-										FsyncMode::EveryAppend => {
-											// Sync immediately
-											file.sync_all()?;
-										}
-										// Force sync to disk at a specified interval
-										FsyncMode::Interval(duration) => {
-											// Check if we should sync based on
-											// time
-											let now = Instant::now();
-											// Check if we should sync based on
-											// time
-											let should_sync = {
-												// Get the last fsync time
-												let mut last_fsync = last_fsync.lock()?;
-												// Check if the last fsync time
-												// is greater than the
-												// duration
-												if now.duration_since(*last_fsync) >= duration {
-													// Update the last fsync
-													// time
-													*last_fsync = now;
-													true
-												} else {
-													false
-												}
-											};
-											// Check if we should sync
-											if should_sync {
-												// Force sync the AOL file to
-												// disk
-												file.sync_all()?;
-												// Reset the pending syncs
-												// counter
-												pending_syncs.store(0, Ordering::Release);
-											} else {
-												// Increment the pending syncs
+									// Write the encoded batch in a single
+									// operation, then sync it as the mode asks
+									failure.guard(|| {
+										append_to_log(&mut file, [scratch.as_slice()])?;
+										// Handle fsync based on mode
+										match fsync_mode {
+											// Let the operating system handle syncing to disk
+											FsyncMode::Never => {
+												// No fsync, just increment
+												// pending
 												// counter
 												pending_syncs.fetch_add(1, Ordering::Release);
 											}
+											// Sync immediately to disk after every append
+											FsyncMode::EveryAppend => {
+												// Sync immediately
+												file.sync_all()?;
+											}
+											// Force sync to disk at a specified interval
+											FsyncMode::Interval(duration) => {
+												// Check if we should sync based
+												// on
+												// time
+												let now = Instant::now();
+												// Check if we should sync based
+												// on
+												// time
+												let should_sync = {
+													// Get the last fsync time
+													let mut last_fsync = last_fsync.lock()?;
+													// Check if the last fsync
+													// time
+													// is greater than the
+													// duration
+													if now.duration_since(*last_fsync) >= duration {
+														// Update the last fsync
+														// time
+														*last_fsync = now;
+														true
+													} else {
+														false
+													}
+												};
+												// Check if we should sync
+												if should_sync {
+													// Force sync the AOL file
+													// to
+													// disk
+													file.sync_all()?;
+													// Reset the pending syncs
+													// counter
+													pending_syncs.store(0, Ordering::Release);
+												} else {
+													// Increment the pending
+													// syncs
+													// counter
+													pending_syncs.fetch_add(1, Ordering::Release);
+												}
+											}
 										}
-									}
+										Ok(())
+									})?;
 								}
 								// All ok
 								Ok(())
@@ -1627,10 +1655,6 @@ impl Persistence {
 	///
 	/// # Returns
 	/// * `Result<(), PersistenceError>` - Success or an error
-	#[expect(
-		clippy::significant_drop_tightening,
-		reason = "the file guard must cover the pending_syncs store, or a concurrent append's increment is silently discarded along with its required fsync"
-	)]
 	pub(crate) fn append(
 		&self,
 		version: u64,
@@ -1683,46 +1707,49 @@ impl Persistence {
 
 				// Lock the AOL file for writing without group fsync
 				let mut file = aol.lock()?;
-				append_to_log(&mut file, [data.as_slice()])?;
+				self.aol_failure.guard(|| {
+					append_to_log(&mut file, [data.as_slice()])?;
 
-				// Handle fsync based on mode
-				match self.fsync_mode {
-					// Let the operating system handle syncing to disk
-					FsyncMode::Never => {
-						// No fsync, just increment pending counter
-						self.pending_syncs.fetch_add(1, Ordering::Release);
-					}
-					FsyncMode::EveryAppend => unreachable!(),
-					// Force sync to disk at a specified interval
-					FsyncMode::Interval(duration) => {
-						// Check if we should sync based on time
-						let now = Instant::now();
-						// Check if we should sync based on time
-						let should_sync = {
-							// Get the last fsync time
-							let mut last_fsync = self.last_fsync.lock()?;
-							// Check if the last fsync time is greater than the
-							// duration
-							if now.duration_since(*last_fsync) >= duration {
-								// Update the last fsync time
-								*last_fsync = now;
-								true
-							} else {
-								false
-							}
-						};
-						// Check if we should sync
-						if should_sync {
-							// Force sync the AOL file to disk
-							file.sync_all()?;
-							// Reset the pending syncs counter
-							self.pending_syncs.store(0, Ordering::Release);
-						} else {
-							// Increment the pending syncs counter
+					// Handle fsync based on mode
+					match self.fsync_mode {
+						// Let the operating system handle syncing to disk
+						FsyncMode::Never => {
+							// No fsync, just increment pending counter
 							self.pending_syncs.fetch_add(1, Ordering::Release);
 						}
+						FsyncMode::EveryAppend => unreachable!(),
+						// Force sync to disk at a specified interval
+						FsyncMode::Interval(duration) => {
+							// Check if we should sync based on time
+							let now = Instant::now();
+							// Check if we should sync based on time
+							let should_sync = {
+								// Get the last fsync time
+								let mut last_fsync = self.last_fsync.lock()?;
+								// Check if the last fsync time is greater than
+								// the duration
+								if now.duration_since(*last_fsync) >= duration {
+									// Update the last fsync time
+									*last_fsync = now;
+									true
+								} else {
+									false
+								}
+							};
+							// Check if we should sync
+							if should_sync {
+								// Force sync the AOL file to disk
+								file.sync_all()?;
+								// Reset the pending syncs counter
+								self.pending_syncs.store(0, Ordering::Release);
+							} else {
+								// Increment the pending syncs counter
+								self.pending_syncs.fetch_add(1, Ordering::Release);
+							}
+						}
 					}
-				}
+					Ok(())
+				})?;
 			}
 		}
 		// All ok
@@ -1764,7 +1791,7 @@ impl Drop for Persistence {
 					// Sync file contents to disk, then clear the counter
 					// shared by every clone of this layer so the next one
 					// to drop does not sync the same writes again
-					if file.sync_all().is_ok() {
+					if self.aol_failure.guard(|| Ok(file.sync_all()?)).is_ok() {
 						self.pending_syncs.store(0, Ordering::Release);
 					}
 				}
@@ -1782,7 +1809,8 @@ mod tests {
 		let dir = tempfile::TempDir::new().unwrap();
 		let path = dir.path().join("aol.bin");
 		fs::write(&path, b"").unwrap();
-		let committer = GroupCommitter::new(Arc::new(AtomicU64::new(0)));
+		let committer =
+			GroupCommitter::new(Arc::new(AtomicU64::new(0)), Arc::new(LogFailure::default()));
 		// A log opened only for reading fails the write
 		let read_only = Mutex::new(File::open(&path).unwrap());
 		assert!(committer.commit(&read_only, b"first".to_vec()).is_err());

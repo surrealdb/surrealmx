@@ -2411,4 +2411,48 @@ mod tests {
 		assert_eq!(db.inner.oracle.timestamp.load(Ordering::SeqCst), version);
 		assert_eq!(db.inner.merge_retire_id.load(Ordering::SeqCst), version);
 	}
+
+	/// Once a write to the append-only log fails, nothing more is written to
+	/// it, in every fsync mode and not only the one which commits in groups.
+	/// The failed commit poisons the database, but the log must stop by
+	/// itself too, since other commits and the fsync worker reach it
+	/// directly.
+	#[test]
+	fn a_failed_append_stops_the_log_in_every_fsync_mode() {
+		use crate::{AolMode, FsyncMode, PersistenceOptions};
+		let writeset = |key: &str| {
+			let mut writeset = std::collections::BTreeMap::new();
+			writeset.insert(
+				ByteSlice::from(key.as_bytes()),
+				Some(ByteSlice::from(b"value".as_slice())),
+			);
+			writeset
+		};
+		for fsync_mode in
+			[FsyncMode::Never, FsyncMode::Interval(Duration::from_secs(1)), FsyncMode::EveryAppend]
+		{
+			let dir = tempfile::TempDir::new().unwrap();
+			let path = dir.path().join("aol.bin");
+			let persistence = PersistenceOptions::new(dir.path())
+				.with_aol_mode(AolMode::SynchronousOnCommit)
+				.with_fsync_mode(fsync_mode);
+			let db =
+				Database::new_with_persistence(DatabaseOptions::default(), persistence).unwrap();
+			let len = std::fs::metadata(&path).unwrap().len();
+			let persistence = db.inner.persistence.read().clone().unwrap();
+			// A log opened only for reading fails the write
+			persistence.replace_aol_handle(std::fs::File::open(&path).unwrap());
+			assert!(persistence.append(1, &writeset("first")).is_err(), "{fsync_mode:?}");
+			// Every later append fails without writing, even to a log which
+			// would take it
+			let writable = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+			persistence.replace_aol_handle(writable);
+			let err = persistence.append(2, &writeset("second")).unwrap_err();
+			assert!(
+				matches!(err, crate::err::PersistenceError::AppendFailed(_)),
+				"{fsync_mode:?}: {err}"
+			);
+			assert_eq!(std::fs::metadata(&path).unwrap().len(), len, "{fsync_mode:?}");
+		}
+	}
 }
