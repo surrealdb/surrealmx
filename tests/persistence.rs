@@ -741,7 +741,7 @@ fn test_readonly_operations_no_persistence() {
 	// the snapshot should not exist
 	assert_eq!(
 		std::fs::read(&aol_path).unwrap(),
-		[0xFF, b'S', b'M', b'X', b'A', b'O', b'L', 1],
+		[0xFF, b'S', b'M', b'X', b'A', b'O', b'L', 2],
 		"AOL file should hold only its header after read-only operations"
 	);
 	assert!(!snapshot_path.exists(), "Snapshot file should not exist after read-only operations");
