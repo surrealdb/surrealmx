@@ -783,10 +783,15 @@ fn test_snapshot_persists_only_latest_version() {
 		db.persistence().unwrap().snapshot().unwrap();
 	}
 
-	// Decode the snapshot file directly: every entry holds exactly one
-	// version with a value, and the deleted key is absent entirely
+	// Decode the snapshot file directly: a header naming the version the
+	// snapshot covers, then entries which each hold exactly one version with
+	// a value, the deleted key absent entirely
 	let file = std::fs::File::open(temp_path.join("snapshot.bin")).unwrap();
 	let mut reader = std::io::BufReader::new(file);
+	let mut header = [0u8; 16];
+	std::io::Read::read_exact(&mut reader, &mut header).unwrap();
+	assert_eq!(header[..8], [0xFF, b'S', b'M', b'X', b'S', b'N', b'P', 1]);
+	let covered = u64::from_le_bytes(header[8..].try_into().unwrap());
 	let mut entries = Vec::new();
 	loop {
 		type Entry = (ByteSlice, Vec<(u64, Option<ByteSlice>)>);
@@ -806,6 +811,7 @@ fn test_snapshot_persists_only_latest_version() {
 		assert_eq!(versions.len(), 1, "entry for {key:?} should hold exactly one version");
 		assert!(versions[0].1.is_some(), "entry for {key:?} should hold a value");
 		assert_ne!(key.as_ref(), b"beta", "deleted key should be absent from the snapshot");
+		assert!(versions[0].0 <= covered, "entry for {key:?} is above the covered version");
 	}
 	let alpha = entries.iter().find(|(k, _)| k.as_ref() == b"alpha").expect("alpha missing");
 	assert_eq!(alpha.1[0].1.as_deref(), Some(b"v3" as &[u8]));

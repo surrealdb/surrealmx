@@ -18,6 +18,12 @@
 //! Tests LZ4 compression for snapshots and compression round-trips.
 
 use byteslice::ByteSlice;
+
+/// The start of the uncompressed snapshot header, without its format version
+const SNAPSHOT_MAGIC: &[u8] = &[0xFF, b'S', b'M', b'X', b'S', b'N', b'P'];
+
+/// The length of the snapshot header: the magic, then the covered version
+const HEADER_LEN: usize = 16;
 use surrealmx::{
 	AolMode, CompressionMode, Database, DatabaseOptions, PersistenceOptions, SnapshotMode,
 };
@@ -59,9 +65,19 @@ fn lz4_snapshot_round_trip() {
 	assert!(snapshot_path.exists(), "Snapshot file should exist");
 
 	let snapshot_bytes = std::fs::read(&snapshot_path).unwrap();
-	// LZ4 magic number: 0x04 0x22 0x4D 0x18 (little endian)
-	assert!(snapshot_bytes.len() >= 4, "Snapshot should have at least 4 bytes for magic number");
-	assert_eq!(&snapshot_bytes[0..4], &[0x04, 0x22, 0x4D, 0x18], "Should have LZ4 magic bytes");
+	// The LZ4 stream follows the uncompressed header: the snapshot magic and
+	// the covered version. LZ4 magic number: 0x04 0x22 0x4D 0x18 (little
+	// endian)
+	assert!(
+		snapshot_bytes.len() >= HEADER_LEN + 4,
+		"Snapshot should hold a header and a magic number"
+	);
+	assert_eq!(&snapshot_bytes[0..7], SNAPSHOT_MAGIC, "Should have the snapshot header");
+	assert_eq!(
+		&snapshot_bytes[HEADER_LEN..HEADER_LEN + 4],
+		&[0x04, 0x22, 0x4D, 0x18],
+		"Should have LZ4 magic bytes"
+	);
 
 	// Recover and verify data
 	{
@@ -107,9 +123,9 @@ fn uncompressed_snapshot_round_trip() {
 	// Verify NOT LZ4 (no magic bytes)
 	let snapshot_path = temp_path.join("snapshot.bin");
 	let snapshot_bytes = std::fs::read(&snapshot_path).unwrap();
-	if snapshot_bytes.len() >= 4 {
+	if snapshot_bytes.len() >= HEADER_LEN + 4 {
 		assert_ne!(
-			&snapshot_bytes[0..4],
+			&snapshot_bytes[HEADER_LEN..HEADER_LEN + 4],
 			&[0x04, 0x22, 0x4D, 0x18],
 			"Should NOT have LZ4 magic bytes"
 		);
