@@ -886,3 +886,52 @@ fn damage_followed_by_valid_data_in_a_log_of_format_version_1_is_an_error() {
 	assert!(is_corrupted(&result));
 	assert_eq!(fs::read(&aol).unwrap(), log);
 }
+
+/// A snapshot leaves out a key whose newest write is a delete. When the log
+/// beside it still holds an older write of the key but not the delete (the
+/// cut after the snapshot never reached the disk, and a power loss took the
+/// unsynced delete), the key stays deleted.
+#[test]
+fn a_key_deleted_before_a_snapshot_stays_deleted_when_the_log_keeps_its_older_write() {
+	let dir = TempDir::new().unwrap();
+	let aol = dir.path().join("aol.bin");
+	let (old_log, after_set) = {
+		let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
+		commit(&db, &["deleted", "kept"]);
+		let after_set = fs::metadata(&aol).unwrap().len() as usize;
+		let mut tx = db.transaction(true);
+		tx.del("deleted").unwrap();
+		tx.commit().unwrap();
+		let old_log = fs::read(&aol).unwrap();
+		db.persistence().unwrap().snapshot().unwrap();
+		(old_log, after_set)
+	};
+	fs::write(&aol, &old_log[..after_set]).unwrap();
+	let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
+	assert_eq!(dump(&db), ["kept"]);
+	// What is committed after recovery is kept, and the log holds it
+	commit(&db, &["later"]);
+	drop(db);
+	let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
+	assert_eq!(dump(&db), ["kept", "later"]);
+}
+
+/// A snapshot written without the header that says which version it covers
+/// is still read, and the whole log is replayed over it.
+#[test]
+fn a_snapshot_without_a_header_is_read_and_the_whole_log_replayed() {
+	let dir = TempDir::new().unwrap();
+	{
+		let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
+		commit(&db, &["a", "b"]);
+		db.persistence().unwrap().snapshot().unwrap();
+		commit(&db, &["c"]);
+	}
+	// Drop the header: the magic and the covered version
+	let snapshot = dir.path().join("snapshot.bin");
+	let bytes = fs::read(&snapshot).unwrap();
+	assert_eq!(bytes[..7], [0xFF, b'S', b'M', b'X', b'S', b'N', b'P']);
+	fs::write(&snapshot, &bytes[16..]).unwrap();
+	let db = open(dir.path(), AolMode::SynchronousOnCommit, FsyncMode::Never).unwrap();
+	assert_eq!(dump(&db), ["a", "b", "c"]);
+}
