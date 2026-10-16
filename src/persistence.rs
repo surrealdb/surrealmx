@@ -48,11 +48,23 @@ use xxhash_rust::xxh3::xxh3_64_with_seed;
 /// variable-length integer encoding of a legacy record's leading key length
 /// never produces, so the header cannot be mistaken for the start of a legacy
 /// record. The last byte is the format version.
-const AOL_MAGIC: [u8; 8] = [0xFF, b'S', b'M', b'X', b'A', b'O', b'L', 1];
+const AOL_MAGIC: [u8; 8] = [0xFF, b'S', b'M', b'X', b'A', b'O', b'L', AOL_FORMAT];
+
+/// The format version of the framed section which is written. Version 1
+/// framed each transaction; version 2 also records in each frame how far the
+/// log had been synced when the frame was written. Logs of version 1 are
+/// still read, and are rewritten as version 2 when they are opened.
+const AOL_FORMAT: u8 = 2;
 
 /// The size of the header in front of each frame: the payload length as a
-/// little-endian `u32`, then its checksum as a little-endian `u32`.
-const FRAME_HEADER_LEN: usize = 8;
+/// little-endian `u32`, the frame's checksum as a little-endian `u32`, and the
+/// length the log had at its last sync before the frame was written, as a
+/// little-endian `u64`.
+const FRAME_HEADER_LEN: usize = 16;
+
+/// The size of the header in front of each frame of format version 1, which
+/// has no sync length
+const V1_FRAME_HEADER_LEN: usize = 8;
 
 /// A frame holds every record of one committed transaction, so that a
 /// transaction is replayed whole or not at all. Its payload is a run of
@@ -76,36 +88,86 @@ fn encode_frame(
 			"transaction is too large for a single append-only log frame".to_owned(),
 		));
 	};
-	let checksum = frame_checksum(payload);
-	buf[start..start + 4].copy_from_slice(&len.to_le_bytes());
-	buf[start + 4..payload_start].copy_from_slice(&checksum.to_le_bytes());
+	// The sync length is set when the frame is written
+	let checksum = frame_checksum(payload, 0);
+	write_frame_header(&mut buf[start..payload_start], len, checksum, 0);
 	Ok(())
 }
 
-/// Checksums a frame payload. The payload length seeds the hash, so a frame
-/// whose length field was damaged cannot pass as another valid frame.
-fn frame_checksum(payload: &[u8]) -> u32 {
+/// Fills in a frame header
+fn write_frame_header(header: &mut [u8], len: u32, checksum: u32, synced_to: u64) {
+	header[..4].copy_from_slice(&len.to_le_bytes());
+	header[4..8].copy_from_slice(&checksum.to_le_bytes());
+	header[8..FRAME_HEADER_LEN].copy_from_slice(&synced_to.to_le_bytes());
+}
+
+/// Checksums a frame. The sync length is hashed apart from the payload and
+/// mixed in, so that it can be set as the frame is written without hashing
+/// the payload again.
+fn frame_checksum(payload: &[u8], synced_to: u64) -> u32 {
+	payload_checksum(payload) ^ synced_to_checksum(synced_to)
+}
+
+/// Checksums a frame payload, which is the whole checksum of a frame of format
+/// version 1. The payload length seeds the hash, so a frame whose length field
+/// was damaged cannot pass as another valid frame.
+fn payload_checksum(payload: &[u8]) -> u32 {
 	let [a, b, c, d, ..] = xxh3_64_with_seed(payload, payload.len() as u64).to_le_bytes();
 	u32::from_le_bytes([a, b, c, d])
 }
 
+/// Checksums the sync length of a frame
+fn synced_to_checksum(synced_to: u64) -> u32 {
+	let [a, b, c, d, ..] = xxh3_64_with_seed(&synced_to.to_le_bytes(), 0).to_le_bytes();
+	u32::from_le_bytes([a, b, c, d])
+}
+
+/// Reads a little-endian `u32` from the start of `bytes`
+fn read_u32(bytes: &[u8]) -> u32 {
+	let mut le = [0u8; 4];
+	le.copy_from_slice(&bytes[..4]);
+	u32::from_le_bytes(le)
+}
+
+/// Reads a little-endian `u64` from the start of `bytes`
+fn read_u64(bytes: &[u8]) -> u64 {
+	let mut le = [0u8; 8];
+	le.copy_from_slice(&bytes[..8]);
+	u64::from_le_bytes(le)
+}
+
+/// Records in each of the consecutive frames in `frames` that the log had
+/// been synced up to `synced_to` when they were written, updating their
+/// checksums to match
+fn set_synced_to(frames: &mut [u8], synced_to: u64) {
+	let mut pos = 0;
+	while pos < frames.len() {
+		let header = &mut frames[pos..pos + FRAME_HEADER_LEN];
+		let len = read_u32(header);
+		let checksum = read_u32(&header[4..])
+			^ synced_to_checksum(read_u64(&header[8..]))
+			^ synced_to_checksum(synced_to);
+		write_frame_header(header, len, checksum, synced_to);
+		pos += FRAME_HEADER_LEN + len as usize;
+	}
+}
+
 /// Appends whole frames to the end of the log, opening a file that is still
-/// empty with the header. A failed write is undone by cutting the file back to
-/// its previous length, so that a partial frame is never left in front of the
+/// empty with the header, and returns the length of the log after them. Each
+/// frame records the length of the log at its last sync, which is
+/// `synced_len`. A failed write is undone by cutting the file back to its
+/// previous length, so that a partial frame is never left in front of the
 /// frames that follow it.
-fn append_to_log<'a>(
-	file: &mut File,
-	chunks: impl IntoIterator<Item = &'a [u8]>,
-) -> io::Result<()> {
+fn append_frames(file: &mut File, frames: &mut [u8], synced_len: &AtomicU64) -> io::Result<u64> {
+	set_synced_to(frames, synced_len.load(Ordering::Relaxed));
 	let start = file.seek(SeekFrom::End(0))?;
 	let result = (|| {
 		if start == 0 {
 			file.write_all(&AOL_MAGIC)?;
 		}
-		for chunk in chunks {
-			file.write_all(chunk)?;
-		}
-		file.flush()
+		file.write_all(frames)?;
+		file.flush()?;
+		file.stream_position()
 	})();
 	if result.is_err() {
 		let _ = file.set_len(start);
@@ -161,32 +223,51 @@ impl Read for AolReader {
 enum FrameRead {
 	/// The file ended cleanly before this frame
 	End,
-	/// A complete frame whose checksum matches, with its payload in the buffer
-	Valid,
+	/// A complete frame whose checksum matches, with its payload in the
+	/// buffer. It was written once the log had been synced up to `synced_to`.
+	Valid {
+		synced_to: u64,
+	},
 	/// The file ends inside this frame
 	Incomplete,
 	/// A complete frame which is empty or whose checksum does not match
 	Invalid,
 }
 
-/// Reads the next frame, leaving its payload in `payload`. The reader is left
-/// at the end of the frame for `Valid` and `Invalid`.
+/// Reads the next frame of a log of format version `format`, leaving its
+/// payload in `payload`. The reader is left at the end of the frame for
+/// `Valid` and `Invalid`.
+///
+/// A frame of version 1 does not record how far the log had been synced, so
+/// it is taken to have been written once everything in front of it was
+/// synced. Damage in front of such a frame is then never taken for a torn
+/// tail, as it never was before the sync length was recorded.
 fn read_frame(
 	reader: &mut AolReader,
 	file_len: u64,
+	format: u8,
 	payload: &mut Vec<u8>,
 ) -> io::Result<FrameRead> {
 	let mut header = [0u8; FRAME_HEADER_LEN];
-	let read = read_up_to(reader, &mut header)?;
+	let header = if format == 1 {
+		&mut header[..V1_FRAME_HEADER_LEN]
+	} else {
+		&mut header[..]
+	};
+	let read = read_up_to(reader, header)?;
 	if read == 0 {
 		return Ok(FrameRead::End);
 	}
-	if read < FRAME_HEADER_LEN {
+	if read < header.len() {
 		return Ok(FrameRead::Incomplete);
 	}
-	let [l0, l1, l2, l3, c0, c1, c2, c3] = header;
-	let len = u32::from_le_bytes([l0, l1, l2, l3]);
-	let checksum = u32::from_le_bytes([c0, c1, c2, c3]);
+	let len = read_u32(header);
+	let checksum = read_u32(&header[4..]);
+	let synced_to = if format == 1 {
+		u64::MAX
+	} else {
+		read_u64(&header[8..])
+	};
 	// A length beyond the end of the file is never allocated for
 	if u64::from(len) > file_len.saturating_sub(reader.position) {
 		return Ok(FrameRead::Incomplete);
@@ -195,10 +276,42 @@ fn read_frame(
 	if read_up_to(reader, payload)? < payload.len() {
 		return Ok(FrameRead::Incomplete);
 	}
-	if len == 0 || frame_checksum(payload) != checksum {
+	let expected = if format == 1 {
+		payload_checksum(payload)
+	} else {
+		frame_checksum(payload, synced_to)
+	};
+	if len == 0 || expected != checksum {
 		return Ok(FrameRead::Invalid);
 	}
-	Ok(FrameRead::Valid)
+	Ok(FrameRead::Valid {
+		synced_to,
+	})
+}
+
+/// Whether a valid frame from where `reader` is to the end of the file was
+/// written once the log had been synced past `offset`, which means that the
+/// log up to `offset` was synced. Damaged frames on the way are skipped, as
+/// far as their length fields allow.
+fn synced_past(
+	reader: &mut AolReader,
+	file_len: u64,
+	format: u8,
+	payload: &mut Vec<u8>,
+	offset: u64,
+) -> io::Result<bool> {
+	loop {
+		match read_frame(reader, file_len, format, payload)? {
+			FrameRead::Valid {
+				synced_to,
+			} if synced_to > offset => return Ok(true),
+			FrameRead::Valid {
+				..
+			}
+			| FrameRead::Invalid => {}
+			FrameRead::End | FrameRead::Incomplete => return Ok(false),
+		}
+	}
 }
 
 /// A decoded append-only log record: a key, the version it was written at, and
@@ -212,6 +325,10 @@ struct AolReplay {
 	valid_len: u64,
 	/// Whether the framed section's header lies within that prefix
 	framed: bool,
+	/// Where the framed section's header starts
+	header_offset: u64,
+	/// The format version of the framed section
+	format: u8,
 }
 
 /// Represents a pending asynchronous append operation
@@ -264,6 +381,7 @@ pub(crate) struct GroupCommitter {
 	queue: Mutex<Vec<Arc<SyncCommitSlot>>>,
 	flushing: AtomicBool,
 	pending_syncs: Arc<AtomicU64>,
+	synced_len: Arc<AtomicU64>,
 	failure: Arc<LogFailure>,
 }
 
@@ -272,11 +390,16 @@ thread_local! {
 }
 
 impl GroupCommitter {
-	pub const fn new(pending_syncs: Arc<AtomicU64>, failure: Arc<LogFailure>) -> Self {
+	pub const fn new(
+		pending_syncs: Arc<AtomicU64>,
+		synced_len: Arc<AtomicU64>,
+		failure: Arc<LogFailure>,
+	) -> Self {
 		Self {
 			queue: Mutex::new(Vec::new()),
 			flushing: AtomicBool::new(false),
 			pending_syncs,
+			synced_len,
 			failure,
 		}
 	}
@@ -330,11 +453,14 @@ impl GroupCommitter {
 				std::mem::take(&mut *q)
 			};
 
+			let mut frames =
+				batch.iter().map(|slot| slot.data.as_slice()).collect::<Vec<_>>().concat();
 			let flush_result = (|| -> Result<(), PersistenceError> {
 				let mut file = aol.lock()?;
 				self.failure.guard(|| {
-					append_to_log(&mut file, batch.iter().map(|slot| slot.data.as_slice()))?;
+					let end = append_frames(&mut file, &mut frames, &self.synced_len)?;
 					file.sync_all()?;
+					self.synced_len.store(end, Ordering::Relaxed);
 					Ok(())
 				})?;
 				drop(file);
@@ -539,6 +665,10 @@ pub struct Persistence {
 	pub(crate) last_fsync: Arc<Mutex<Instant>>,
 	/// Counter for AOL appends since last fsync
 	pub(crate) pending_syncs: Arc<AtomicU64>,
+	/// The length of the AOL at its last successful sync, which every frame
+	/// records as it is written. Only read or written while holding the AOL
+	/// lock.
+	pub(crate) synced_len: Arc<AtomicU64>,
 	/// Queue for asynchronous append operations
 	pub(crate) async_append_injector: Arc<Injector<AsyncAppendOperation>>,
 	/// Group commit coordinator for synchronous AOL appends
@@ -651,9 +781,13 @@ impl Persistence {
 			fs::create_dir_all(parent)?;
 		}
 		let pending_syncs = Arc::new(AtomicU64::new(0));
+		let synced_len = Arc::new(AtomicU64::new(0));
 		let aol_failure = Arc::new(LogFailure::default());
-		let group_committer =
-			Arc::new(GroupCommitter::new(Arc::clone(&pending_syncs), Arc::clone(&aol_failure)));
+		let group_committer = Arc::new(GroupCommitter::new(
+			Arc::clone(&pending_syncs),
+			Arc::clone(&synced_len),
+			Arc::clone(&aol_failure),
+		));
 		let snapshot_mutex = Arc::new(parking_lot::Mutex::new(()));
 		let async_queue_depth = Arc::new(AtomicUsize::new(0));
 		let async_queue_bytes = Arc::new(AtomicUsize::new(0));
@@ -674,6 +808,7 @@ impl Persistence {
 			appender_handle: Arc::new(RwLock::new(None)),
 			last_fsync: Arc::new(Mutex::new(Instant::now())),
 			pending_syncs,
+			synced_len,
 			async_append_injector: Arc::new(Injector::new()),
 			group_committer,
 			aol_failure,
@@ -719,9 +854,14 @@ impl Persistence {
 			&self.snapshot_path,
 			self.compression_mode,
 			&self.pending_syncs,
+			&self.synced_len,
 		)
 	}
 
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "the snapshot worker has no persistence layer to borrow, so it is handed each piece of state a snapshot touches"
+	)]
 	fn perform_snapshot(
 		snapshot_mutex: &parking_lot::Mutex<()>,
 		inner_weak: &Weak<Inner>,
@@ -730,6 +870,7 @@ impl Persistence {
 		snapshot_path: &Path,
 		compression_mode: CompressionMode,
 		pending_syncs: &Arc<AtomicU64>,
+		synced_len: &AtomicU64,
 	) -> Result<(), PersistenceError> {
 		// Acquire snapshot mutex so only one snapshot runs at a time
 		let _snapshot_lock = snapshot_mutex.lock();
@@ -826,7 +967,7 @@ impl Persistence {
 				final_file.sync_all()?;
 			}
 			// Truncate AOL only up to the cutoff position
-			Self::truncate(aol, aol_path, aol_cutoff_position, pending_syncs)?;
+			Self::truncate(aol, aol_path, aol_cutoff_position, pending_syncs, synced_len)?;
 			// All ok
 			Ok(())
 		})();
@@ -976,9 +1117,12 @@ impl Persistence {
 	/// first damaged frame; the returned [`AolReplay`] says where the valid
 	/// part of the file ends, so that the damage can be cut away.
 	///
-	/// Damage is only treated as a torn tail when nothing valid follows it. A
-	/// complete frame which fails its check but is followed by an intact one
-	/// has been corrupted in place, and is reported as an error rather than
+	/// What a power loss leaves of writes that were never synced need not be
+	/// a prefix of them: pages are written back in any order, so a lost page
+	/// can sit in front of pages that were kept. So damage is treated as a
+	/// torn tail, together with everything after it, unless a later frame
+	/// records that the log had been synced past the start of the damage. Then
+	/// the damage is to synced data, and is reported as an error rather than
 	/// being dropped together with the commits that came after it.
 	fn replay_aol(
 		&self,
@@ -988,6 +1132,8 @@ impl Persistence {
 		let mut replay = AolReplay {
 			valid_len: 0,
 			framed: false,
+			header_offset: 0,
+			format: AOL_FORMAT,
 		};
 		// Check if append-only file exists
 		if !self.aol_path.exists() {
@@ -1042,6 +1188,7 @@ impl Persistence {
 		}
 		// Read the header opening the framed section. A header cut short by the
 		// end of the file is a torn tail.
+		replay.header_offset = reader.position;
 		let mut magic = [0u8; AOL_MAGIC.len()];
 		if read_up_to(&mut reader, &mut magic)? < magic.len() {
 			return Ok(replay);
@@ -1051,37 +1198,37 @@ impl Persistence {
 				"the append-only log does not have a recognised header".to_owned(),
 			));
 		}
-		if magic[AOL_MAGIC.len() - 1] != AOL_MAGIC[AOL_MAGIC.len() - 1] {
+		let format = magic[AOL_MAGIC.len() - 1];
+		if format != 1 && format != AOL_FORMAT {
 			return Err(PersistenceError::Corrupted(format!(
-				"the append-only log is of format version {}, which is not supported",
-				magic[AOL_MAGIC.len() - 1]
+				"the append-only log is of format version {format}, which is not supported"
 			)));
 		}
 		replay.framed = true;
+		replay.format = format;
 		replay.valid_len = reader.position;
 		// Read and apply each frame in the AOL
 		let mut payload = Vec::new();
 		let mut entries: Vec<AolEntry> = Vec::new();
 		loop {
-			match read_frame(&mut reader, file_len, &mut payload)? {
+			match read_frame(&mut reader, file_len, format, &mut payload)? {
 				// The log ends cleanly after the last frame, or part-way through
 				// one, which is a torn tail
 				FrameRead::End | FrameRead::Incomplete => break,
-				// A damaged frame is a torn tail unless valid data follows it
+				// A damaged frame is a torn tail unless the log was synced
+				// past it
 				FrameRead::Invalid => {
-					if reader.position < file_len
-						&& matches!(
-							read_frame(&mut reader, file_len, &mut payload)?,
-							FrameRead::Valid
-						) {
+					if synced_past(&mut reader, file_len, format, &mut payload, replay.valid_len)? {
 						return Err(PersistenceError::Corrupted(format!(
-							"the append-only log has a damaged frame at offset {} which is followed by valid data",
+							"the append-only log has a damaged frame at offset {} which had been synced",
 							replay.valid_len
 						)));
 					}
 					break;
 				}
-				FrameRead::Valid => {
+				FrameRead::Valid {
+					..
+				} => {
 					// Increment the counter
 					count += 1;
 					// Trace the loading of the append-only frame
@@ -1146,8 +1293,8 @@ impl Persistence {
 	}
 
 	/// Cuts the append-only log back to the end of the last valid record or
-	/// frame, makes sure that what follows it is the framed section, and,
-	/// unless the log is never synced, makes what was replayed durable.
+	/// frame, makes sure that what follows it is the framed section of the
+	/// current format version, and makes what was replayed durable.
 	///
 	/// The log is opened for appending from the end of the file, so unless the
 	/// damaged bytes of a torn tail are removed first, the next commit lands
@@ -1157,10 +1304,10 @@ impl Persistence {
 	/// it: after writing back the log failed, the failed fsync marks its pages
 	/// clean and the next fsync succeeds without them. Such pages stay readable
 	/// until the power is lost, and then take every commit appended after them
-	/// with them, which replay takes for a torn tail. So the replayed prefix is
-	/// copied to a new file, which is synced and renamed over the log before
-	/// anything is appended: a crash leaves either the old log or the whole
-	/// new one.
+	/// with them, which replay takes for a torn tail. So unless the log is
+	/// never synced, the replayed prefix is copied to a new file, which is
+	/// synced and renamed over the log before anything is appended: a crash
+	/// leaves either the old log or the whole new one.
 	fn repair_aol(&self, replay: &AolReplay) -> Result<(), PersistenceError> {
 		// There is nothing to repair if the log is not in use
 		let Some(ref aol) = self.aol else {
@@ -1184,7 +1331,16 @@ impl Persistence {
 		// would then take the zeroed start of the file for legacy records
 		// and fail.
 		let header = !replay.framed;
-		if self.fsync_mode == FsyncMode::Never {
+		// Frames of an older format version are rewritten in the current one,
+		// so that every frame appended from here on matches those before it
+		let convert = replay.framed && replay.format != AOL_FORMAT;
+		if convert {
+			tracing::info!(
+				"Rewriting the append-only log {} in format version {AOL_FORMAT}",
+				self.aol_path.display()
+			);
+		}
+		if self.fsync_mode == FsyncMode::Never && !convert {
 			// A log which is never synced promises nothing about what reaches
 			// the disk, so it is repaired in place
 			if file_len > replay.valid_len || header {
@@ -1194,24 +1350,67 @@ impl Persistence {
 					file.write_all(&AOL_MAGIC)?;
 				}
 				file.flush()?;
-				file.sync_all()?;
 			}
-		} else if file_len > 0 || header {
+		} else {
 			let valid_len = replay.valid_len;
+			let header_offset = replay.header_offset;
 			Self::replace_log(&mut file, &self.aol_path, |log, new| {
+				let kept = if convert {
+					header_offset
+				} else {
+					valid_len
+				};
 				log.seek(SeekFrom::Start(0))?;
-				let copied = io::copy(&mut Read::take(&mut *log, valid_len), new)?;
-				if copied < valid_len {
+				let copied = io::copy(&mut Read::take(&mut *log, kept), new)?;
+				if copied < kept {
 					return Err(PersistenceError::Io(io::Error::from(ErrorKind::UnexpectedEof)));
 				}
-				if header {
+				if header || convert {
 					new.write_all(&AOL_MAGIC)?;
+				}
+				if convert {
+					let frames_offset = header_offset + AOL_MAGIC.len() as u64;
+					log.seek(SeekFrom::Start(frames_offset))?;
+					Self::convert_v1_frames(
+						&mut Read::take(&mut *log, valid_len - frames_offset),
+						new,
+					)?;
 				}
 				Ok(())
 			})?;
 		}
-		file.seek(SeekFrom::End(0))?;
+		// Everything replayed is synced, even in a log which is never synced
+		// otherwise, so that frames appended from here on can record it
+		file.sync_all()?;
+		let end = file.seek(SeekFrom::End(0))?;
+		self.synced_len.store(end, Ordering::Relaxed);
 		drop(file);
+		Ok(())
+	}
+
+	/// Copies the frames of format version 1 which `log` holds to `new` in
+	/// the current format. They are all synced before anything else is
+	/// appended, but record nothing synced, which is never wrong.
+	fn convert_v1_frames(log: &mut impl Read, new: &mut File) -> Result<(), PersistenceError> {
+		let mut log = BufReader::new(log);
+		let mut new = io::BufWriter::new(new);
+		let mut payload = Vec::new();
+		loop {
+			let mut header = [0u8; V1_FRAME_HEADER_LEN];
+			match read_up_to(&mut log, &mut header)? {
+				0 => break,
+				V1_FRAME_HEADER_LEN => {}
+				_ => return Err(PersistenceError::Io(io::Error::from(ErrorKind::UnexpectedEof))),
+			}
+			let len = read_u32(&header);
+			payload.resize(len as usize, 0);
+			log.read_exact(&mut payload)?;
+			let mut header = [0u8; FRAME_HEADER_LEN];
+			write_frame_header(&mut header, len, frame_checksum(&payload, 0), 0);
+			new.write_all(&header)?;
+			new.write_all(&payload)?;
+		}
+		new.flush()?;
 		Ok(())
 	}
 
@@ -1308,6 +1507,7 @@ impl Persistence {
 		aol_path: &Path,
 		position: u64,
 		pending_syncs: &Arc<AtomicU64>,
+		synced_len: &AtomicU64,
 	) -> Result<(), PersistenceError> {
 		if let Some(aol) = aol {
 			let mut file = aol.lock()?;
@@ -1321,6 +1521,8 @@ impl Persistence {
 				}
 				Ok(())
 			})?;
+			// The new log was synced in full
+			synced_len.store(file.seek(SeekFrom::End(0))?, Ordering::Relaxed);
 
 			// Reset pending syncs if we truncated to beginning or beyond
 			if position == 0 || file_len <= position {
@@ -1347,6 +1549,7 @@ impl Persistence {
 				// Clone necessary fields for the worker thread
 				let aol = Arc::clone(aol);
 				let pending_syncs = Arc::clone(&self.pending_syncs);
+				let synced_len = Arc::clone(&self.synced_len);
 				let failure = Arc::clone(&self.aol_failure);
 				let enabled = Arc::clone(&self.background_threads_enabled);
 				// Spawn the background worker thread
@@ -1362,7 +1565,12 @@ impl Persistence {
 						// Check if there are pending syncs
 						if pending_syncs.load(Ordering::Acquire) > 0 {
 							if let Ok(file) = aol.lock() {
-								if let Err(e) = failure.guard(|| Ok(file.sync_all()?)) {
+								let synced = failure.guard(|| {
+									file.sync_all()?;
+									synced_len.store(file.metadata()?.len(), Ordering::Relaxed);
+									Ok(())
+								});
+								if let Err(e) = synced {
 									tracing::error!("Fsync worker error: {e}");
 								} else {
 									pending_syncs.store(0, Ordering::Release);
@@ -1397,6 +1605,7 @@ impl Persistence {
 			let aol_path = self.aol_path.clone();
 			let snapshot_path = self.snapshot_path.clone();
 			let pending_syncs = Arc::clone(&self.pending_syncs);
+			let synced_len = Arc::clone(&self.synced_len);
 			let enabled = Arc::clone(&self.background_threads_enabled);
 			let compression = self.compression_mode;
 			let snapshot_mutex = Arc::clone(&self.snapshot_mutex);
@@ -1422,6 +1631,7 @@ impl Persistence {
 						&snapshot_path,
 						compression,
 						&pending_syncs,
+						&synced_len,
 					) {
 						tracing::error!("Snapshot worker error: {e}");
 					}
@@ -1449,6 +1659,7 @@ impl Persistence {
 				let fsync_mode = self.fsync_mode;
 				let enabled = Arc::clone(&self.background_threads_enabled);
 				let pending_syncs = Arc::clone(&self.pending_syncs);
+				let synced_len = Arc::clone(&self.synced_len);
 				let failure = Arc::clone(&self.aol_failure);
 				let last_fsync = Arc::clone(&self.last_fsync);
 				let queue_depth = Arc::clone(&self.async_queue_depth);
@@ -1520,40 +1731,34 @@ impl Persistence {
 									// Write the encoded batch in a single
 									// operation, then sync it as the mode asks
 									failure.guard(|| {
-										append_to_log(&mut file, [scratch.as_slice()])?;
+										let end =
+											append_frames(&mut file, &mut scratch, &synced_len)?;
 										// Handle fsync based on mode
 										match fsync_mode {
 											// Let the operating system handle syncing to disk
 											FsyncMode::Never => {
-												// No fsync, just increment
-												// pending
-												// counter
+												// No fsync, just increment the
+												// pending counter
 												pending_syncs.fetch_add(1, Ordering::Release);
 											}
 											// Sync immediately to disk after every append
 											FsyncMode::EveryAppend => {
 												// Sync immediately
 												file.sync_all()?;
+												synced_len.store(end, Ordering::Relaxed);
 											}
 											// Force sync to disk at a specified interval
 											FsyncMode::Interval(duration) => {
 												// Check if we should sync based
-												// on
-												// time
+												// on time
 												let now = Instant::now();
-												// Check if we should sync based
-												// on
-												// time
 												let should_sync = {
 													// Get the last fsync time
 													let mut last_fsync = last_fsync.lock()?;
-													// Check if the last fsync
-													// time
-													// is greater than the
-													// duration
+													// Sync once the duration
+													// has passed
 													if now.duration_since(*last_fsync) >= duration {
 														// Update the last fsync
-														// time
 														*last_fsync = now;
 														true
 													} else {
@@ -1563,16 +1768,12 @@ impl Persistence {
 												// Check if we should sync
 												if should_sync {
 													// Force sync the AOL file
-													// to
-													// disk
 													file.sync_all()?;
+													synced_len.store(end, Ordering::Relaxed);
 													// Reset the pending syncs
-													// counter
 													pending_syncs.store(0, Ordering::Release);
 												} else {
-													// Increment the pending
-													// syncs
-													// counter
+													// Count the pending sync
 													pending_syncs.fetch_add(1, Ordering::Release);
 												}
 											}
@@ -1691,7 +1892,7 @@ impl Persistence {
 			if self.aol_mode == AolMode::SynchronousOnCommit {
 				// Pre-encode the writeset as a single frame in a reusable
 				// thread-local scratch buffer
-				let data = ENCODE_BUF.with(|buf| {
+				let mut data = ENCODE_BUF.with(|buf| {
 					let mut b = buf.borrow_mut();
 					b.clear();
 					encode_frame(&mut b, version, writeset)?;
@@ -1708,7 +1909,7 @@ impl Persistence {
 				// Lock the AOL file for writing without group fsync
 				let mut file = aol.lock()?;
 				self.aol_failure.guard(|| {
-					append_to_log(&mut file, [data.as_slice()])?;
+					let end = append_frames(&mut file, &mut data, &self.synced_len)?;
 
 					// Handle fsync based on mode
 					match self.fsync_mode {
@@ -1740,6 +1941,7 @@ impl Persistence {
 							if should_sync {
 								// Force sync the AOL file to disk
 								file.sync_all()?;
+								self.synced_len.store(end, Ordering::Relaxed);
 								// Reset the pending syncs counter
 								self.pending_syncs.store(0, Ordering::Release);
 							} else {
@@ -1809,15 +2011,25 @@ mod tests {
 		let dir = tempfile::TempDir::new().unwrap();
 		let path = dir.path().join("aol.bin");
 		fs::write(&path, b"").unwrap();
-		let committer =
-			GroupCommitter::new(Arc::new(AtomicU64::new(0)), Arc::new(LogFailure::default()));
+		let committer = GroupCommitter::new(
+			Arc::new(AtomicU64::new(0)),
+			Arc::new(AtomicU64::new(0)),
+			Arc::new(LogFailure::default()),
+		);
+		let frame = |key: &str| {
+			let mut writeset = BTreeMap::new();
+			writeset.insert(ByteSlice::from(key.as_bytes()), None);
+			let mut frame = Vec::new();
+			encode_frame(&mut frame, 1, &writeset).unwrap();
+			frame
+		};
 		// A log opened only for reading fails the write
 		let read_only = Mutex::new(File::open(&path).unwrap());
-		assert!(committer.commit(&read_only, b"first".to_vec()).is_err());
+		assert!(committer.commit(&read_only, frame("first")).is_err());
 		// Every later batch fails without writing, even to a log which would
 		// take it
 		let writable = Mutex::new(OpenOptions::new().read(true).write(true).open(&path).unwrap());
-		let err = committer.commit(&writable, b"second".to_vec()).unwrap_err();
+		let err = committer.commit(&writable, frame("second")).unwrap_err();
 		assert!(matches!(err, PersistenceError::AppendFailed(_)), "{err}");
 		assert_eq!(fs::metadata(&path).unwrap().len(), 0);
 	}
