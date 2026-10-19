@@ -115,9 +115,10 @@ mod tests {
 	fn an_empty_chain_reads_as_empty() {
 		let cell = VersionCell::new(Versions::Empty);
 		assert_eq!(cell.read(Clone::clone), Versions::Empty);
-		// A lone delete seeds an empty chain
+		// A lone delete is kept as a tombstone
 		let cell = VersionCell::new(Versions::from(version(1, None)));
-		assert_eq!(cell.read(Versions::len), 0);
+		assert_eq!(cell.read(Versions::len), 1);
+		assert_eq!(cell.read(|v| v.fetch_version(1)), None);
 	}
 
 	#[test]
