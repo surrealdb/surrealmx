@@ -2418,6 +2418,7 @@ mod tests {
 	/// The failed commit poisons the database, but the log must stop by
 	/// itself too, since other commits and the fsync worker reach it
 	/// directly.
+	#[cfg(not(target_arch = "wasm32"))]
 	#[test]
 	fn a_failed_append_stops_the_log_in_every_fsync_mode() {
 		use crate::{AolMode, FsyncMode, PersistenceOptions};
