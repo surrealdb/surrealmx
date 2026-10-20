@@ -1090,9 +1090,15 @@ impl TransactionInner {
 				if entry.is_removed() {
 					continue;
 				}
-				// Check if the node was just seeded with this version
-				let is_new_insert = versions
-					.read(|v| matches!(*v, Versions::Single(ref v) if v.version == version));
+				// Check if the node was just seeded with this version. A
+				// node seeded with a delete tombstone takes the path below
+				// instead, so that the tombstone is reclaimed inline or
+				// tracked for the sweep: it must stay in the chain until
+				// the watermark passes it, as an older commit may still be
+				// about to apply a write to this key beneath it.
+				let is_new_insert = versions.read(
+					|v| matches!(*v, Versions::Single(ref v) if v.version == version && v.value.is_some()),
+				);
 				if !is_new_insert {
 					// Compute the inline-GC watermark lazily on demand
 					let w = *watermark
