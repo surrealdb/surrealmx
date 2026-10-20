@@ -53,6 +53,14 @@ pub(crate) const SLOT_UNPINNED: u64 = u64::MAX - 1;
 /// value.
 pub(crate) const COMMIT_ABORTED: u64 = u64::MAX;
 
+/// Flag set in a commit-queue entry's `merge_version`, together with the
+/// claimed version, once the owning transaction has claimed its merge
+/// version but not yet published it. Persisted versions are guarded at
+/// load time to leave far more headroom than can be claimed, so merge
+/// versions stay below it, and an entry holding it is neither a published
+/// version nor [`COMMIT_ABORTED`].
+pub(crate) const VERSION_CLAIMED: u64 = 1 << 63;
+
 /// A transaction's registration in [`Inner::readers`].
 ///
 /// A transaction registers one slot for as long as it exists. Both fields

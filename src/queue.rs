@@ -15,6 +15,7 @@
 //! This module stores the transaction commit and merge queues.
 
 use crate::bloom::{AtomicBloomFilter, BloomFilter};
+use crate::inner::{COMMIT_ABORTED, VERSION_CLAIMED};
 use crate::ring::RingEntry;
 #[cfg(debug_assertions)]
 use crate::LOG_TARGET_CONFLICTS;
@@ -84,25 +85,29 @@ pub struct Commit {
 	/// the committing transaction once it has claimed its slot.
 	pub(crate) seq: u64,
 	/// The merge version this commit published, zero while the commit is
-	/// still in flight, or [`crate::inner::COMMIT_ABORTED`] when the
-	/// owning transaction unwound without completing. Set by the owning
-	/// transaction immediately after its merge version becomes loadable
-	/// from the clock. Consumed by the commit-watermark advance (readers
-	/// must never take a conflict-window base covering a commit whose
-	/// merge version they cannot yet see) and by the conflict loop, which
-	/// skips aborted commits and commits whose merge version is visible
-	/// in the checking transaction's snapshot: a visible commit happened
-	/// strictly before the snapshot in version order, so it is not
+	/// still in flight, its claimed version with
+	/// [`crate::inner::VERSION_CLAIMED`] set once the version is claimed but
+	/// not yet published, or [`crate::inner::COMMIT_ABORTED`] when the
+	/// owning transaction aborted or unwound without completing. The
+	/// published version is set by the owning transaction immediately after
+	/// it becomes loadable from the clock. Consumed by the commit-watermark
+	/// advance (readers must never take a conflict-window base covering a
+	/// commit whose merge version they cannot yet see) and by the conflict
+	/// loop, which skips aborted commits and commits whose merge version is
+	/// visible in the checking transaction's snapshot: a visible commit
+	/// happened strictly before the snapshot in version order, so it is not
 	/// concurrent and first-committer-wins does not apply to it.
 	pub(crate) merge_version: AtomicU64,
 }
 
 impl RingEntry for Commit {
 	/// A commit is complete once it has published its merge version or
-	/// aborted: the merge version only ever moves away from zero.
+	/// aborted. A claimed but unpublished version is not complete: readers
+	/// cannot see it yet, so no conflict window may start above it.
 	#[inline]
 	fn is_complete(&self) -> bool {
-		self.merge_version.load(Ordering::SeqCst) != 0
+		let v = self.merge_version.load(Ordering::SeqCst);
+		v != 0 && (v == COMMIT_ABORTED || v & VERSION_CLAIMED == 0)
 	}
 
 	#[inline]
@@ -177,6 +182,20 @@ impl Commit {
 			seq: 0,
 			merge_version: AtomicU64::new(0),
 		}
+	}
+
+	/// Records that the owning transaction claimed merge `version`, which
+	/// it has not published yet.
+	#[inline]
+	pub(crate) fn claim_version(&self, version: u64) {
+		self.merge_version.store(version | VERSION_CLAIMED, Ordering::SeqCst);
+	}
+
+	/// Whether this commit will claim no merge version after the caller's:
+	/// it claimed one already, published it, or aborted.
+	#[inline]
+	pub(crate) fn has_claimed_version(&self) -> bool {
+		self.merge_version.load(Ordering::SeqCst) != 0
 	}
 
 	/// The smallest key in the writeset (for range overlap checks)

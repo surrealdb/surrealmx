@@ -973,8 +973,18 @@ impl TransactionInner {
 			// Continue
 			return Ok(());
 		}
+		// Claim the merge version only after every commit in an earlier slot
+		// has claimed its own or aborted, so that versions, and with them the
+		// order in which commits become visible, follow the slot order that
+		// validation serialises commits in. A commit validates only against
+		// earlier slots: had it claimed a lower version than an earlier slot,
+		// it could become visible, and be acknowledged, while that earlier
+		// commit, which it is ordered after, is not yet visible.
+		self.await_earlier_version_claims(commit_slot);
+		#[cfg(test)]
+		tests::before_version_claim();
 		// Claim this transaction's merge version
-		let version = self.claim_merge_version();
+		let version = self.claim_merge_version(&commit_entry);
 		// Unwind guard for the claimed but unpublished version: the merge
 		// clock only advances through inserted entries, so a version that
 		// is never inserted would wedge every later commit. Publish an
@@ -2558,7 +2568,8 @@ impl TransactionInner {
 		// visible commit happened strictly before our snapshot in version
 		// order, so it is not concurrent with this transaction and
 		// first-committer-wins does not apply — we read its effects rather
-		// than raced with it.
+		// than raced with it. A claimed but unpublished version carries
+		// `VERSION_CLAIMED`, which places it above every snapshot.
 		if merge_version != 0 && merge_version <= self.version {
 			return Ok(());
 		}
@@ -2616,16 +2627,44 @@ impl TransactionInner {
 		(slot, updates)
 	}
 
-	/// Claims a unique merge version from the allocation counter. See the
-	/// equivalent comment in `atomic_commit`: a dense claim is always
-	/// unique, so no collision retry is needed.
+	/// Claims a unique merge version from the allocation counter for the
+	/// transaction whose commit entry is `commit`, recording the claim on
+	/// the entry. The counter only ever increments, so a claim is always
+	/// unique and no collision retry is needed.
 	///
 	/// The merge clock cannot advance past the claimed version until it is
 	/// published with `publish_merge` or `publish_empty_merge`, so every
 	/// claim must be followed by exactly one of them.
 	#[inline(always)]
-	fn claim_merge_version(&self) -> u64 {
-		self.database.oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1
+	fn claim_merge_version(&self, commit: &Commit) -> u64 {
+		let version = self.database.oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
+		commit.claim_version(version);
+		version
+	}
+
+	/// Waits until every commit in a slot before `commit_slot` has claimed
+	/// its merge version, published it, or aborted. Each of them claims
+	/// its version without waiting for any later slot, so the wait is
+	/// bounded by the validation of the commits ahead of this one.
+	fn await_earlier_version_claims(&self, commit_slot: u64) {
+		let ring = &self.database.commit_ring;
+		// Entries at or below the completed prefix have published or aborted
+		let _pin = crate::sync::pin();
+		for s in (ring.completed() + 1)..commit_slot {
+			let mut spins = 0;
+			loop {
+				match ring.read(s, |tx| tx.has_claimed_version()) {
+					// An entry that is gone was complete before its slot was
+					// released or reused
+					SlotRead::Ready(true) | SlotRead::Gone => break,
+					// Claimed but not yet published, or still validating
+					SlotRead::Ready(false) | SlotRead::Pending => {
+						backoff(spins);
+						spins += 1;
+					}
+				}
+			}
+		}
 	}
 
 	/// Publishes an empty merge at a claimed version whose writes will
@@ -2649,11 +2688,11 @@ impl TransactionInner {
 		// Insert the merge entry at the claimed version, where the clock
 		// can see it and advance past it
 		database.transaction_merge_queue.insert(Arc::clone(&updates));
-		// Publish strictly in claim order — see the equivalent comment
-		// in `atomic_commit` for why this must cover our own version
-		// before we return, and why we reload rather than retry a fixed
-		// CAS (a concurrent `try_advance_merge_clock` call can publish
-		// our version on our behalf).
+		// Publish strictly in claim order, and only return once the clock
+		// covers our own version, so it is visible to every transaction
+		// started after the commit. Reload rather than retry a fixed CAS:
+		// a concurrent `try_advance_merge_clock` call can publish our
+		// version on our behalf.
 		loop {
 			let cur = oracle.timestamp.load(Ordering::SeqCst);
 			if cur >= version {
@@ -2708,12 +2747,79 @@ impl<F: FnMut()> Drop for OnUnwind<F> {
 
 #[cfg(test)]
 mod tests {
-
 	use crate::err::Error;
 	use crate::Database;
 	use crate::DatabaseOptions;
+	use std::cell::RefCell;
 	use std::sync::Arc;
 	use std::thread;
+
+	thread_local! {
+		/// Run by a committer on this thread once it may claim its merge
+		/// version, right before it does.
+		static BEFORE_VERSION_CLAIM: RefCell<Option<Box<dyn FnMut()>>> = RefCell::new(None);
+	}
+
+	/// Runs this thread's [`BEFORE_VERSION_CLAIM`] hook, if any.
+	pub(super) fn before_version_claim() {
+		BEFORE_VERSION_CLAIM.with(|hook| {
+			if let Some(hook) = hook.borrow_mut().as_mut() {
+				hook();
+			}
+		});
+	}
+
+	/// C claims a commit slot, reading `x` and writing `y`, and is held
+	/// before it claims its merge version. A then commits a write to `x` in
+	/// a later slot. Validation orders C before A, as C read `x` without
+	/// A's write, so A must not become visible, nor be acknowledged, before
+	/// C is visible: a reader would otherwise see A's write without C's.
+	#[test]
+	fn a_commit_becomes_visible_only_after_every_earlier_slot() {
+		use std::sync::mpsc;
+		use std::time::Duration;
+
+		let db = Arc::new(Database::new());
+		let (held_tx, held_rx) = mpsc::channel();
+		let (release_tx, release_rx) = mpsc::channel::<()>();
+		let c = {
+			let db = Arc::clone(&db);
+			thread::spawn(move || {
+				let mut tx = db.transaction(true);
+				assert!(tx.get("x").unwrap().is_none());
+				tx.set("y", "c").unwrap();
+				BEFORE_VERSION_CLAIM.with(|hook| {
+					*hook.borrow_mut() = Some(Box::new(move || {
+						held_tx.send(()).unwrap();
+						release_rx.recv().unwrap();
+					}));
+				});
+				tx.commit()
+			})
+		};
+		held_rx.recv().unwrap();
+		let a = {
+			let db = Arc::clone(&db);
+			thread::spawn(move || {
+				let mut tx = db.transaction(true);
+				tx.set("x", "a").unwrap();
+				tx.commit()
+			})
+		};
+		// Long enough for A to commit, unless it waits for C
+		thread::sleep(Duration::from_millis(200));
+		let a_acknowledged = a.is_finished();
+		let reader = db.transaction(false);
+		let (x, y) = (reader.get("x").unwrap(), reader.get("y").unwrap());
+		release_tx.send(()).unwrap();
+		assert!(c.join().unwrap().is_ok());
+		assert!(a.join().unwrap().is_ok());
+		assert!(!a_acknowledged, "A was acknowledged while C, which precedes it, was not visible");
+		assert!(x.is_none() || y.is_some(), "a reader saw A's write without C's");
+		// Both are visible once both are acknowledged
+		let reader = db.transaction(false);
+		assert!(reader.get("x").unwrap().is_some() && reader.get("y").unwrap().is_some());
+	}
 
 	#[test]
 	fn mvcc_non_conflicting_keys_should_succeed() {
