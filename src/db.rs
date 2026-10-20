@@ -2383,6 +2383,7 @@ mod tests {
 	/// visible, since a restart would lose it, and must not leave its merge
 	/// version unpublished, which would stall every later commit and
 	/// snapshot.
+	#[cfg(not(target_arch = "wasm32"))]
 	#[test]
 	fn a_commit_which_fails_to_persist_is_never_published() {
 		use crate::{AolMode, FsyncMode, PersistenceOptions};
