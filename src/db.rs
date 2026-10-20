@@ -2412,4 +2412,29 @@ mod tests {
 		assert_eq!(db.inner.oracle.timestamp.load(Ordering::SeqCst), version);
 		assert_eq!(db.inner.merge_retire_id.load(Ordering::SeqCst), version);
 	}
+
+	/// A claimed merge version is marked with the `VERSION_CLAIMED` bit, so
+	/// a database is only opened when the versions it will claim stay below
+	/// that bit. A persisted version at the load-time bound is rejected,
+	/// and one just below it is accepted.
+	#[cfg(not(target_arch = "wasm32"))]
+	#[test]
+	fn persisted_versions_leave_room_below_the_claimed_flag() {
+		use crate::inner::VERSION_CLAIMED;
+		use crate::{AolMode, PersistenceOptions};
+		let open = |version: u64| {
+			let dir = tempfile::TempDir::new().unwrap();
+			let persistence =
+				|| PersistenceOptions::new(dir.path()).with_aol_mode(AolMode::SynchronousOnCommit);
+			let db =
+				Database::new_with_persistence(DatabaseOptions::default(), persistence()).unwrap();
+			let mut writeset = std::collections::BTreeMap::new();
+			writeset.insert("key".into_bytes(), Some("value".into_bytes()));
+			db.inner.persistence.read().as_ref().unwrap().append(version, &writeset).unwrap();
+			drop(db);
+			Database::new_with_persistence(DatabaseOptions::default(), persistence()).is_ok()
+		};
+		assert!(open(VERSION_CLAIMED / 2 - 1), "a version below the bound was rejected");
+		assert!(!open(VERSION_CLAIMED / 2), "a version at the bound was accepted");
+	}
 }

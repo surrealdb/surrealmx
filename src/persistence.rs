@@ -20,7 +20,7 @@ use crate::compression::CompressedReader;
 use crate::compression::CompressedWriter;
 use crate::compression::CompressionMode;
 use crate::err::PersistenceError;
-use crate::inner::Inner;
+use crate::inner::{Inner, VERSION_CLAIMED};
 use crate::readers::Readers;
 use crate::sync::RwLock;
 use crate::version::Version;
@@ -914,11 +914,13 @@ impl Persistence {
 		// Replay the append-only log on top of the snapshot
 		let replay = self.replay_aol(inner, &mut max_version)?;
 		// Guard against corrupted or pathological persisted versions: the
-		// slot protocol reserves values near u64::MAX as sentinels, and
-		// version minting adds one to the clock. Legitimate versions from
-		// wall-clock releases (~1.7e18 nanoseconds) sit six orders of
-		// magnitude below this bound.
-		if max_version > u64::MAX / 2 {
+		// slot protocol reserves values near u64::MAX as sentinels, and a
+		// commit entry marks a claimed version with the `VERSION_CLAIMED`
+		// bit, so every version minted from here on must stay below it.
+		// The bound leaves 2^62 versions of headroom above the persisted
+		// maximum. Legitimate versions from wall-clock releases (~1.7e18
+		// nanoseconds) sit well below it.
+		if max_version >= VERSION_CLAIMED / 2 {
 			return Err(PersistenceError::SnapshotFailed(format!(
 				"persisted version {max_version} exceeds the maximum supported version"
 			)));

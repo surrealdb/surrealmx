@@ -2629,8 +2629,8 @@ impl TransactionInner {
 
 	/// Claims a unique merge version from the allocation counter for the
 	/// transaction whose commit entry is `commit`, recording the claim on
-	/// the entry. See the equivalent comment in `atomic_commit`: a dense
-	/// claim is always unique, so no collision retry is needed.
+	/// the entry. The counter only ever increments, so a claim is always
+	/// unique and no collision retry is needed.
 	///
 	/// The merge clock cannot advance past the claimed version until it is
 	/// published with `publish_merge` or `publish_empty_merge`, so every
@@ -2688,11 +2688,11 @@ impl TransactionInner {
 		// Insert the merge entry at the claimed version, where the clock
 		// can see it and advance past it
 		database.transaction_merge_queue.insert(Arc::clone(&updates));
-		// Publish strictly in claim order — see the equivalent comment
-		// in `atomic_commit` for why this must cover our own version
-		// before we return, and why we reload rather than retry a fixed
-		// CAS (a concurrent `try_advance_merge_clock` call can publish
-		// our version on our behalf).
+		// Publish strictly in claim order, and only return once the clock
+		// covers our own version, so it is visible to every transaction
+		// started after the commit. Reload rather than retry a fixed CAS:
+		// a concurrent `try_advance_merge_clock` call can publish our
+		// version on our behalf.
 		loop {
 			let cur = oracle.timestamp.load(Ordering::SeqCst);
 			if cur >= version {
