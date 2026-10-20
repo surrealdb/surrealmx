@@ -1184,7 +1184,7 @@ impl Persistence {
 			let valid_len = replay.valid_len;
 			Self::replace_log(&mut file, &self.aol_path, |log, new| {
 				log.seek(SeekFrom::Start(0))?;
-				let copied = io::copy(&mut Read::take(&mut *log, valid_len), new)?;
+				let copied = Self::copy_log(&mut Read::take(&mut *log, valid_len), new)?;
 				if copied < valid_len {
 					return Err(PersistenceError::Io(io::Error::from(ErrorKind::UnexpectedEof)));
 				}
@@ -1197,6 +1197,22 @@ impl Persistence {
 		file.seek(SeekFrom::End(0))?;
 		drop(file);
 		Ok(())
+	}
+
+	/// Copies everything `reader` yields into `writer`, returning the number
+	/// of bytes copied. This avoids `io::copy`, which between two files uses
+	/// `copy_file_range` on Linux, a syscall Miri does not support.
+	fn copy_log(reader: &mut impl Read, writer: &mut File) -> io::Result<u64> {
+		let mut buffer = [0u8; 8192];
+		let mut copied = 0;
+		loop {
+			let n = reader.read(&mut buffer)?;
+			if n == 0 {
+				return Ok(copied);
+			}
+			writer.write_all(&buffer[..n])?;
+			copied += n as u64;
+		}
 	}
 
 	/// Replaces the log at `aol_path`, whose append handle is `file`, with a
@@ -1301,7 +1317,7 @@ impl Persistence {
 				new.write_all(&AOL_MAGIC)?;
 				if position < file_len {
 					log.seek(SeekFrom::Start(position))?;
-					io::copy(log, new)?;
+					Self::copy_log(log, new)?;
 				}
 				Ok(())
 			})?;
