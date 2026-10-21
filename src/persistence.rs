@@ -572,6 +572,21 @@ impl Drop for PanicPoisonGuard {
 }
 
 static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Name the temporary files beside the append-only log start with when its
+/// file name is not valid UTF-8
+const AOL_STEM: &str = "aol";
+/// Extension of the file a rewrite of the append-only log writes its
+/// replacement to
+const AOL_TEMP_EXTENSION: &str = "new";
+/// Extension of the empty file that stands in for the append-only log's
+/// handle while the log is renamed over on Windows
+const AOL_DUMMY_EXTENSION: &str = "dummy";
+/// Name the temporary files beside the snapshot start with when its file
+/// name is not valid UTF-8
+const SNAPSHOT_STEM: &str = "snapshot";
+/// Extension of the file a snapshot is written to before it is renamed over
+/// the previous one
+const SNAPSHOT_TEMP_EXTENSION: &str = "tmp";
 static TRUNCATE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ASYNC_APPENDER_BATCH_SIZE: usize = 100;
 
@@ -637,6 +652,10 @@ impl Persistence {
 		if let Some(parent) = snapshot_path.parent() {
 			fs::create_dir_all(parent)?;
 		}
+		// Remove the temporary files of rewrites that never completed, which
+		// nothing else ever reads or removes
+		Self::remove_temp_files(&aol_path, AOL_STEM, &[AOL_TEMP_EXTENSION, AOL_DUMMY_EXTENSION])?;
+		Self::remove_temp_files(&snapshot_path, SNAPSHOT_STEM, &[SNAPSHOT_TEMP_EXTENSION])?;
 		let pending_syncs = Arc::new(AtomicU64::new(0));
 		let group_committer = Arc::new(GroupCommitter::new(Arc::clone(&pending_syncs)));
 		let snapshot_mutex = Arc::new(parking_lot::Mutex::new(()));
@@ -678,6 +697,95 @@ impl Persistence {
 		this.spawn_appender_worker();
 		// Return the persistence layer
 		Ok(this)
+	}
+
+	/// Returns the path of a temporary file beside `path`, named
+	/// `<file name>.<pid>_<id>.<extension>`, with `fallback` in place of the
+	/// file name when it is not valid UTF-8. Distinct `id`s give distinct
+	/// paths within one process.
+	fn temp_path(path: &Path, fallback: &str, id: u64, extension: &str) -> PathBuf {
+		let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or(fallback);
+		let pid = std::process::id();
+		path.with_file_name(format!("{stem}.{pid}_{id}.{extension}"))
+	}
+
+	/// Specifies whether `name` has the form [`Self::temp_path`] gives the
+	/// temporary files beside a file whose name is `stem`: `<stem>.`, then
+	/// one or more ASCII digits, `_`, one or more ASCII digits, and
+	/// `.<extension>` for one of `extensions`.
+	fn is_temp_name(name: &str, stem: &str, extensions: &[&str]) -> bool {
+		let Some(rest) = name.strip_prefix(stem).and_then(|r| r.strip_prefix('.')) else {
+			return false;
+		};
+		let Some((pid, rest)) = rest.split_once('_') else {
+			return false;
+		};
+		let Some((id, extension)) = rest.split_once('.') else {
+			return false;
+		};
+		let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+		digits(pid) && digits(id) && extensions.contains(&extension)
+	}
+
+	/// Removes the temporary files of rewrites of the file at `path` that
+	/// were never renamed over it: the regular files in its directory whose
+	/// names [`Self::is_temp_name`] accepts for the name [`Self::temp_path`]
+	/// uses for `path` and `fallback`. Symbolic links, directories and every
+	/// other name are left in place.
+	///
+	/// A temporary file is renamed over `path` once complete and otherwise
+	/// never read, so removing one loses no data. Only one database may have
+	/// these files open at a time, which is not enforced; if another one is
+	/// writing a temporary file regardless, its removal makes that rewrite
+	/// fail and leaves `path` as it was. Every matching file is removed,
+	/// whatever the pid in its name, since a restarted process can be given
+	/// the pid of the one that left the file.
+	///
+	/// Fails if the directory cannot be read. A file that cannot be removed
+	/// only wastes space, so it is logged and left in place. The directory
+	/// is synced after removing files on Unix.
+	fn remove_temp_files(
+		path: &Path,
+		fallback: &str,
+		extensions: &[&str],
+	) -> Result<(), PersistenceError> {
+		let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or(fallback);
+		let dir = match path.parent() {
+			Some(parent) if !parent.as_os_str().is_empty() => parent,
+			_ => Path::new("."),
+		};
+		let mut removed = false;
+		for entry in fs::read_dir(dir)? {
+			let entry = entry?;
+			let is_temp = entry
+				.file_name()
+				.to_str()
+				.is_some_and(|name| Self::is_temp_name(name, stem, extensions));
+			if !is_temp || !entry.file_type()?.is_file() {
+				continue;
+			}
+			match fs::remove_file(entry.path()) {
+				Ok(()) => removed = true,
+				Err(e) if e.kind() == ErrorKind::NotFound => {}
+				Err(e) => {
+					tracing::warn!(
+						"Failed to remove the temporary file {}: {e}",
+						entry.path().display()
+					);
+				}
+			}
+		}
+		// Sync the directory on Unix (skipped under Miri where directory
+		// fsync is unsupported)
+		#[cfg(all(unix, not(miri)))]
+		if removed {
+			if let Ok(dir) = File::open(dir) {
+				let _ = dir.sync_all();
+			}
+		}
+		#[cfg(not(all(unix, not(miri))))]
+		let _ = removed;
+		Ok(())
 	}
 
 	/// Creates a new snapshot of the current database state
@@ -761,10 +869,8 @@ impl Persistence {
 		// Create unique temporary file for atomic swap in the same directory as
 		// snapshot_path
 		let counter = SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
-		let pid = std::process::id();
-		let file_stem = snapshot_path.file_name().and_then(|n| n.to_str()).unwrap_or("snapshot");
-		let temp_name = format!("{file_stem}.{pid}_{counter}.tmp");
-		let temp_path = snapshot_path.with_file_name(temp_name);
+		let temp_path =
+			Self::temp_path(snapshot_path, SNAPSHOT_STEM, counter, SNAPSHOT_TEMP_EXTENSION);
 
 		// Execute snapshot operation in closure for clean error handling
 		let result = (|| -> Result<(), PersistenceError> {
@@ -1227,10 +1333,7 @@ impl Persistence {
 		// Generate a unique name for the temporary file in the same
 		// directory as AOL
 		let id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
-		let pid = std::process::id();
-		let file_stem = aol_path.file_name().and_then(|n| n.to_str()).unwrap_or("aol");
-		let new_name = format!("{file_stem}.{pid}_{id}.new");
-		let new_path = aol_path.with_file_name(new_name);
+		let new_path = Self::temp_path(aol_path, AOL_STEM, id, AOL_TEMP_EXTENSION);
 
 		let result = (|| -> Result<(), PersistenceError> {
 			// The replacement is opened once and kept as the new append
@@ -1256,7 +1359,7 @@ impl Persistence {
 			#[cfg(windows)]
 			let (original, dummy_path) = {
 				let dummy_id = TRUNCATE_COUNTER.fetch_add(1, Ordering::Relaxed);
-				let dummy_path = aol_path.with_file_name(format!("dummy_{pid}_{dummy_id}.tmp"));
+				let dummy_path = Self::temp_path(aol_path, AOL_STEM, dummy_id, AOL_DUMMY_EXTENSION);
 				let dummy =
 					OpenOptions::new().create(true).read(true).write(true).open(&dummy_path)?;
 				(std::mem::replace(&mut *file, dummy), dummy_path)
