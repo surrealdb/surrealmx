@@ -2378,4 +2378,83 @@ mod tests {
 			 failed to protect a registering reader from a sweep"
 		);
 	}
+
+	/// A commit which fails to reach the append-only log must never become
+	/// visible, since a restart would lose it, and must not leave its merge
+	/// version unpublished, which would stall every later commit and
+	/// snapshot.
+	#[cfg(not(target_arch = "wasm32"))]
+	#[test]
+	fn a_commit_which_fails_to_persist_is_never_published() {
+		use crate::{AolMode, FsyncMode, PersistenceOptions};
+		let dir = tempfile::TempDir::new().unwrap();
+		let persistence = PersistenceOptions::new(dir.path())
+			.with_aol_mode(AolMode::SynchronousOnCommit)
+			.with_fsync_mode(FsyncMode::EveryAppend);
+		let db = Database::new_with_persistence(DatabaseOptions::default(), persistence).unwrap();
+		// A log opened only for reading fails every write
+		let aol = std::fs::File::open(dir.path().join("aol.bin")).unwrap();
+		db.inner.persistence.read().as_ref().unwrap().replace_aol_handle(aol);
+		let mut tx = db.transaction(true);
+		tx.set("key", "value").unwrap();
+		let err = tx.commit().unwrap_err();
+		assert!(matches!(err, Error::TxCommitNotPersisted(_)), "{err}");
+		// The write reached neither the datastore nor the merge queue
+		assert!(db.inner.datastore.get(b"key".as_slice()).is_none());
+		let version = db.inner.oracle.alloc.load(Ordering::SeqCst);
+		let published = db
+			.inner
+			.transaction_merge_queue
+			.get(version, |m| m.writeset.is_empty())
+			.unwrap_or(true);
+		assert!(published, "the failed writeset was published in the merge queue");
+		// The clock and retirement moved past the claimed version
+		assert_eq!(db.inner.oracle.timestamp.load(Ordering::SeqCst), version);
+		assert_eq!(db.inner.merge_retire_id.load(Ordering::SeqCst), version);
+	}
+
+	/// Once a write to the append-only log fails, nothing more is written to
+	/// it, in every fsync mode and not only the one which commits in groups.
+	/// The failed commit poisons the database, but the log must stop by
+	/// itself too, since other commits and the fsync worker reach it
+	/// directly.
+	#[cfg(not(target_arch = "wasm32"))]
+	#[test]
+	fn a_failed_append_stops_the_log_in_every_fsync_mode() {
+		use crate::{AolMode, FsyncMode, PersistenceOptions};
+		let writeset = |key: &str| {
+			let mut writeset = std::collections::BTreeMap::new();
+			writeset.insert(
+				ByteSlice::from(key.as_bytes()),
+				Some(ByteSlice::from(b"value".as_slice())),
+			);
+			writeset
+		};
+		for fsync_mode in
+			[FsyncMode::Never, FsyncMode::Interval(Duration::from_secs(1)), FsyncMode::EveryAppend]
+		{
+			let dir = tempfile::TempDir::new().unwrap();
+			let path = dir.path().join("aol.bin");
+			let persistence = PersistenceOptions::new(dir.path())
+				.with_aol_mode(AolMode::SynchronousOnCommit)
+				.with_fsync_mode(fsync_mode);
+			let db =
+				Database::new_with_persistence(DatabaseOptions::default(), persistence).unwrap();
+			let len = std::fs::metadata(&path).unwrap().len();
+			let persistence = db.inner.persistence.read().clone().unwrap();
+			// A log opened only for reading fails the write
+			persistence.replace_aol_handle(std::fs::File::open(&path).unwrap());
+			assert!(persistence.append(1, &writeset("first")).is_err(), "{fsync_mode:?}");
+			// Every later append fails without writing, even to a log which
+			// would take it
+			let writable = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+			persistence.replace_aol_handle(writable);
+			let err = persistence.append(2, &writeset("second")).unwrap_err();
+			assert!(
+				matches!(err, crate::err::PersistenceError::AppendFailed(_)),
+				"{fsync_mode:?}: {err}"
+			);
+			assert_eq!(std::fs::metadata(&path).unwrap().len(), len, "{fsync_mode:?}");
+		}
+	}
 }

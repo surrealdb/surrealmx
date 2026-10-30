@@ -737,11 +737,13 @@ fn test_readonly_operations_no_persistence() {
 	let aol_path = temp_path.join("aol.bin");
 	let snapshot_path = temp_path.join("snapshot.bin");
 
-	// AOL file might exist but should be empty, snapshot should not exist
-	if aol_path.exists() {
-		let metadata = std::fs::metadata(&aol_path).unwrap();
-		assert_eq!(metadata.len(), 0, "AOL file should be empty after read-only operations");
-	}
+	// The AOL file holds only the header written when it was created, and
+	// the snapshot should not exist
+	assert_eq!(
+		std::fs::read(&aol_path).unwrap(),
+		[0xFF, b'S', b'M', b'X', b'A', b'O', b'L', 2],
+		"AOL file should hold only its header after read-only operations"
+	);
 	assert!(!snapshot_path.exists(), "Snapshot file should not exist after read-only operations");
 }
 
