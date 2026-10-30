@@ -523,3 +523,150 @@ fn snapshot_truncates_aol() {
 		"AOL should be truncated after snapshot ({aol_size_after} < {aol_size_before})"
 	);
 }
+
+// =============================================================================
+// Temporary Files Left By Interrupted Rewrites
+// =============================================================================
+
+/// Writes `contents` to `dir/name`, creating `dir` first
+fn write_file(dir: &std::path::Path, name: &str, contents: &[u8]) {
+	std::fs::create_dir_all(dir).unwrap();
+	std::fs::write(dir.join(name), contents).unwrap();
+}
+
+/// Writes two keys, the first one captured by a snapshot and the second one
+/// only in the log, and drops the database
+fn write_snapshot_and_log(db_opts: &DatabaseOptions, persistence_opts: &PersistenceOptions) {
+	let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
+	let mut tx = db.transaction(true);
+	tx.set("key1", "value1").unwrap();
+	tx.commit().unwrap();
+	db.persistence().unwrap().snapshot().unwrap();
+	let mut tx = db.transaction(true);
+	tx.set("key2", "value2").unwrap();
+	tx.commit().unwrap();
+}
+
+/// Asserts the database holds what [`write_snapshot_and_log`] wrote
+fn assert_snapshot_and_log(db: &Database) {
+	let mut tx = db.transaction(false);
+	assert_eq!(tx.get("key1").unwrap(), Some(ByteSlice::from("value1")));
+	assert_eq!(tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
+	tx.cancel().unwrap();
+}
+
+#[test]
+fn open_removes_temporary_files_of_interrupted_rewrites() {
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	let db_opts = DatabaseOptions::default();
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::SynchronousOnCommit)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_fsync_mode(FsyncMode::EveryAppend);
+
+	write_snapshot_and_log(&db_opts, &persistence_opts);
+
+	// Files a process killed mid-rewrite leaves behind, including ones named
+	// with this process's pid, which a restarted process can be given
+	let pid = std::process::id();
+	let leftovers = [
+		"aol.bin.290058_0.new".to_string(),
+		"aol.bin.290061_17.new".to_string(),
+		format!("aol.bin.{pid}_0.new"),
+		"aol.bin.290058_1.dummy".to_string(),
+		"snapshot.bin.290058_3.tmp".to_string(),
+		format!("snapshot.bin.{pid}_0.tmp"),
+	];
+	for name in &leftovers {
+		write_file(temp_path, name, b"partial rewrite");
+	}
+	// Files that are not this crate's temporary files
+	let unrelated = [
+		"aol.bin.290058_0.new.bak",
+		"aol.bin.290058_0.newer",
+		"aol.bin.290058_0.tmp",
+		"aol.bin.290058_.new",
+		"aol.bin._0.new",
+		"aol.bin.29a058_0.new",
+		"aol.bin.290058-0.new",
+		"aol.bin.290058_0_1.new",
+		"aol.bin290058_0.new",
+		"xaol.bin.290058_0.new",
+		"snapshot.bin.290058_3.new",
+		"snapshot.bin.290058_3.tmp.old",
+		"other.bin.290058_0.new",
+		"dummy_290058_0.tmp",
+		"notes.txt",
+	];
+	for name in &unrelated {
+		write_file(temp_path, name, b"keep me");
+	}
+	// A directory with a matching name is not a temporary file
+	std::fs::create_dir(temp_path.join("aol.bin.290058_9.new")).unwrap();
+
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+	for name in &leftovers {
+		assert!(!temp_path.join(name).exists(), "{name} should be removed on open");
+	}
+	for name in &unrelated {
+		assert_eq!(
+			std::fs::read(temp_path.join(name)).unwrap(),
+			b"keep me",
+			"{name} should be left in place"
+		);
+	}
+	assert!(temp_path.join("aol.bin.290058_9.new").is_dir());
+	assert_snapshot_and_log(&db);
+}
+
+#[test]
+fn open_removes_temporary_files_beside_separately_placed_files() {
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+	let log_dir = temp_path.join("logs");
+	let snapshot_dir = temp_path.join("snapshots");
+
+	let db_opts = DatabaseOptions::default();
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_path("logs/changes.log")
+		.with_snapshot_path(snapshot_dir.join("state.snap"))
+		.with_aol_mode(AolMode::SynchronousOnCommit)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_fsync_mode(FsyncMode::EveryAppend);
+
+	write_snapshot_and_log(&db_opts, &persistence_opts);
+
+	write_file(&log_dir, "changes.log.4242_0.new", b"partial rewrite");
+	write_file(&snapshot_dir, "state.snap.4242_0.tmp", b"partial rewrite");
+	// Each directory is cleaned of its own file's temporary files only
+	write_file(&log_dir, "state.snap.4242_1.tmp", b"keep me");
+	write_file(&snapshot_dir, "changes.log.4242_1.new", b"keep me");
+	write_file(temp_path, "changes.log.4242_2.new", b"keep me");
+	write_file(temp_path, "state.snap.4242_2.tmp", b"keep me");
+	write_file(temp_path, "aol.bin.4242_2.new", b"keep me");
+	write_file(temp_path, "snapshot.bin.4242_2.tmp", b"keep me");
+
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+	assert!(!log_dir.join("changes.log.4242_0.new").exists());
+	assert!(!snapshot_dir.join("state.snap.4242_0.tmp").exists());
+	for path in [
+		log_dir.join("state.snap.4242_1.tmp"),
+		snapshot_dir.join("changes.log.4242_1.new"),
+		temp_path.join("changes.log.4242_2.new"),
+		temp_path.join("state.snap.4242_2.tmp"),
+		temp_path.join("aol.bin.4242_2.new"),
+		temp_path.join("snapshot.bin.4242_2.tmp"),
+	] {
+		assert_eq!(
+			std::fs::read(&path).unwrap(),
+			b"keep me",
+			"{} should be left in place",
+			path.display()
+		);
+	}
+	assert_snapshot_and_log(&db);
+}
