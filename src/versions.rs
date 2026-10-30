@@ -39,13 +39,11 @@ pub enum Versions {
 }
 
 impl From<Version> for Versions {
+	/// A chain holding just `value`, which is kept even when it is a delete
+	/// tombstone (see [`Versions::push`]).
 	#[inline]
 	fn from(value: Version) -> Self {
-		if value.value.is_some() {
-			Self::Single(value)
-		} else {
-			Self::Empty
-		}
+		Self::Single(value)
 	}
 }
 
@@ -89,13 +87,21 @@ impl Versions {
 	}
 
 	/// Appends or inserts an element into its sorted position.
+	///
+	/// Delete tombstones are recorded like any other version, including
+	/// onto an empty chain and below every version already present.
+	/// Versions are not applied to a chain in version order: a commit is
+	/// visible to readers before its writes are applied, so a newer commit
+	/// can delete a key and apply that delete before an older commit has
+	/// applied its write to the same key. The tombstone must already be in
+	/// the chain when that older version lands, or the key reappears with
+	/// the older value. Garbage collection reclaims a tombstone once the
+	/// watermark passes it (see [`Versions::gc_older_versions`]).
 	#[inline]
 	pub(crate) fn push(&mut self, value: Version) {
 		match self {
 			Self::Empty => {
-				if value.value.is_some() {
-					*self = Self::Single(value);
-				}
+				*self = Self::Single(value);
 			}
 			Self::Single(ref mut current) => {
 				match value.version.cmp(&current.version) {
@@ -112,13 +118,8 @@ impl Versions {
 					}
 					std::cmp::Ordering::Less => {
 						// Out-of-order older version
-						let older = value;
 						let newer = current.clone();
-						if older.value.is_none() {
-							// Initial delete before the first value is ignored
-						} else {
-							*self = Self::Chain(thin_vec![older, newer]);
-						}
+						*self = Self::Chain(thin_vec![value, newer]);
 					}
 				}
 			}
@@ -143,9 +144,7 @@ impl Versions {
 				// Slower path: binary search and insert in sorted position
 				let idx = chain.partition_point(|v| v.version <= value.version);
 				if idx == 0 {
-					if value.value.is_some() {
-						chain.insert(0, value);
-					}
+					chain.insert(0, value);
 				} else if let Some(existing) = chain.get_mut(idx - 1) {
 					if existing.version == value.version {
 						if existing.value != value.value {
@@ -328,6 +327,14 @@ impl Versions {
 	}
 
 	/// Remove versions that no reader at a snapshot `>= version` can observe.
+	///
+	/// A delete tombstone at or below `version` that is the newest such
+	/// entry is removed together with everything older, so `version` must
+	/// also be below every version still to be applied to this chain: a
+	/// write landing beneath a collapsed tombstone would bring the key
+	/// back. Callers bound `version` by the snapshot of every registered
+	/// transaction, and a committer stays registered at a snapshot below
+	/// its commit version until all of its writes are applied.
 	#[inline]
 	pub(crate) fn gc_older_versions(&mut self, version: u64) -> usize {
 		match self {
@@ -613,7 +620,70 @@ mod tests {
 	fn test_push_delete_to_empty_list() {
 		let mut versions = Versions::new();
 		versions.push(make_version(10, None));
-		assert_eq!(versions.len(), 0);
+		assert_eq!(versions.len(), 1);
+		assert_eq!(versions.fetch_version(10), None);
+		assert!(versions.needs_gc());
+	}
+
+	#[test]
+	fn test_push_older_value_after_newer_delete() {
+		// A delete applied before the older write it supersedes
+		let mut versions = Versions::new();
+		versions.push(make_version(10, Some("v1")));
+		versions.push(make_version(30, None));
+		versions.push(make_version(20, Some("v2")));
+		assert_eq!(versions.fetch_version(20), Some(ByteSlice::from("v2")));
+		assert_eq!(versions.fetch_version(30), None);
+		assert_eq!(versions.latest(), None);
+		// The same with the delete as the only version in the chain
+		let mut versions = Versions::new();
+		versions.push(make_version(30, None));
+		versions.push(make_version(20, Some("v2")));
+		assert_eq!(versions.len(), 2);
+		assert_eq!(versions.fetch_version(25), Some(ByteSlice::from("v2")));
+		assert_eq!(versions.fetch_version(30), None);
+		assert_eq!(versions.latest(), None);
+		// The same with the delete seeding the chain
+		let mut versions = Versions::from(make_version(30, None));
+		versions.push(make_version(20, Some("v2")));
+		assert_eq!(versions.fetch_version(25), Some(ByteSlice::from("v2")));
+		assert_eq!(versions.latest(), None);
+	}
+
+	#[test]
+	fn test_push_older_delete_before_every_version() {
+		// A delete older than every version in the chain still hides an
+		// even older write applied after it
+		let mut versions = Versions::new();
+		versions.push(make_version(30, Some("v3")));
+		versions.push(make_version(20, None));
+		versions.push(make_version(10, Some("v1")));
+		assert_eq!(versions.fetch_version(15), Some(ByteSlice::from("v1")));
+		assert_eq!(versions.fetch_version(25), None);
+		assert_eq!(versions.fetch_version(30), Some(ByteSlice::from("v3")));
+		// The same with more than one version in the chain
+		let mut versions = Versions::new();
+		versions.push(make_version(30, Some("v3")));
+		versions.push(make_version(40, Some("v4")));
+		versions.push(make_version(20, None));
+		versions.push(make_version(10, Some("v1")));
+		assert_eq!(versions.fetch_version(15), Some(ByteSlice::from("v1")));
+		assert_eq!(versions.fetch_version(25), None);
+		assert_eq!(versions.fetch_version(35), Some(ByteSlice::from("v3")));
+	}
+
+	#[test]
+	fn test_gc_keeps_tombstone_until_watermark_reaches_it() {
+		let mut versions = Versions::new();
+		versions.push(make_version(30, None));
+		// A watermark below the delete keeps it
+		assert_eq!(versions.gc_older_versions(20), 1);
+		versions.push(make_version(20, Some("v2")));
+		assert_eq!(versions.latest(), None);
+		// A watermark at the delete reclaims the whole chain
+		assert_eq!(versions.gc_older_versions(30), 0);
+		assert_eq!(versions, Versions::Empty);
+		assert!(!versions.needs_gc());
 	}
 
 	#[test]

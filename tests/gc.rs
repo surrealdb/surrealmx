@@ -118,6 +118,42 @@ fn manual_gc_removes_deleted_keys() {
 	tx.cancel().unwrap();
 }
 
+#[test]
+fn manual_gc_removes_tombstones_held_by_a_reader() {
+	let db = Database::new_with_options(
+		DatabaseOptions::default()
+			.with_gc_interval(Duration::from_hours(1))
+			.with_cleanup_interval(Duration::from_hours(1)),
+	);
+
+	// A reader whose snapshot predates the deletes holds their tombstones
+	let mut reader = db.transaction(false);
+
+	// Delete a key which never existed, and one which did
+	let mut tx = db.transaction(true);
+	tx.set("deleted_key", "value").unwrap();
+	tx.commit().unwrap();
+	let mut tx = db.transaction(true);
+	tx.del("absent_key").unwrap();
+	tx.del("deleted_key").unwrap();
+	tx.commit().unwrap();
+
+	// Neither key is visible to a new snapshot
+	let mut tx = db.transaction(false);
+	assert!(tx.get("absent_key").unwrap().is_none());
+	assert!(tx.get("deleted_key").unwrap().is_none());
+	tx.cancel().unwrap();
+
+	// Once the reader is gone, the tombstones are reclaimed
+	reader.cancel().unwrap();
+	db.run_gc();
+	assert_eq!(db.stats().live_keys, 0);
+	let mut tx = db.transaction(false);
+	assert!(tx.get("absent_key").unwrap().is_none());
+	assert!(tx.get("deleted_key").unwrap().is_none());
+	tx.cancel().unwrap();
+}
+
 // =============================================================================
 // Background GC Tests
 // =============================================================================

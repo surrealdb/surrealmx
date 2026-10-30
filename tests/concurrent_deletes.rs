@@ -392,3 +392,67 @@ fn delete_then_recreate_under_gc_keeps_value() {
 	stop.store(true, Ordering::Relaxed);
 	gc.join().unwrap();
 }
+
+/// A delete committed at a higher version than the creation of the key it
+/// removes must win, even when the deleting commit applies its writes to
+/// the version chains before the creating commit does.
+///
+/// A commit's version becomes visible to readers before the committer
+/// applies its writes, and each committer applies its own writes. The
+/// creating transaction writes many keys and the shared key last, so its
+/// apply phase is slow; the deleter reads the key through the published
+/// version as soon as it is visible, deletes it, and usually applies that
+/// delete while the creation is still being applied.
+#[test]
+fn delete_applied_before_older_creation_is_kept() {
+	const ROUNDS: usize = 20;
+	const FILLER_KEYS: usize = 20_000;
+
+	for round in 0..ROUNDS {
+		let db = Arc::new(Database::new());
+		let key = format!("zz{round}");
+		// Create the key last in a large transaction
+		let creator = {
+			let db = Arc::clone(&db);
+			let key = key.clone();
+			thread::spawn(move || {
+				let mut tx = db.transaction(true);
+				for j in 0..FILLER_KEYS {
+					tx.set(format!("a{round}/{j:05}"), "x").unwrap();
+				}
+				tx.set(key.as_str(), "created").unwrap();
+				tx.commit().unwrap();
+			})
+		};
+		// Delete the key as soon as it is visible
+		let deleter = {
+			let db = Arc::clone(&db);
+			let key = key.clone();
+			thread::spawn(move || loop {
+				let mut tx = db.transaction(true);
+				if tx.get(key.as_str()).unwrap().is_some() {
+					tx.del(key.as_str()).unwrap();
+					if tx.commit().is_ok() {
+						return;
+					}
+				} else {
+					tx.cancel().unwrap();
+				}
+			})
+		};
+		creator.join().unwrap();
+		deleter.join().unwrap();
+		// The delete is the newest committed write to the key
+		let mut tx = db.transaction(false);
+		let got = tx.get(key.as_str()).unwrap();
+		tx.cancel().unwrap();
+		assert_eq!(got, None, "committed delete of {key} was lost in round {round}");
+		// Reclaiming the tombstone unlinks the key and leaves it absent
+		db.run_gc();
+		assert_eq!(db.stats().live_keys, FILLER_KEYS, "tombstone of {key} was not reclaimed");
+		let mut tx = db.transaction(false);
+		let got = tx.get(key.as_str()).unwrap();
+		tx.cancel().unwrap();
+		assert_eq!(got, None, "committed delete of {key} was lost after gc in round {round}");
+	}
+}
