@@ -56,6 +56,20 @@ const AOL_MAGIC: [u8; 8] = [0xFF, b'S', b'M', b'X', b'A', b'O', b'L', AOL_FORMAT
 /// still read, and are rewritten as version 2 when they are opened.
 const AOL_FORMAT: u8 = 2;
 
+/// Opens a snapshot file, followed by the version the snapshot covers as a
+/// little-endian `u64`, and then by the snapshot's records, compressed or not.
+///
+/// The snapshot holds the result of every transaction at or below that
+/// version and of none above it, so a log record at or below it is already in
+/// the snapshot and replay skips it. Applying it would be wrong, not just
+/// redundant: the snapshot leaves out a key whose newest write is a delete,
+/// so an older write of the key replayed from a log that no longer holds the
+/// delete would bring the key back. The first byte is `0xFF`, which neither
+/// the LZ4 frame magic nor the encoding of a record's leading key length
+/// starts with, so a snapshot written without this header is still read, and
+/// replay then skips nothing. The last byte is the format version.
+const SNAPSHOT_MAGIC: [u8; 8] = [0xFF, b'S', b'M', b'X', b'S', b'N', b'P', 1];
+
 /// The size of the header in front of each frame: the payload length as a
 /// little-endian `u32`, the frame's checksum as a little-endian `u32`, and the
 /// length the log had at its last sync before the frame was written, as a
@@ -914,6 +928,14 @@ impl Persistence {
 			readers: &inner.readers,
 			slot,
 		};
+		// The snapshot covers every version up to the pinned one, so every
+		// such version must be in the chains it reads, not only published.
+		// A published version is applied without any IO, so this wait is
+		// short.
+		while inner.merge_retire_id.load(Ordering::SeqCst) < snapshot_version {
+			inner.refresh_merge_watermark();
+			std::thread::yield_now();
+		}
 
 		// Create unique temporary file for atomic swap in the same directory as
 		// snapshot_path
@@ -925,8 +947,10 @@ impl Persistence {
 
 		// Execute snapshot operation in closure for clean error handling
 		let result = (|| -> Result<(), PersistenceError> {
-			// Create temporary file
-			let file = File::create(&temp_path)?;
+			// Create temporary file, opened by the version the snapshot covers
+			let mut file = File::create(&temp_path)?;
+			file.write_all(&SNAPSHOT_MAGIC)?;
+			file.write_all(&snapshot_version.to_le_bytes())?;
 			// Create compressed writer (handles buffering internally)
 			let mut writer = CompressedWriter::new(file, compression_mode)?;
 			// Stream write each key-value pair visible at snapshot_version
@@ -998,14 +1022,23 @@ impl Persistence {
 		// stale persisted tombstone and silently vanish once the clock
 		// crosses it.
 		let mut max_version: u64 = 0;
+		// The version the snapshot covers, at or below which replay skips the
+		// log's records
+		let mut covered: Option<u64> = None;
 		// Check if snapshot file exists
 		if self.snapshot_path.exists() {
 			// Read and deserialize the snapshot data
-			let file = File::open(&self.snapshot_path)?;
+			let mut file = File::open(&self.snapshot_path)?;
 			// Get the metadata of the snapshot file
 			let metadata = file.metadata()?;
 			// Check if the snapshot file is empty
 			if metadata.len() > 0 {
+				covered = Self::read_snapshot_header(&mut file)?;
+				// The covered version counts towards the clock seed even
+				// where no record carries it, as when its transaction only
+				// deleted: a version minted at or below it would be skipped
+				// by the next replay, losing the commit that took it
+				max_version = max_version.max(covered.unwrap_or(0));
 				// Create compressed reader that auto-detects compression mode
 				let mut reader = CompressedReader::new(file)?;
 				// Initialize counters for tracking loaded entries
@@ -1069,7 +1102,7 @@ impl Persistence {
 			}
 		}
 		// Replay the append-only log on top of the snapshot
-		let replay = self.replay_aol(inner, &mut max_version)?;
+		let replay = self.replay_aol(inner, covered, &mut max_version)?;
 		// Guard against corrupted or pathological persisted versions: the
 		// slot protocol reserves values near u64::MAX as sentinels, and
 		// version minting adds one to the clock. Legitimate versions from
@@ -1109,6 +1142,36 @@ impl Persistence {
 		Ok(())
 	}
 
+	/// Reads the header of the snapshot `file`, returning the version the
+	/// snapshot covers and leaving the file at its first record. A snapshot
+	/// written without a header covers no version, and is left at its start.
+	fn read_snapshot_header(file: &mut File) -> Result<Option<u64>, PersistenceError> {
+		let mut magic = [0u8; SNAPSHOT_MAGIC.len()];
+		let read = read_up_to(file, &mut magic)?;
+		if read == 0 || magic[0] != SNAPSHOT_MAGIC[0] {
+			file.seek(SeekFrom::Start(0))?;
+			return Ok(None);
+		}
+		if read < magic.len() || magic[..magic.len() - 1] != SNAPSHOT_MAGIC[..magic.len() - 1] {
+			return Err(PersistenceError::Corrupted(
+				"the snapshot does not have a recognised header".to_owned(),
+			));
+		}
+		if magic[magic.len() - 1] != SNAPSHOT_MAGIC[magic.len() - 1] {
+			return Err(PersistenceError::Corrupted(format!(
+				"the snapshot is of format version {}, which is not supported",
+				magic[magic.len() - 1]
+			)));
+		}
+		let mut version = [0u8; 8];
+		if read_up_to(file, &mut version)? < version.len() {
+			return Err(PersistenceError::Corrupted(
+				"the snapshot's header is cut short".to_owned(),
+			));
+		}
+		Ok(Some(u64::from_le_bytes(version)))
+	}
+
 	/// Replays the append-only log into the datastore.
 	///
 	/// A transaction is applied only once its whole frame has been read and its
@@ -1116,6 +1179,9 @@ impl Persistence {
 	/// replays as though that transaction never committed. Replay stops at the
 	/// first damaged frame; the returned [`AolReplay`] says where the valid
 	/// part of the file ends, so that the damage can be cut away.
+	///
+	/// A record at or below `covered`, the version the loaded snapshot covers,
+	/// is already in the snapshot and is not applied.
 	///
 	/// What a power loss leaves of writes that were never synced need not be
 	/// a prefix of them: pages are written back in any order, so a lost page
@@ -1127,6 +1193,7 @@ impl Persistence {
 	fn replay_aol(
 		&self,
 		inner: &Inner,
+		covered: Option<u64>,
 		max_version: &mut u64,
 	) -> Result<AolReplay, PersistenceError> {
 		let mut replay = AolReplay {
@@ -1171,7 +1238,7 @@ impl Persistence {
 			// Detect any end of file errors
 			match result {
 				Ok((k, version, val)) => {
-					Self::apply_aol_entry(inner, k, version, val, max_version);
+					Self::apply_aol_entry(inner, k, version, val, covered, max_version);
 					replay.valid_len = reader.position;
 				}
 				Err(e) => match e {
@@ -1212,8 +1279,8 @@ impl Persistence {
 		let mut entries: Vec<AolEntry> = Vec::new();
 		loop {
 			match read_frame(&mut reader, file_len, format, &mut payload)? {
-				// The log ends cleanly after the last frame, or part-way through
-				// one, which is a torn tail
+				// The log ends cleanly after the last frame, or part-way
+				// through one, which is a torn tail
 				FrameRead::End | FrameRead::Incomplete => break,
 				// A damaged frame is a torn tail unless the log was synced
 				// past it
@@ -1246,7 +1313,7 @@ impl Persistence {
 						entries.push(entry);
 					}
 					for (k, version, val) in entries.drain(..) {
-						Self::apply_aol_entry(inner, k, version, val, max_version);
+						Self::apply_aol_entry(inner, k, version, val, covered, max_version);
 					}
 					replay.valid_len = reader.position;
 				}
@@ -1255,18 +1322,23 @@ impl Persistence {
 		Ok(replay)
 	}
 
-	/// Applies one record of the append-only log to the datastore
+	/// Applies one record of the append-only log to the datastore, unless it
+	/// is at or below `covered` and so already in the snapshot
 	fn apply_aol_entry(
 		inner: &Inner,
 		k: ByteSlice,
 		version: u64,
 		val: Option<ByteSlice>,
+		covered: Option<u64>,
 		max_version: &mut u64,
 	) {
 		// Count the version towards the clock seed. The append-only log is
 		// not version-ordered (async appends race), so the maximum must be
 		// tracked over every record, not taken from the last.
 		*max_version = (*max_version).max(version);
+		if covered.is_some_and(|covered| version <= covered) {
+			return;
+		}
 		inner.memory_tracker.add(
 			1,
 			i64::try_from(k.len() + val.as_ref().map_or(0, ByteSlice::len)).unwrap_or(i64::MAX),
@@ -1751,19 +1823,22 @@ impl Persistence {
 											append_frames(&mut file, &mut scratch, &synced_len)?;
 										// Handle fsync based on mode
 										match fsync_mode {
-											// Let the operating system handle syncing to disk
+											// Let the operating system handle
+											// syncing to disk
 											FsyncMode::Never => {
 												// No fsync, just increment the
 												// pending counter
 												pending_syncs.fetch_add(1, Ordering::Release);
 											}
-											// Sync immediately to disk after every append
+											// Sync immediately to disk after
+											// every append
 											FsyncMode::EveryAppend => {
 												// Sync immediately
 												file.sync_all()?;
 												synced_len.store(end, Ordering::Relaxed);
 											}
-											// Force sync to disk at a specified interval
+											// Force sync to disk at a specified
+											// interval
 											FsyncMode::Interval(duration) => {
 												// Check if we should sync based
 												// on time
