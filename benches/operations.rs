@@ -468,7 +468,7 @@ fn bench_concurrent_readers(c: &mut Criterion) {
 									let mut tx = db.transaction(false);
 									let mut results = Vec::new();
 									for key in keys {
-										results.push(tx.get(key.clone()).unwrap());
+										results.push(tx.get(key).unwrap());
 									}
 									tx.cancel().unwrap();
 									results

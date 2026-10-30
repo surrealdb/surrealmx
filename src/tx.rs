@@ -4076,7 +4076,7 @@ mod tests {
 					let key = format!("thread_{thread_id}_key_{i}");
 					let value = format!("thread_{thread_id}_value_{i}");
 
-					tx.set(key.clone(), value.clone()).unwrap();
+					tx.set(key, value).unwrap();
 
 					// Try to commit - this will exercise atomic_commit
 					// We don't verify reads here because in MVCC, a new read
@@ -4669,7 +4669,7 @@ mod tests {
 			let expected_value = format!("value_{i:08}").into_bytes();
 
 			let mut tx = db.transaction(false);
-			let result = tx.get(key.clone());
+			let result = tx.get(key);
 			assert!(result.is_ok(), "Failed to get key at index {i}: {result:?}");
 			let value = result.unwrap();
 			assert!(
@@ -4717,7 +4717,7 @@ mod tests {
 				for i in 0..keys {
 					let key = format!("key_{i:08}").into_bytes();
 					let mut tx = db.transaction(false);
-					let result = tx.get(key.clone());
+					let result = tx.get(key);
 					assert!(
 						result.is_ok(),
 						"Thread {thread_id} failed to get key at index {i}: {result:?}",
@@ -4855,7 +4855,7 @@ mod tests {
 
 			// After both complete, a fresh read MUST see the value
 			let mut tx = db.transaction(false);
-			let result = tx.get(key.clone()).unwrap();
+			let result = tx.get(key).unwrap();
 			tx.cancel().unwrap();
 			assert!(
 				result.is_some(),
@@ -4940,7 +4940,7 @@ mod tests {
 				let expected_value = format!("thread_{thread_id}_value_{op_id}").into_bytes();
 
 				let mut tx = db.transaction(false);
-				let result = tx.get(key.clone()).unwrap();
+				let result = tx.get(key).unwrap();
 				tx.cancel().unwrap();
 
 				assert!(
