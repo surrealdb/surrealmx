@@ -1212,8 +1212,8 @@ impl Persistence {
 		let mut entries: Vec<AolEntry> = Vec::new();
 		loop {
 			match read_frame(&mut reader, file_len, format, &mut payload)? {
-				// The log ends cleanly after the last frame, or part-way through
-				// one, which is a torn tail
+				// The log ends cleanly after the last frame, or part-way
+				// through one, which is a torn tail
 				FrameRead::End | FrameRead::Incomplete => break,
 				// A damaged frame is a torn tail unless the log was synced
 				// past it
@@ -1751,19 +1751,22 @@ impl Persistence {
 											append_frames(&mut file, &mut scratch, &synced_len)?;
 										// Handle fsync based on mode
 										match fsync_mode {
-											// Let the operating system handle syncing to disk
+											// Let the operating system handle
+											// syncing to disk
 											FsyncMode::Never => {
 												// No fsync, just increment the
 												// pending counter
 												pending_syncs.fetch_add(1, Ordering::Release);
 											}
-											// Sync immediately to disk after every append
+											// Sync immediately to disk after
+											// every append
 											FsyncMode::EveryAppend => {
 												// Sync immediately
 												file.sync_all()?;
 												synced_len.store(end, Ordering::Relaxed);
 											}
-											// Force sync to disk at a specified interval
+											// Force sync to disk at a specified
+											// interval
 											FsyncMode::Interval(duration) => {
 												// Check if we should sync based
 												// on time
