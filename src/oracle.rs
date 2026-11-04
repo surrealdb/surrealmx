@@ -20,10 +20,13 @@ use std::sync::Arc;
 
 /// A monotonic logical clock minting merge versions.
 ///
-/// Merge versions are claimed from `alloc`, a dense allocation counter,
-/// and published to `timestamp` opportunistically once the claimed
-/// version's merge-queue entry has been inserted. The two counters must
-/// be separate: claiming by merge-queue slot insertion alone is unsound,
+/// A merge version is the sequence number of the commit ring slot its
+/// commit claims (`Inner::commit_ring`), so versions are dense and unique, and
+/// follow the order of the slots that validation serialises commits in.
+/// Every claimed slot publishes exactly one merge at its version, empty if
+/// its transaction aborts. Versions are published to `timestamp`
+/// opportunistically once the claimed version's merge-queue entry has been
+/// inserted. Claiming by merge-queue slot insertion alone would be unsound,
 /// because a committer removes its merge entry once applied, and a slow
 /// concurrent committer that loaded the clock before the publish could
 /// then re-claim the vacated slot — minting the same version twice and
@@ -45,12 +48,10 @@ use std::sync::Arc;
 /// applied): `timestamp` only ever crosses a version once its entry is in the
 /// merge queue, and merge entries are never removed before the clock has
 /// already passed them (see `Inner::merge_retire_id`). On persistent databases
-/// both counters are seeded at load time with the maximum version found across
-/// the snapshot file and the append-only log, so newly minted versions always
-/// continue strictly above every persisted version.
+/// the clock and the commit ring are seeded at load time with the maximum
+/// version found across the snapshot file and the append-only log, so newly
+/// minted versions always continue strictly above every persisted version.
 pub(crate) struct Oracle {
-	/// The merge version allocation counter
-	pub(crate) alloc: CachePadded<AtomicU64>,
 	/// The latest published merge version
 	pub(crate) timestamp: CachePadded<AtomicU64>,
 }
@@ -59,7 +60,6 @@ impl Oracle {
 	/// Creates a new logical clock starting at version zero
 	pub fn new() -> Arc<Self> {
 		Arc::new(Self {
-			alloc: CachePadded::new(AtomicU64::new(0)),
 			timestamp: CachePadded::new(AtomicU64::new(0)),
 		})
 	}

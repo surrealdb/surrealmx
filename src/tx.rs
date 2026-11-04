@@ -874,8 +874,11 @@ impl TransactionInner {
 		// value-bearing writeset by the whole cleanup window.
 		let keys: Arc<[ByteSlice]> = writeset.keys().cloned().collect();
 		// Insert this transaction into the commit queue with an adaptive
-		// writeset filter
-		let (commit_slot, commit_entry) = self.atomic_commit(Commit::new(keys));
+		// writeset filter. The slot number is also the merge version: it
+		// is claimed together with the slot, so versions follow the slot
+		// order that validation serialises commits in, and a commit cannot
+		// become visible, nor be acknowledged, before an earlier commit is.
+		let (version, commit_entry) = self.atomic_commit(Commit::new(keys));
 		// Unwind guard: if this transaction panics after publishing its
 		// commit slot, mark the entry aborted and advance the completed
 		// watermark, so an abandoned in-flight entry can never wedge the
@@ -893,11 +896,26 @@ impl TransactionInner {
 				}
 			},
 		};
+		// Unwind guard for the claimed but unpublished version: the merge
+		// clock only advances through inserted entries, so a version that
+		// is never inserted would wedge every later commit. Publish an
+		// empty merge in its place, which makes nothing visible. Declared
+		// after the guard above, it runs before it, so the entry is only
+		// aborted once the version has been published.
+		let mut claim_guard = OnUnwind {
+			armed: true,
+			action: {
+				let database = Arc::clone(&self.database);
+				move || Self::publish_empty_merge(&database, version)
+			},
+		};
 		// Check wether we should check reads conflicts on commit
 		if self.mode >= IsolationLevel::SnapshotIsolation {
 			// Check if the ring buffer has retired past this transaction's
 			// snapshot
 			if self.commit < self.database.commit_ring.taken() {
+				claim_guard.armed = false;
+				Self::publish_empty_merge(&self.database, version);
 				commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
 				commit_guard.armed = false;
 				self.database.advance_commit_watermark();
@@ -912,7 +930,7 @@ impl TransactionInner {
 			// Retrieve all transactions committed since we began, under one
 			// pin for every slot read
 			let _pin = crate::sync::pin();
-			for s in (self.commit + 1)..commit_slot {
+			for s in (self.commit + 1)..version {
 				let mut spins = 0;
 				let outcome = loop {
 					let read = self
@@ -934,6 +952,8 @@ impl TransactionInner {
 					}
 				};
 				if let Err(e) = outcome {
+					claim_guard.armed = false;
+					Self::publish_empty_merge(&self.database, version);
 					commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
 					commit_guard.armed = false;
 					self.database.advance_commit_watermark();
@@ -960,6 +980,8 @@ impl TransactionInner {
 		// any commit entry, it is retained for as long as a long-lived
 		// transaction pins the cleanup bound.
 		if !has_writes {
+			claim_guard.armed = false;
+			Self::publish_empty_merge(&self.database, version);
 			commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
 			commit_guard.armed = false;
 			self.database.advance_commit_watermark();
@@ -973,29 +995,8 @@ impl TransactionInner {
 			// Continue
 			return Ok(());
 		}
-		// Claim the merge version only after every commit in an earlier slot
-		// has claimed its own or aborted, so that versions, and with them the
-		// order in which commits become visible, follow the slot order that
-		// validation serialises commits in. A commit validates only against
-		// earlier slots: had it claimed a lower version than an earlier slot,
-		// it could become visible, and be acknowledged, while that earlier
-		// commit, which it is ordered after, is not yet visible.
-		self.await_earlier_version_claims(commit_slot);
 		#[cfg(test)]
 		tests::before_version_claim();
-		// Claim this transaction's merge version
-		let version = self.claim_merge_version(&commit_entry);
-		// Unwind guard for the claimed but unpublished version: the merge
-		// clock only advances through inserted entries, so a version that
-		// is never inserted would wedge every later commit. Publish an
-		// empty merge in its place, which makes nothing visible.
-		let mut claim_guard = OnUnwind {
-			armed: true,
-			action: {
-				let database = Arc::clone(&self.database);
-				move || Self::publish_empty_merge(&database, version)
-			},
-		};
 		// Append the transaction to the persistence layer before publishing
 		// it, so no reader can observe a commit which a crash could still
 		// lose. Every lower version is published only once it has been
@@ -2627,58 +2628,25 @@ impl TransactionInner {
 	fn atomic_commit(&self, mut updates: Commit) -> (u64, Arc<Commit>) {
 		let slot = self.database.commit_ring.claim();
 		updates.seq = slot;
+		updates.claim_version(slot);
 		let updates = Arc::new(updates);
 		self.database.commit_ring.publish(slot, Arc::clone(&updates));
 		self.database.commit_ring.advance_published();
 		(slot, updates)
 	}
 
-	/// Claims a unique merge version from the allocation counter for the
-	/// transaction whose commit entry is `commit`, recording the claim on
-	/// the entry. The counter only ever increments, so a claim is always
-	/// unique and no collision retry is needed.
-	///
-	/// The merge clock cannot advance past the claimed version until it is
-	/// published with `publish_merge` or `publish_empty_merge`, so every
-	/// claim must be followed by exactly one of them.
-	#[inline(always)]
-	fn claim_merge_version(&self, commit: &Commit) -> u64 {
-		let version = self.database.oracle.alloc.fetch_add(1, Ordering::SeqCst) + 1;
-		commit.claim_version(version);
-		version
-	}
-
-	/// Waits until every commit in a slot before `commit_slot` has claimed
-	/// its merge version, published it, or aborted. Each of them claims
-	/// its version without waiting for any later slot, so the wait is
-	/// bounded by the validation of the commits ahead of this one.
-	fn await_earlier_version_claims(&self, commit_slot: u64) {
-		let ring = &self.database.commit_ring;
-		// Entries at or below the completed prefix have published or aborted
-		let _pin = crate::sync::pin();
-		for s in (ring.completed() + 1)..commit_slot {
-			let mut spins = 0;
-			loop {
-				match ring.read(s, |tx| tx.has_claimed_version()) {
-					// An entry that is gone was complete before its slot was
-					// released or reused
-					SlotRead::Ready(true) | SlotRead::Gone => break,
-					// Claimed but not yet published, or still validating
-					SlotRead::Ready(false) | SlotRead::Pending => {
-						backoff(spins);
-						spins += 1;
-					}
-				}
-			}
-		}
-	}
-
 	/// Publishes an empty merge at a claimed version whose writes will
 	/// never be published, so the merge clock can advance past it.
+	///
+	/// Does not wait for the clock to reach the version: nothing is made
+	/// visible, so the caller has nothing to acknowledge, and whichever
+	/// committer inserts the last entry below it carries the clock over it.
 	fn publish_empty_merge(database: &Inner, version: u64) {
-		let entry = Self::publish_merge(database, version, Merge::new(Arc::new(BTreeMap::new())));
-		entry.applied.store(true, Ordering::SeqCst);
-		database.advance_merge_retirement();
+		let mut merge = Merge::new(Arc::new(BTreeMap::new()));
+		merge.version = version;
+		merge.applied.store(true, Ordering::SeqCst);
+		database.transaction_merge_queue.insert(Arc::new(merge));
+		database.refresh_merge_watermark();
 	}
 
 	/// Atomically inserts the transaction into the merge queue at its
@@ -2761,8 +2729,8 @@ mod tests {
 	use std::thread;
 
 	thread_local! {
-		/// Run by a committer on this thread once it may claim its merge
-		/// version, right before it does.
+		/// Run by a committer on this thread once it has validated, right
+		/// before it appends and publishes its merge.
 		static BEFORE_VERSION_CLAIM: RefCell<Option<Box<dyn FnMut()>>> = RefCell::new(None);
 	}
 
@@ -2776,7 +2744,7 @@ mod tests {
 	}
 
 	/// C claims a commit slot, reading `x` and writing `y`, and is held
-	/// before it claims its merge version. A then commits a write to `x` in
+	/// before it publishes its merge. A then commits a write to `x` in
 	/// a later slot. Validation orders C before A, as C read `x` without
 	/// A's write, so A must not become visible, nor be acknowledged, before
 	/// C is visible: a reader would otherwise see A's write without C's.
@@ -2825,6 +2793,80 @@ mod tests {
 		// Both are visible once both are acknowledged
 		let reader = db.transaction(false);
 		assert!(reader.get("x").unwrap().is_some() && reader.get("y").unwrap().is_some());
+	}
+
+	/// An aborted commit still holds its version, which it publishes as an
+	/// empty merge, so the commits above it become visible.
+	#[test]
+	fn an_aborted_commit_does_not_stall_later_commits() {
+		use std::sync::atomic::Ordering;
+
+		let db = Database::new();
+		let mut first = db.transaction(true);
+		let mut loser = db.transaction(true);
+		first.set("k", "first").unwrap();
+		loser.set("k", "loser").unwrap();
+		first.commit().unwrap();
+		// Claims the slot, and so the version, between two valid commits
+		assert!(loser.commit().is_err());
+		let mut last = db.transaction(true);
+		last.set("other", "last").unwrap();
+		last.commit().unwrap();
+		let reader = db.transaction(false);
+		assert_eq!(reader.get("k").unwrap().as_deref(), Some(b"first" as &[u8]));
+		assert_eq!(reader.get("other").unwrap().as_deref(), Some(b"last" as &[u8]));
+		// Every claimed version, the aborted one included, is published
+		let claimed = db.commit_ring.claimed();
+		assert_eq!(claimed, 3);
+		assert_eq!(db.oracle.timestamp.load(Ordering::SeqCst), claimed);
+	}
+
+	/// Commits that conflict with each other, and commits that abort, are
+	/// interleaved with disjoint ones across threads: every claimed version
+	/// is published, and every acknowledged commit is visible.
+	#[test]
+	fn aborts_and_commits_interleaved_across_threads_publish_every_version() {
+		use std::sync::atomic::Ordering;
+
+		let (threads, rounds) = if cfg!(miri) {
+			(3, 5)
+		} else {
+			(8, 500)
+		};
+		let db = Arc::new(Database::new());
+		let handles: Vec<_> = (0..threads)
+			.map(|t| {
+				let db = Arc::clone(&db);
+				thread::spawn(move || {
+					let mut committed = Vec::new();
+					for i in 0..rounds {
+						let mut tx = db.transaction(true);
+						// Half of the writes hit one hot key, so they conflict
+						let key = if i % 2 == 0 {
+							"hot".to_string()
+						} else {
+							format!("k_{t}_{i}")
+						};
+						assert!(tx.get(key.as_str()).unwrap().is_none() || key == "hot");
+						tx.set(key.as_str(), "v").unwrap();
+						if tx.commit().is_ok() {
+							committed.push(key);
+						}
+					}
+					committed
+				})
+			})
+			.collect();
+		let committed: Vec<String> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+		// A commit that errors, and one that succeeds, both claimed a version
+		let claimed = db.commit_ring.claimed();
+		assert!(claimed >= committed.len() as u64);
+		assert_eq!(db.oracle.timestamp.load(Ordering::SeqCst), claimed);
+		assert_eq!(db.merge_retire_id.load(Ordering::SeqCst), claimed);
+		let reader = db.transaction(false);
+		for key in committed {
+			assert!(reader.get(key.as_str()).unwrap().is_some(), "{key} was acknowledged");
+		}
 	}
 
 	#[test]

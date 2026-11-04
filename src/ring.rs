@@ -108,8 +108,9 @@ pub(crate) struct CommitRing<T> {
 	/// The number of slots, and so the distance between two sequence
 	/// numbers sharing a slot.
 	capacity: u64,
-	/// The first sequence number handed out by this ring.
-	start: u64,
+	/// The first sequence number handed out by this ring. Raised by
+	/// [`CommitRing::reseed`] before the first claim.
+	start: AtomicU64,
 	/// The next sequence number to hand out to a committing transaction.
 	next: CachePadded<AtomicU64>,
 	/// The contiguous published prefix bound.
@@ -139,7 +140,7 @@ impl<T: RingEntry + Send + Sync + 'static> CommitRing<T> {
 			slots,
 			mask: capacity as u64 - 1,
 			capacity: capacity as u64,
-			start,
+			start: AtomicU64::new(start),
 			next: CachePadded::new(AtomicU64::new(start)),
 			published: CachePadded::new(AtomicU64::new(start - 1)),
 			completed: CachePadded::new(AtomicU64::new(start - 1)),
@@ -151,6 +152,25 @@ impl<T: RingEntry + Send + Sync + 'static> CommitRing<T> {
 	#[inline(always)]
 	pub(crate) fn claim(&self) -> u64 {
 		self.next.fetch_add(1, Ordering::Relaxed)
+	}
+
+	/// The highest sequence number claimed so far, or one below the first
+	/// sequence number if none has been.
+	#[inline]
+	pub(crate) fn claimed(&self) -> u64 {
+		self.next.load(Ordering::SeqCst) - 1
+	}
+
+	/// Continues the sequence strictly above `seq`, which a ring that has
+	/// handed out nothing yet takes as already claimed, published, completed
+	/// and retired. Must run before the first claim.
+	#[cfg(any(test, not(target_arch = "wasm32")))]
+	pub(crate) fn reseed(&self, seq: u64) {
+		self.start.fetch_max(seq + 1, Ordering::SeqCst);
+		self.next.fetch_max(seq + 1, Ordering::SeqCst);
+		self.published.fetch_max(seq, Ordering::SeqCst);
+		self.completed.fetch_max(seq, Ordering::SeqCst);
+		self.taken.fetch_max(seq, Ordering::SeqCst);
 	}
 
 	/// Accesses the slot for the given sequence number in O(1).
@@ -169,7 +189,8 @@ impl<T: RingEntry + Send + Sync + 'static> CommitRing<T> {
 		debug_assert_eq!(entry.seq(), seq);
 		let slot = self.slot(seq);
 		// The sequence number this slot held one lap earlier, if any
-		let previous = seq.checked_sub(self.capacity).filter(|p| *p >= self.start);
+		let start = self.start.load(Ordering::Relaxed);
+		let previous = seq.checked_sub(self.capacity).filter(|p| *p >= start);
 		let mut spins = 0;
 		loop {
 			let guard = slot.writer.write();
@@ -409,6 +430,25 @@ mod tests {
 		} else {
 			50
 		}));
+	}
+
+	#[test]
+	fn a_reseeded_ring_continues_above_the_seed_across_laps() {
+		let ring = CommitRing::<Entry>::new(4, 1);
+		ring.reseed(1_000);
+		assert_eq!(ring.claimed(), 1_000);
+		assert_eq!(ring.published(), 1_000);
+		assert_eq!(ring.completed(), 1_000);
+		// More than two laps, each overwriting a complete occupant
+		for expected in 1_001..1_013 {
+			let seq = ring.claim();
+			assert_eq!(seq, expected);
+			ring.publish(seq, entry(seq, true));
+			advance(&ring);
+			assert_eq!(seq_of(ring.get(seq)), Some(seq));
+		}
+		assert_eq!(ring.claimed(), 1_012);
+		assert_eq!(ring.completed(), 1_012);
 	}
 
 	#[test]
