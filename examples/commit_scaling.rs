@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use surrealmx::Database;
 
 #[allow(clippy::cast_precision_loss, reason = "a throughput figure for display")]
-
 fn run(threads: usize, duration: Duration) -> f64 {
 	let db = Arc::new(Database::new());
 	let barrier = Arc::new(Barrier::new(threads + 1));

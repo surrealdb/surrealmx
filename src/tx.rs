@@ -2857,8 +2857,7 @@ mod tests {
 				})
 			})
 			.collect();
-		let committed: Vec<String> =
-			handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+		let committed: Vec<String> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
 		// A commit that errors, and one that succeeds, both claimed a version
 		let claimed = db.commit_ring.claimed();
 		assert!(claimed >= committed.len() as u64);

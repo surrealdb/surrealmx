@@ -164,6 +164,7 @@ impl<T: RingEntry + Send + Sync + 'static> CommitRing<T> {
 	/// Continues the sequence strictly above `seq`, which a ring that has
 	/// handed out nothing yet takes as already claimed, published, completed
 	/// and retired. Must run before the first claim.
+	#[cfg(any(test, not(target_arch = "wasm32")))]
 	pub(crate) fn reseed(&self, seq: u64) {
 		self.start.fetch_max(seq + 1, Ordering::SeqCst);
 		self.next.fetch_max(seq + 1, Ordering::SeqCst);

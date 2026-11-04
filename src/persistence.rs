@@ -1227,10 +1227,10 @@ impl Persistence {
 		// Seed the logical clock so newly minted merge versions continue
 		// strictly above every persisted version. Both the commit ring, whose
 		// slot numbers are the merge versions, and the published clock are
-		// seeded: the next claim takes max_version + 1, and its in-order publication advances
-		// the clock from max_version. The merge retirement watermark is
-		// seeded identically so its in-order advance starts at the first
-		// live merge version rather than walking the persisted range.
+		// seeded: the next claim takes max_version + 1, and its in-order
+		// publication advances the clock from max_version. The merge retirement
+		// watermark is seeded identically so its in-order advance starts at the
+		// first live merge version rather than walking the persisted range.
 		// This runs before any transaction or background worker exists;
 		// fetch_max is used for safety under refactoring rather than
 		// necessity.
