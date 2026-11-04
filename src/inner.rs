@@ -382,7 +382,7 @@ impl Inner {
 	/// currently possible, through consecutive claimed versions whose
 	/// merge-queue entries have been inserted.
 	pub(crate) fn try_advance_merge_clock(&self) {
-		let max_claimed = self.oracle.alloc.load(Ordering::SeqCst);
+		let max_claimed = self.commit_ring.claimed();
 		let cur = self.oracle.timestamp.load(Ordering::SeqCst);
 		let mut target = cur;
 		while target < max_claimed && self.transaction_merge_queue.contains(target + 1) {

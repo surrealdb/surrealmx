@@ -1786,7 +1786,7 @@ mod tests {
 		// opportunistic retirement walk cross an astronomical gap one
 		// step at a time.
 		let seed = 1_700_000_000_000_000_000u64;
-		db.oracle.alloc.store(seed, std::sync::atomic::Ordering::SeqCst);
+		db.commit_ring.reseed(seed);
 		db.oracle.timestamp.store(seed, std::sync::atomic::Ordering::SeqCst);
 		db.merge_retire_id.store(seed, std::sync::atomic::Ordering::SeqCst);
 		let mut tx = db.transaction(true);
@@ -2401,7 +2401,7 @@ mod tests {
 		assert!(matches!(err, Error::TxCommitNotPersisted(_)), "{err}");
 		// The write reached neither the datastore nor the merge queue
 		assert!(db.inner.datastore.get(b"key".as_slice()).is_none());
-		let version = db.inner.oracle.alloc.load(Ordering::SeqCst);
+		let version = db.inner.commit_ring.claimed();
 		let published = db
 			.inner
 			.transaction_merge_queue

@@ -185,17 +185,10 @@ impl Commit {
 	}
 
 	/// Records that the owning transaction claimed merge `version`, which
-	/// it has not published yet.
+	/// it has not published yet. The version is the commit's slot number.
 	#[inline]
 	pub(crate) fn claim_version(&self, version: u64) {
 		self.merge_version.store(version | VERSION_CLAIMED, Ordering::SeqCst);
-	}
-
-	/// Whether this commit will claim no merge version after the caller's:
-	/// it claimed one already, published it, or aborted.
-	#[inline]
-	pub(crate) fn has_claimed_version(&self) -> bool {
-		self.merge_version.load(Ordering::SeqCst) != 0
 	}
 
 	/// The smallest key in the writeset (for range overlap checks)

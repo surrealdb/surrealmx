@@ -1017,7 +1017,7 @@ impl Persistence {
 		} else {
 			0
 		};
-		let claimed = inner.oracle.alloc.load(Ordering::SeqCst);
+		let claimed = inner.commit_ring.claimed();
 		// A claimed version is always published and marked applied, by an
 		// empty merge if its transaction fails to reach the AOL, so this wait
 		// ends
@@ -1225,16 +1225,16 @@ impl Persistence {
 		// on follows the last valid one rather than the damaged bytes
 		self.repair_aol(&replay)?;
 		// Seed the logical clock so newly minted merge versions continue
-		// strictly above every persisted version. Both the allocation
-		// counter and the published clock are seeded: the next claim
-		// takes max_version + 1, and its in-order publication advances
+		// strictly above every persisted version. Both the commit ring, whose
+		// slot numbers are the merge versions, and the published clock are
+		// seeded: the next claim takes max_version + 1, and its in-order publication advances
 		// the clock from max_version. The merge retirement watermark is
 		// seeded identically so its in-order advance starts at the first
 		// live merge version rather than walking the persisted range.
 		// This runs before any transaction or background worker exists;
 		// fetch_max is used for safety under refactoring rather than
 		// necessity.
-		inner.oracle.alloc.fetch_max(max_version, Ordering::SeqCst);
+		inner.commit_ring.reseed(max_version);
 		inner.oracle.timestamp.fetch_max(max_version, Ordering::SeqCst);
 		inner.merge_retire_id.fetch_max(max_version, Ordering::SeqCst);
 		// Collapse the multi-version chains that append-only-log replay
