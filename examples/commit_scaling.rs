@@ -4,7 +4,8 @@
 //! Each thread count runs for a fixed time, so a pathological build cannot
 //! hold the machine for long.
 //!
-//! Run with `cargo run --release --example commit_scaling -- [seconds] [threads...]`.
+//! Run with `cargo run --release --example commit_scaling -- [seconds]
+//! [threads...]`.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
