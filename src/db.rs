@@ -22,7 +22,7 @@ use crate::options::DatabaseOptions;
 use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::persistence::Persistence;
-use crate::pool::Pool;
+use crate::pool::Pools;
 use crate::pool::DEFAULT_POOL_SIZE;
 use crate::stats::DatabaseStats;
 use crate::thread_slot::ThreadSnapshot;
@@ -43,7 +43,7 @@ pub struct Database {
 	/// The inner structure of the database
 	inner: Arc<Inner>,
 	/// The database transaction pool
-	pool: Arc<Pool>,
+	pool: Pools,
 	/// Optional persistence configuration
 	#[cfg(not(target_arch = "wasm32"))]
 	persistence: Option<Persistence>,
@@ -58,7 +58,7 @@ pub struct Database {
 impl Default for Database {
 	fn default() -> Self {
 		let inner = Arc::new(Inner::default());
-		let pool = Pool::new(Arc::clone(&inner), DEFAULT_POOL_SIZE);
+		let pool = Pools::new(&inner, DEFAULT_POOL_SIZE);
 		Self {
 			inner,
 			pool,
@@ -97,7 +97,7 @@ impl Database {
 		//  Create a new inner database
 		let inner = Arc::new(Inner::new(&opts));
 		// Initialise a transaction pool
-		let pool = Pool::new(Arc::clone(&inner), opts.pool_size);
+		let pool = Pools::new(&inner, opts.pool_size);
 		// Create the database
 		let db = Self {
 			inner,
@@ -133,7 +133,7 @@ impl Database {
 		//  Create a new inner database
 		let inner = Arc::new(Inner::new(&opts));
 		// Initialise a transaction pool
-		let pool = Pool::new(Arc::clone(&inner), opts.pool_size);
+		let pool = Pools::new(&inner, opts.pool_size);
 		// Create a new persistence layer with options
 		let persist = Persistence::new_with_options(persistence_opts, &inner)
 			.map_err(std::io::Error::other)?;
