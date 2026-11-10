@@ -888,7 +888,7 @@ impl TransactionInner {
 		let mut commit_guard = OnUnwind {
 			armed: true,
 			action: {
-				let database = Arc::clone(&self.database);
+				let database: &Inner = &self.database;
 				let entry = Arc::clone(&commit_entry);
 				move || {
 					entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
@@ -905,8 +905,8 @@ impl TransactionInner {
 		let mut claim_guard = OnUnwind {
 			armed: true,
 			action: {
-				let database = Arc::clone(&self.database);
-				move || Self::publish_empty_merge(&database, version)
+				let database: &Inner = &self.database;
+				move || Self::publish_empty_merge(database, version)
 			},
 		};
 		// Check wether we should check reads conflicts on commit
@@ -1051,7 +1051,7 @@ impl TransactionInner {
 		let mut merge_guard = OnUnwind {
 			armed: true,
 			action: {
-				let database = Arc::clone(&self.database);
+				let database: &Inner = &self.database;
 				let entry = Arc::clone(&entry);
 				move || {
 					if std::thread::panicking() {
@@ -2656,7 +2656,7 @@ impl TransactionInner {
 		// Store the number of spins
 		let mut spins = 0;
 		// Get the database logical clock
-		let oracle = Arc::clone(&database.oracle);
+		let oracle = &database.oracle;
 		updates.version = version;
 		let updates = Arc::new(updates);
 		// Insert the merge entry at the claimed version, where the clock
