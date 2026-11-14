@@ -56,7 +56,6 @@ impl Versions {
 	}
 
 	/// Returns a borrowed slice of all versions in sorted order.
-	#[cfg(test)]
 	pub(crate) fn as_slice(&self) -> &[Version] {
 		match self {
 			Self::Empty => &[],
@@ -162,6 +161,14 @@ impl Versions {
 
 	/// Find the index of the entry where item.version <= version.
 	#[inline]
+	/// The oldest version in the chain above `after` and at or below
+	/// `upto`, if there is one.
+	pub(crate) fn first_version_in(&self, after: u64, upto: u64) -> Option<u64> {
+		let versions = self.as_slice();
+		let index = versions.partition_point(|v| v.version <= after);
+		versions.get(index).map(|v| v.version).filter(|&v| v <= upto)
+	}
+
 	pub(crate) fn find_index_lte_version(&self, version: u64) -> usize {
 		match self {
 			Self::Empty => 0,

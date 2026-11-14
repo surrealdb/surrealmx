@@ -928,9 +928,46 @@ impl TransactionInner {
 			}
 
 			// Retrieve all transactions committed since we began, under one
-			// pin for every slot read
+			// pin for every slot and chain read
 			let _pin = crate::sync::pin();
-			for s in (self.commit + 1)..version {
+			// A commit at or below the snapshot's version is visible to this
+			// transaction, or aborted: its slot is its version, and the clock
+			// passed it in order. It is not concurrent with this transaction.
+			let start = self.version.max(self.commit);
+			// Every commit at or below the retired merge watermark is wholly
+			// applied to the version chains: its entry is marked applied only
+			// once every write is in its chain, and retirement passes applied
+			// entries only. Those commits are checked through the chains of the
+			// keys this transaction wrote and locked, which costs one lookup
+			// per key however many commits ran since it began. The slots
+			// above the watermark, whose writes may be in flight, are
+			// walked. The plain reads and scans a serializable writer
+			// validates are checked against each commit's keys, so such a
+			// transaction walks every slot.
+			let retired = self.database.merge_retire_id.load(Ordering::SeqCst);
+			let walks_reads =
+				has_writes && self.mode >= IsolationLevel::SerializableSnapshotIsolation;
+			let applied = if walks_reads {
+				start
+			} else {
+				retired.clamp(start, version - 1)
+			};
+			if applied > start {
+				if let Some(e) = self.conflict_in_chains(&writeset, has_writes, start, applied) {
+					claim_guard.armed = false;
+					Self::publish_empty_merge(&self.database, version);
+					commit_entry.merge_version.store(COMMIT_ABORTED, Ordering::SeqCst);
+					commit_guard.armed = false;
+					self.database.advance_commit_watermark();
+					self.database.readers.unpin(self.slot);
+					self.clear_read_state();
+					self.writeset.clear();
+					self.savepoint_stack.clear();
+					self.undo_journal.clear();
+					return Err(e);
+				}
+			}
+			for s in (applied + 1)..version {
 				let mut spins = 0;
 				let outcome = loop {
 					let read = self
@@ -2560,6 +2597,42 @@ impl TransactionInner {
 
 	/// Validate this committing transaction against one concurrent commit
 	/// from its conflict window.
+	/// The conflict, if any, of this transaction with the commits whose
+	/// versions lie above `after` and at or below `upto`, every one of them
+	/// wholly applied to the version chains: as the walk of their slots in
+	/// [`Self::check_concurrent_commit`] answers it for the earliest of them
+	/// that conflicts, a write before a locked read.
+	fn conflict_in_chains(
+		&self,
+		writeset: &BTreeMap<ByteSlice, Option<ByteSlice>>,
+		has_writes: bool,
+		after: u64,
+		upto: u64,
+	) -> Option<Error> {
+		let first = |key: &ByteSlice| {
+			self.database
+				.datastore
+				.get(key)
+				.and_then(|e| e.value().read(|v| v.first_version_in(after, upto)))
+		};
+		let written = if has_writes {
+			writeset.keys().filter_map(first).min()
+		} else {
+			None
+		};
+		let locked = if self.locked {
+			self.lockset.pin().iter().filter_map(first).min()
+		} else {
+			None
+		};
+		match (written, locked) {
+			(Some(w), Some(l)) if l < w => Some(Error::KeyReadConflict),
+			(Some(_), _) => Some(Error::KeyWriteConflict),
+			(None, Some(_)) => Some(Error::KeyReadConflict),
+			(None, None) => None,
+		}
+	}
+
 	fn check_concurrent_commit(
 		&self,
 		tx: &Arc<Commit>,
