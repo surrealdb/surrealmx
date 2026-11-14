@@ -115,7 +115,7 @@ fn snapshot_isolation_loses_no_append() {
 		let tx = db.transaction(false);
 		for key in 0..KEYS {
 			let list = decode(tx.get(key_name(key)).expect("a read succeeds"));
-			let appends = committed.get(&key).map(Vec::as_slice).unwrap_or_default();
+			let appends = committed.get(&key).map_or(&[][..], Vec::as_slice);
 			assert_eq!(
 				list.len(),
 				appends.len(),

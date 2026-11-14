@@ -1,2 +1,0 @@
-target: x86_64, ext: false
-cargo:rustc-check-cfg=cfg(nightly)
