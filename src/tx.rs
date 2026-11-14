@@ -938,11 +938,12 @@ impl TransactionInner {
 			// applied to the version chains: its entry is marked applied only
 			// once every write is in its chain, and retirement passes applied
 			// entries only. Those commits are checked through the chains of the
-			// keys this transaction wrote and locked, which costs one lookup per
-			// key however many commits ran since it began. The slots above the
-			// watermark, whose writes may be in flight, are walked. The plain
-			// reads and scans a serializable writer validates are checked
-			// against each commit's keys, so such a transaction walks every slot.
+			// keys this transaction wrote and locked, which costs one lookup
+			// per key however many commits ran since it began. The slots
+			// above the watermark, whose writes may be in flight, are
+			// walked. The plain reads and scans a serializable writer
+			// validates are checked against each commit's keys, so such a
+			// transaction walks every slot.
 			let retired = self.database.merge_retire_id.load(Ordering::SeqCst);
 			let walks_reads =
 				has_writes && self.mode >= IsolationLevel::SerializableSnapshotIsolation;
@@ -4024,9 +4025,9 @@ mod tests {
 		assert_eq!(res[2].0.as_ref(), b"c"); // Local overwrite
 		assert_eq!(res[2].1.as_ref(), b"30");
 		assert_eq!(res[3].0.as_ref(), b"d"); // Local new
-		                               // "e" is deleted locally, so not
-		                               // in
-		                               // results
+		                                     // "e" is deleted locally, so not
+		                                     // in
+		                                     // results
 	}
 
 	#[test]
@@ -4197,7 +4198,7 @@ mod tests {
 					// transaction might not see recent
 					// commits depending on its snapshot
 					let _ = tx.commit(); // Success or conflict, both are fine
-						  // for this test
+										 // for this test
 
 					// Small delay to vary timing
 					thread::sleep(Duration::from_micros(thread_id as u64));
@@ -4275,7 +4276,7 @@ mod tests {
 		tx.set_savepoint().unwrap();
 		tx.set("level2_key1", "level2_value1").unwrap();
 		tx.set("level1_key1", "modified_at_level2").unwrap(); // Modify existing
-														// key
+															  // key
 
 		// Third nested savepoint
 		tx.set_savepoint().unwrap();

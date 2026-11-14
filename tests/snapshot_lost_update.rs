@@ -1,9 +1,11 @@
-//! Snapshot isolation loses no update: concurrent transactions that read lists and append to them
-//! leave each list holding exactly the appends that committed, each over the list it read.
+//! Snapshot isolation loses no update: concurrent transactions that read lists
+//! and append to them leave each list holding exactly the appends that
+//! committed, each over the list it read.
 //!
-//! The transactions are held open across yields while many others commit, so that most of the
-//! commits a transaction is validated against have already been applied and retired by the time
-//! it commits, as well as some that are still in flight.
+//! The transactions are held open across yields while many others commit, so
+//! that most of the commits a transaction is validated against have already
+//! been applied and retired by the time it commits, as well as some that are
+//! still in flight.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -136,8 +138,8 @@ fn snapshot_isolation_loses_no_append() {
 	}
 }
 
-/// A conflict with a commit that was applied and retired before this one commits is found
-/// through the key's version chain.
+/// A conflict with a commit that was applied and retired before this one
+/// commits is found through the key's version chain.
 #[test]
 fn a_write_conflicts_with_a_retired_commit_to_the_same_key() {
 	let db = Database::new();
@@ -146,7 +148,8 @@ fn a_write_conflicts_with_a_retired_commit_to_the_same_key() {
 	let mut b = db.transaction(true).with_snapshot_isolation();
 	b.set("k", "b").unwrap();
 	b.commit().unwrap();
-	// Later commits to other keys, so the conflicting one is well below the retired watermark.
+	// Later commits to other keys, so the conflicting one is well below the
+	// retired watermark.
 	for i in 0..8 {
 		let mut c = db.transaction(true).with_snapshot_isolation();
 		c.set(format!("other{i}"), "c").unwrap();
@@ -155,7 +158,8 @@ fn a_write_conflicts_with_a_retired_commit_to_the_same_key() {
 	assert!(matches!(a.commit(), Err(Error::KeyWriteConflict)));
 }
 
-/// A key read with `get_for_update` conflicts with a retired commit that wrote it.
+/// A key read with `get_for_update` conflicts with a retired commit that wrote
+/// it.
 #[test]
 fn a_locked_read_conflicts_with_a_retired_commit_to_the_same_key() {
 	let db = Database::new();
